@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"hyperhand/internal/proto"
 )
@@ -46,7 +49,9 @@ func fakeAgent(t *testing.T, conn net.Conn, written *[]byte) {
 		case proto.OpReadFile:
 			var a proto.PathArgs
 			json.Unmarshal(req.Args, &a)
-			if d, ok := fakeFiles[a.Path]; ok {
+			if a.Path == `C:\x.bin` {
+				out = *written
+			} else if d, ok := fakeFiles[a.Path]; ok {
 				out = []byte(d)
 			} else {
 				resp.Error = "no file " + a.Path
@@ -176,5 +181,76 @@ func TestPull(t *testing.T) {
 	}
 	if _, _, err := pull(ctx, c, `C:\missing`, filepath.Join(dir, "m")); err == nil {
 		t.Fatal("missing should fail")
+	}
+}
+
+// A few-MB file pushed and pulled through the streaming path arrives intact.
+func TestPushPullStream(t *testing.T) {
+	var written []byte
+	c := NewClient(func(context.Context) (net.Conn, error) {
+		a, b := net.Pipe()
+		go fakeAgent(t, b, &written)
+		return a, nil
+	})
+	defer c.Close()
+	ctx, dir := context.Background(), t.TempDir()
+	data := make([]byte, 5<<20+123)
+	r := rand.New(rand.NewPCG(1, 2))
+	for i := range data {
+		data[i] = byte(r.Uint32())
+	}
+	src := filepath.Join(dir, "src.bin")
+	if err := os.WriteFile(src, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := pushFile(ctx, c, src, `C:\x.bin`); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(written, data) {
+		t.Fatalf("pushed %d bytes, want %d", len(written), len(data))
+	}
+	dst := filepath.Join(dir, "dst.bin")
+	if err := os.WriteFile(dst, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := pullFile(ctx, c, `C:\x.bin`, dst); err != nil || n != int64(len(data)) {
+		t.Fatalf("pull: %d, %v", n, err)
+	}
+	if got, err := os.ReadFile(dst); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("pulled %d bytes, %v", len(got), err)
+	}
+	if _, err := pullFile(ctx, c, `C:\missing`, filepath.Join(dir, "m.bin")); err == nil {
+		t.Fatal("missing should fail")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "m.bin.hhpart")); !os.IsNotExist(err) {
+		t.Fatalf(".hhpart left behind: %v", err)
+	}
+}
+
+// Canceling ctx while a response payload is being streamed returns promptly.
+func TestCallIOCancel(t *testing.T) {
+	c := NewClient(func(context.Context) (net.Conn, error) {
+		a, b := net.Pipe()
+		go func() {
+			defer b.Close()
+			var req proto.Request
+			if _, err := proto.ReadFrame(b, &req); err != nil {
+				return
+			}
+			// Announce 100 MB, send 1 KB, then stall until the client drops the connection.
+			proto.WriteFrameFrom(b, proto.Response{}, 100<<20, io.MultiReader(bytes.NewReader(make([]byte, 1024)), b))
+		}()
+		return a, nil
+	})
+	defer c.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+	start := time.Now()
+	n, err := c.CallIO(ctx, proto.OpReadFile, proto.PathArgs{Path: `C:\big`}, nil, 0, nil, nil)
+	if err != context.Canceled || n != 1024 {
+		t.Fatalf("err %v, n %d", err, n)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("took %v", d)
 	}
 }
