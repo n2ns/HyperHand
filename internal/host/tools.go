@@ -1,6 +1,7 @@
 package host
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -272,11 +273,11 @@ func NewServer(m *Manager) *mcp.Server {
 			if rel != "." {
 				dst = strings.TrimRight(in.GuestPath, `\/`) + `\` + rel
 			}
-			data, err := os.ReadFile(p)
+			c, err := m.Client(in.VM)
 			if err != nil {
 				return err
 			}
-			if _, err := call(ctx, in.VM, proto.OpWriteFile, proto.PathArgs{Path: dst}, data, nil); err != nil {
+			if err := pushFile(ctx, c, p, dst); err != nil {
 				return fmt.Errorf("%s: %w", dst, err)
 			}
 			n++
@@ -420,15 +421,15 @@ func pullTarget(hostPath, guestPath string) string {
 func pull(ctx context.Context, c *Client, guestPath, hostPath string) (files, size int, err error) {
 	var ls proto.ListDirResult
 	if _, err := c.Call(ctx, proto.OpListDir, proto.PathArgs{Path: guestPath}, nil, &ls); err != nil {
-		data, err := c.Call(ctx, proto.OpReadFile, proto.PathArgs{Path: guestPath}, nil, nil)
-		if err != nil {
-			return 0, 0, fmt.Errorf("%s: %w", guestPath, err)
-		}
 		hostPath = pullTarget(hostPath, guestPath)
 		if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
 			return 0, 0, err
 		}
-		return 1, len(data), os.WriteFile(hostPath, data, 0o644)
+		n, err := pullFile(ctx, c, guestPath, hostPath)
+		if err != nil {
+			return 0, 0, fmt.Errorf("%s: %w", guestPath, err)
+		}
+		return 1, int(n), nil
 	}
 	if err := os.MkdirAll(hostPath, 0o755); err != nil {
 		return 0, 0, err
@@ -439,11 +440,11 @@ func pull(ctx context.Context, c *Client, guestPath, hostPath string) (files, si
 		if e.IsDir {
 			n, b, err = pull(ctx, c, g, h)
 		} else {
-			var data []byte
-			if data, err = c.Call(ctx, proto.OpReadFile, proto.PathArgs{Path: g}, nil, nil); err != nil {
+			var size int64
+			if size, err = pullFile(ctx, c, g, h); err != nil {
 				err = fmt.Errorf("%s: %w", g, err)
-			} else if err = os.WriteFile(h, data, 0o644); err == nil {
-				n, b = 1, len(data)
+			} else {
+				n, b = 1, int(size)
 			}
 		}
 		files, size = files+n, size+b
@@ -452,4 +453,44 @@ func pull(ctx context.Context, c *Client, guestPath, hostPath string) (files, si
 		}
 	}
 	return files, size, nil
+}
+
+// pushFile streams the host file hostPath to guestPath.
+func pushFile(ctx context.Context, c *Client, hostPath, guestPath string) error {
+	f, err := os.Open(hostPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	_, err = c.CallIO(ctx, proto.OpWriteFile, proto.PathArgs{Path: guestPath}, f, fi.Size(), nil, nil)
+	return err
+}
+
+// pullFile streams the guest file guestPath into hostPath + ".hhpart", then renames it over hostPath.
+func pullFile(ctx context.Context, c *Client, guestPath, hostPath string) (int64, error) {
+	part := hostPath + ".hhpart"
+	f, err := os.Create(part)
+	if err != nil {
+		return 0, err
+	}
+	w := bufio.NewWriterSize(f, 1<<20)
+	n, err := c.CallIO(ctx, proto.OpReadFile, proto.PathArgs{Path: guestPath}, nil, 0, w, nil)
+	if err == nil {
+		err = w.Flush()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(part, hostPath)
+	}
+	if err != nil {
+		os.Remove(part)
+		return 0, err
+	}
+	return n, nil
 }

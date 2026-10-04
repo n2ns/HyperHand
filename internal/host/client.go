@@ -2,10 +2,12 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -28,18 +30,41 @@ func NewClient(dial func(context.Context) (net.Conn, error)) *Client { return &C
 
 // Call sends op with args (JSON) and payload, decodes the result into result (if not nil) and returns the response payload.
 func (c *Client) Call(ctx context.Context, op string, args any, payload []byte, result any) ([]byte, error) {
+	var out bytes.Buffer
+	if _, err := c.CallIO(ctx, op, args, bytes.NewReader(payload), int64(len(payload)), &out, result); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+// CallIO is Call with streamed payloads: the request payload is the next srcSize bytes of src (nil when srcSize is 0)
+// and the response payload is copied to dst (nil discards it). It returns the response payload size. A request whose
+// send failed is resent only if src can be rewound (src nil or an io.Seeker).
+func (c *Client) CallIO(ctx context.Context, op string, args any, src io.Reader, srcSize int64, dst io.Writer, result any) (int64, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	req := proto.Request{Op: op}
 	if args != nil {
 		b, err := json.Marshal(args)
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
 		req.Args = b
 	}
+	if dst == nil {
+		dst = io.Discard
+	}
 	var err error
-	for range 2 {
+	for i := range 2 {
+		if i > 0 && src != nil {
+			s, ok := src.(io.Seeker)
+			if !ok {
+				break
+			}
+			if _, serr := s.Seek(0, io.SeekStart); serr != nil {
+				break
+			}
+		}
 		if c.conn != nil && !alive(c.conn) { // e.g. the agent or the VM restarted since the last call
 			c.conn.Close()
 			c.conn = nil
@@ -50,35 +75,35 @@ func (c *Client) Call(ctx context.Context, op string, args any, payload []byte, 
 			cancel()
 			if err != nil {
 				c.conn = nil
-				return nil, fmt.Errorf("connect to agent: %w", err)
+				return 0, fmt.Errorf("connect to agent: %w", err)
 			}
 		}
 		var resp proto.Response
-		var out []byte
+		var n int64
 		var sent bool
-		if out, sent, err = c.roundtrip(ctx, &req, payload, &resp); err == nil {
+		if n, sent, err = c.roundtrip(ctx, &req, src, srcSize, dst, &resp); err == nil {
 			if resp.Error != "" {
-				return nil, errors.New(resp.Error)
+				return n, errors.New(resp.Error)
 			}
 			if result != nil && len(resp.Result) > 0 {
 				if err := json.Unmarshal(resp.Result, result); err != nil {
-					return nil, err
+					return n, err
 				}
 			}
-			return out, nil
+			return n, nil
 		}
 		if c.conn != nil {
 			c.conn.Close()
 			c.conn = nil
 		}
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return n, ctx.Err()
 		}
 		if sent {
 			break
 		}
 	}
-	return nil, fmt.Errorf("agent: %w", err)
+	return 0, fmt.Errorf("agent: %w", err)
 }
 
 // alive probes an idle connection with a 1 ms read: a timeout means it is still open. EOF or any other error means it
@@ -93,19 +118,22 @@ func alive(conn net.Conn) bool {
 	return errors.As(err, &ne) && ne.Timeout() && conn.SetReadDeadline(time.Time{}) == nil
 }
 
-func (c *Client) roundtrip(ctx context.Context, req *proto.Request, payload []byte, resp *proto.Response) (out []byte, sent bool, err error) {
+func (c *Client) roundtrip(ctx context.Context, req *proto.Request, src io.Reader, srcSize int64, dst io.Writer, resp *proto.Response) (n int64, sent bool, err error) {
 	conn := c.conn
 	stop := context.AfterFunc(ctx, func() { conn.SetDeadline(time.Unix(1, 0)) })
-	if err := proto.WriteFrame(conn, req, payload); err != nil {
+	if err := proto.WriteFrameFrom(conn, req, srcSize, src); err != nil {
 		stop()
-		return nil, false, err
+		return 0, false, err
 	}
-	out, err = proto.ReadFrame(conn, resp)
+	size, err := proto.ReadHeader(conn, resp)
+	if err == nil {
+		n, err = io.CopyN(dst, conn, size)
+	}
 	if !stop() && err == nil { // canceled after the answer: the deadline is set, drop the connection
 		conn.Close()
 		c.conn = nil
 	}
-	return out, true, err
+	return n, true, err
 }
 
 // Close drops the connection; the next Call dials again.
