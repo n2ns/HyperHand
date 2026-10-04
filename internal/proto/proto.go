@@ -2,10 +2,12 @@
 // (hyperhand-agent.exe) over a Hyper-V socket. The host sends one request and waits for its response.
 //
 // A frame is: uint32 header length | uint64 payload length | header JSON | payload bytes.
-// The payload carries file contents and screenshots (PNG); it is empty otherwise.
+// The payload carries file contents (streamed: see WriteFrameFrom / ReadHeader) and screenshots (PNG); it is empty
+// otherwise.
 package proto
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"io"
@@ -100,36 +102,58 @@ type WaitResult struct {
 	Satisfied bool `json:"satisfied"`
 }
 
+// WriteFrame writes a frame whose payload is in memory.
 func WriteFrame(w io.Writer, header any, payload []byte) error {
+	return WriteFrameFrom(w, header, int64(len(payload)), bytes.NewReader(payload))
+}
+
+// WriteFrameFrom writes a frame whose payload is the next size bytes of src (streamed, not buffered).
+func WriteFrameFrom(w io.Writer, header any, size int64, src io.Reader) error {
 	h, err := json.Marshal(header)
 	if err != nil {
 		return err
 	}
 	buf := make([]byte, 12, 12+len(h))
 	binary.BigEndian.PutUint32(buf[0:4], uint32(len(h)))
-	binary.BigEndian.PutUint64(buf[4:12], uint64(len(payload)))
+	binary.BigEndian.PutUint64(buf[4:12], uint64(size))
 	if _, err := w.Write(append(buf, h...)); err != nil {
 		return err
 	}
-	if len(payload) > 0 {
-		_, err = w.Write(payload)
+	if size > 0 {
+		if _, err := io.CopyN(w, src, size); err != nil {
+			return err
+		}
 	}
-	return err
+	return nil
 }
 
+// ReadFrame reads a frame with its payload in memory.
 func ReadFrame(r io.Reader, header any) ([]byte, error) {
+	size, err := ReadHeader(r, header)
+	if err != nil {
+		return nil, err
+	}
+	payload := make([]byte, size)
+	_, err = io.ReadFull(r, payload)
+	return payload, err
+}
+
+// ReadHeader reads a frame's header and returns its payload size; the caller must then consume exactly that many
+// bytes from r (e.g. io.CopyN to a file) before reading the next frame.
+func ReadHeader(r io.Reader, header any) (int64, error) {
 	var prefix [12]byte
 	if _, err := io.ReadFull(r, prefix[:]); err != nil {
-		return nil, err
+		return 0, err
 	}
 	h := make([]byte, binary.BigEndian.Uint32(prefix[0:4]))
 	if _, err := io.ReadFull(r, h); err != nil {
-		return nil, err
+		return 0, err
 	}
+	size := int64(binary.BigEndian.Uint64(prefix[4:12]))
 	if err := json.Unmarshal(h, header); err != nil {
-		return nil, err
+		// Skip the payload so the stream stays in sync.
+		io.CopyN(io.Discard, r, size)
+		return 0, err
 	}
-	payload := make([]byte, binary.BigEndian.Uint64(prefix[4:12]))
-	_, err := io.ReadFull(r, payload)
-	return payload, err
+	return size, nil
 }
