@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/png"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,13 +31,13 @@ func timeout(ms int) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-func execOp(args json.RawMessage, _ []byte) (any, []byte, error) {
+func execOp(ctx context.Context, args json.RawMessage, _ []byte) (any, []byte, error) {
 	var a proto.ExecArgs
 	if err := decode(args, &a); err != nil {
 		return nil, nil, err
 	}
 	if a.Admin {
-		return execAdmin(a)
+		return execAdmin(ctx, a)
 	}
 	var cmd *exec.Cmd
 	attr := &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
@@ -61,14 +62,22 @@ func execOp(args json.RawMessage, _ []byte) (any, []byte, error) {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	var r proto.ExecResult
+	t := time.NewTimer(timeout(a.TimeoutMs))
+	defer t.Stop()
 	select {
 	case <-done:
-	case <-time.After(timeout(a.TimeoutMs)):
+	case <-t.C:
 		r.TimedOut = true
+	case <-ctx.Done():
+	}
+	if r.TimedOut || ctx.Err() != nil {
 		kill := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid))
 		kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 		kill.Run()
 		<-done
+	}
+	if !r.TimedOut && ctx.Err() != nil {
+		return nil, nil, ctx.Err()
 	}
 	r.ExitCode = cmd.ProcessState.ExitCode()
 	r.Stdout, r.Stderr = toUTF8(stdout.Bytes()), toUTF8(stderr.Bytes())
@@ -79,6 +88,7 @@ func execOp(args json.RawMessage, _ []byte) (any, []byte, error) {
 const cpOEM = 1 // CP_OEMCP
 
 func toUTF8(b []byte) string {
+	b = bytes.TrimPrefix(b, []byte("\xEF\xBB\xBF")) // UTF-8 BOM
 	if utf8.Valid(b) {
 		return string(b)
 	}
@@ -91,7 +101,7 @@ func toUTF8(b []byte) string {
 	return string(utf16.Decode(u))
 }
 
-func writeFile(args json.RawMessage, payload []byte) (any, []byte, error) {
+func writeFile(_ context.Context, args json.RawMessage, payload []byte) (any, []byte, error) {
 	var a proto.PathArgs
 	if err := decode(args, &a); err != nil {
 		return nil, nil, err
@@ -102,7 +112,7 @@ func writeFile(args json.RawMessage, payload []byte) (any, []byte, error) {
 	return nil, nil, os.WriteFile(a.Path, payload, 0o644)
 }
 
-func readFile(args json.RawMessage, _ []byte) (any, []byte, error) {
+func readFile(_ context.Context, args json.RawMessage, _ []byte) (any, []byte, error) {
 	var a proto.PathArgs
 	if err := decode(args, &a); err != nil {
 		return nil, nil, err
@@ -111,7 +121,7 @@ func readFile(args json.RawMessage, _ []byte) (any, []byte, error) {
 	return nil, b, err
 }
 
-func listDir(args json.RawMessage, _ []byte) (any, []byte, error) {
+func listDir(_ context.Context, args json.RawMessage, _ []byte) (any, []byte, error) {
 	var a proto.PathArgs
 	if err := decode(args, &a); err != nil {
 		return nil, nil, err
@@ -120,14 +130,17 @@ func listDir(args json.RawMessage, _ []byte) (any, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	r := proto.ListDirResult{Entries: make([]proto.DirEntry, len(ents))}
-	for i, e := range ents {
-		r.Entries[i] = proto.DirEntry{Name: e.Name(), IsDir: e.IsDir()}
+	r := proto.ListDirResult{Entries: []proto.DirEntry{}}
+	for _, e := range ents {
+		if e.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
+			continue // symlinks and junctions (e.g. "Application Data")
+		}
+		r.Entries = append(r.Entries, proto.DirEntry{Name: e.Name(), IsDir: e.IsDir()})
 	}
 	return r, nil, nil
 }
 
-func screenshotOp(json.RawMessage, []byte) (any, []byte, error) {
+func screenshotOp(context.Context, json.RawMessage, []byte) (any, []byte, error) {
 	img, err := screenshot.CaptureDisplay(0)
 	if err != nil {
 		return nil, nil, err
@@ -139,12 +152,23 @@ func screenshotOp(json.RawMessage, []byte) (any, []byte, error) {
 	return nil, buf.Bytes(), nil
 }
 
-func waitOp(args json.RawMessage, _ []byte) (any, []byte, error) {
+func waitOp(ctx context.Context, args json.RawMessage, _ []byte) (any, []byte, error) {
 	var a proto.WaitArgs
 	if err := decode(args, &a); err != nil {
 		return nil, nil, err
 	}
 	var check func() bool
+	switch a.Kind {
+	case "process_running", "process_exit":
+		if a.Name == "" {
+			return nil, nil, fmt.Errorf("wait %s: empty name", a.Kind)
+		}
+		a.Name = filepath.Base(a.Name)
+	case "file_exists":
+		if a.Path == "" {
+			return nil, nil, fmt.Errorf("wait file_exists: empty path")
+		}
+	}
 	switch a.Kind {
 	case "process_running":
 		check = func() bool { return processRunning(a.Name) }
@@ -155,14 +179,17 @@ func waitOp(args json.RawMessage, _ []byte) (any, []byte, error) {
 	default:
 		return nil, nil, fmt.Errorf("unknown wait kind %q", a.Kind)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout(a.TimeoutMs))
+	tctx, cancel := context.WithTimeout(ctx, timeout(a.TimeoutMs))
 	defer cancel()
 	for {
 		if check() {
 			return proto.WaitResult{Satisfied: true}, nil, nil
 		}
 		select {
-		case <-ctx.Done():
+		case <-tctx.Done():
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
 			return proto.WaitResult{}, nil, nil
 		case <-time.After(300 * time.Millisecond):
 		}

@@ -119,7 +119,14 @@ func install() error {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
-		if err := copyFile(self, dst); err != nil {
+		// The killed instance may still hold its image for a moment.
+		for i := 0; ; i++ {
+			if err = copyFile(self, dst); err == nil || i == 20 {
+				break
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		if err != nil {
 			return err
 		}
 	}

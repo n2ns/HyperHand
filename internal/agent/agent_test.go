@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -92,13 +95,115 @@ func TestServe(t *testing.T) {
 
 func TestAdminWrapper(t *testing.T) {
 	ps := adminWrapper(proto.ExecArgs{Command: "Get-Date"}, `C:\work dir`, `C:\t\cmd.ps1`, `C:\t\out`, `C:\t\err`, `C:\t\code`)
-	for _, want := range []string{`cd /d "C:\work dir"`, `-File "C:\t\cmd.ps1"`,`>"C:\t\out" 2>"C:\t\err"`, `>"C:\t\code" echo %errorlevel%`} {
+	for _, want := range []string{`cd /d "C:\work dir"`, `-File "C:\t\cmd.ps1"`, `>"C:\t\out" 2>"C:\t\err"`, `>"C:\t\code" echo %errorlevel%`} {
 		if !strings.Contains(ps, want) {
 			t.Errorf("powershell wrapper lacks %q:\n%s", want, ps)
 		}
 	}
-	c := adminWrapper(proto.ExecArgs{Command: "dir /b", Shell: "cmd"}, `C:\w`, `C:\t\cmd.ps1`, `C:\t\out`, `C:\t\err`, `C:\t\code`)
-	if !strings.Contains(c, `dir /b >"C:\t\out" 2>"C:\t\err"`) || strings.Contains(c, "powershell") {
-		t.Errorf("cmd wrapper:\n%s", c)
+	c := adminWrapper(proto.ExecArgs{Command: "echo 100% & dir /b", Shell: "cmd"}, `C:\w`, `C:\t\cmd.ps1`, `C:\t\out`, `C:\t\err`, `C:\t\code`)
+	if want := `cmd.exe /d /s /c "echo 100%% & dir /b" >"C:\t\out" 2>"C:\t\err"`; !strings.Contains(c, want) {
+		t.Errorf("cmd wrapper lacks %q:\n%s", want, c)
+	}
+}
+
+// The admin ps1 (run with -File) must give the same exit code as normal exec (-Command).
+func TestAdminScriptExitCode(t *testing.T) {
+	dir := t.TempDir()
+	for i, command := range []string{"exit 3", `Get-Item C:\nope-hh`, "cmd /c exit 5", "Write-Output ok", "cmd /c exit 0"} {
+		r, _, err := execOp(context.Background(), mustJSON(proto.ExecArgs{Command: command}), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := r.(proto.ExecResult).ExitCode
+		ps1 := filepath.Join(dir, fmt.Sprintf("s%d.ps1", i))
+		os.WriteFile(ps1, []byte(adminScript(command)), 0o644)
+		cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", ps1)
+		cmd.Run()
+		if got := cmd.ProcessState.ExitCode(); got != want {
+			t.Errorf("%q: admin script exit %d, exec exit %d", command, got, want)
+		}
+		t.Logf("%q -> %d", command, want)
+	}
+}
+
+func mustJSON(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+func TestToUTF8StripsBOM(t *testing.T) {
+	if s := toUTF8([]byte("\xEF\xBB\xBFhi")); s != "hi" {
+		t.Fatalf("%q", s)
+	}
+}
+
+func TestListDirSkipsLinks(t *testing.T) {
+	dir := t.TempDir()
+	os.Mkdir(filepath.Join(dir, "real"), 0o755)
+	if err := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(dir, "junction"), filepath.Join(dir, "real")).Run(); err != nil {
+		t.Skip("mklink /J:", err)
+	}
+	os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "symlink")) // needs admin or developer mode; fine if it fails
+	r, _, err := listDir(context.Background(), mustJSON(proto.PathArgs{Path: dir}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := r.(proto.ListDirResult).Entries; len(e) != 1 || e[0].Name != "real" {
+		t.Fatalf("entries: %+v", e)
+	}
+}
+
+func TestWaitArgs(t *testing.T) {
+	ctx := context.Background()
+	for _, a := range []proto.WaitArgs{{Kind: "process_running"}, {Kind: "process_exit"}, {Kind: "file_exists"}} {
+		if _, _, err := waitOp(ctx, mustJSON(a), nil); err == nil {
+			t.Errorf("%+v: want error", a)
+		}
+	}
+	for _, name := range []string{"svchost", "svchost.exe", `C:\Windows\System32\svchost.exe`} {
+		r, _, err := waitOp(ctx, mustJSON(proto.WaitArgs{Kind: "process_running", Name: name, TimeoutMs: 1000}), nil)
+		if err != nil || !r.(proto.WaitResult).Satisfied {
+			t.Errorf("%q: %v %+v", name, err, r)
+		}
+	}
+}
+
+func TestDispatchPanic(t *testing.T) {
+	handlers["test_panic"] = func(context.Context, json.RawMessage, []byte) (any, []byte, error) { panic("boom") }
+	defer delete(handlers, "test_panic")
+	if _, _, err := Dispatch(context.Background(), "test_panic", nil, nil); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A request is cancelled (and its process killed) when the host goes away.
+func TestServeCancel(t *testing.T) {
+	client, server := net.Pipe()
+	served := make(chan error, 1)
+	go func() { served <- Serve(server) }()
+	if err := proto.WriteFrame(client, proto.Request{Op: proto.OpExec, Args: mustJSON(proto.ExecArgs{Command: "Start-Sleep 30", TimeoutMs: 60000})}, nil); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Second) // let powershell start
+	start := time.Now()
+	client.Close()
+	select {
+	case <-served:
+		if d := time.Since(start); d > 10*time.Second {
+			t.Fatalf("Serve returned after %v", d)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("exec not cancelled")
+	}
+}
+
+// The watcher stops between requests, so consecutive requests still work.
+func TestServeSequential(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	go Serve(server)
+	for i := 0; i < 5; i++ {
+		var p proto.PingResult
+		call(t, client, proto.OpPing, nil, nil, &p)
 	}
 }

@@ -2,17 +2,21 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
+	"net"
 	"os"
 	"os/user"
+	"time"
 
 	"hyperhand/internal/proto"
 )
 
 // Handler handles one op: args are the request's JSON args, payload the request's payload.
-type Handler func(args json.RawMessage, payload []byte) (result any, out []byte, err error)
+// ctx is cancelled when the host goes away while the request runs.
+type Handler func(ctx context.Context, args json.RawMessage, payload []byte) (result any, out []byte, err error)
 
 var handlers = map[string]Handler{
 	proto.OpPing:         ping,
@@ -32,36 +36,65 @@ var handlers = map[string]Handler{
 // (the new exe is already in place); it should start the new exe and exit.
 var AfterUpdate func()
 
-// Dispatch runs the handler for op.
-func Dispatch(op string, args json.RawMessage, payload []byte) (any, []byte, error) {
+// Dispatch runs the handler for op; a panicking handler returns an error.
+func Dispatch(ctx context.Context, op string, args json.RawMessage, payload []byte) (result any, out []byte, err error) {
 	h, ok := handlers[op]
 	if !ok {
 		return nil, nil, fmt.Errorf("unknown op %q", op)
 	}
-	return h(args, payload)
+	defer func() {
+		if r := recover(); r != nil {
+			result, out, err = nil, nil, fmt.Errorf("%s panicked: %v", op, r)
+		}
+	}()
+	return h(ctx, args, payload)
 }
 
-// Serve reads requests from rw and writes responses until the connection fails.
-func Serve(rw io.ReadWriter) error {
+// Serve reads requests from c and writes responses until the connection fails.
+func Serve(c net.Conn) error {
 	for {
 		var req proto.Request
-		payload, err := proto.ReadFrame(rw, &req)
+		payload, err := proto.ReadFrame(c, &req)
 		if err != nil {
 			return err
 		}
+		// The host sends nothing while it waits for the response, so any return of this read
+		// (EOF, error or data) means the host went away: cancel the request.
+		ctx, cancel := context.WithCancel(context.Background())
+		watchErr := make(chan error, 1)
+		go func() {
+			var b [1]byte
+			_, err := c.Read(b[:])
+			if err == nil {
+				err = errors.New("unexpected data from host while a request is running")
+			}
+			cancel()
+			watchErr <- err
+		}()
 		var resp proto.Response
-		result, out, err := Dispatch(req.Op, req.Args, payload)
+		result, out, err := Dispatch(ctx, req.Op, req.Args, payload)
+		// Stop the watcher before the next ReadFrame so it does not take bytes of the next frame.
+		c.SetReadDeadline(time.Unix(1, 0))
+		werr := <-watchErr
+		c.SetReadDeadline(time.Time{})
+		cancel()
+		if ne, ok := werr.(net.Error); ok && ne.Timeout() {
+			werr = nil // stopped by the deadline above: the host is still there
+		}
 		if err == nil && result != nil {
 			resp.Result, err = json.Marshal(result)
 		}
 		if err != nil {
 			resp.Error, out = err.Error(), nil
 		}
-		if err := proto.WriteFrame(rw, resp, out); err != nil {
-			return err
+		if werr == nil {
+			werr = proto.WriteFrame(c, resp, out)
 		}
 		if req.Op == proto.OpUpdateAgent && resp.Error == "" && AfterUpdate != nil {
-			AfterUpdate()
+			AfterUpdate() // the new exe is already in place, even if the response could not be sent
+		}
+		if werr != nil {
+			return werr
 		}
 	}
 }
@@ -73,7 +106,7 @@ func decode(args json.RawMessage, v any) error {
 	return json.Unmarshal(args, v)
 }
 
-func ping(json.RawMessage, []byte) (any, []byte, error) {
+func ping(context.Context, json.RawMessage, []byte) (any, []byte, error) {
 	r := proto.PingResult{Version: proto.Version}
 	r.Hostname, _ = os.Hostname()
 	if u, err := user.Current(); err == nil {
@@ -82,7 +115,7 @@ func ping(json.RawMessage, []byte) (any, []byte, error) {
 	return r, nil, nil
 }
 
-func updateAgent(_ json.RawMessage, payload []byte) (any, []byte, error) {
+func updateAgent(_ context.Context, _ json.RawMessage, payload []byte) (any, []byte, error) {
 	if len(payload) == 0 {
 		return nil, nil, fmt.Errorf("empty payload")
 	}

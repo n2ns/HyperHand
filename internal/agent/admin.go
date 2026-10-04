@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,10 +67,11 @@ func runElevated(file, params string) (windows.Handle, error) {
 	return sei.hProcess, nil
 }
 
-// adminWrapper returns the .cmd wrapper run elevated: it changes to cwd, runs the command (inline for shell
+// adminWrapper returns the .cmd wrapper run elevated: it changes to cwd, runs the command (via cmd /s /c for shell
 // "cmd", or the script ps1 for powershell) with stdout/stderr redirected to out/errf and writes the exit code to code.
 func adminWrapper(a proto.ExecArgs, cwd, ps1, out, errf, code string) string {
-	run := a.Command
+	// Like normal exec's cmd /s /c; % doubled so the batch file passes it through unexpanded.
+	run := `cmd.exe /d /s /c "` + strings.ReplaceAll(a.Command, "%", "%%") + `"`
 	if a.Shell == "" || a.Shell == "powershell" {
 		// -File (not -Command ". script") so `exit N` in the command becomes the exit code.
 		run = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "` + ps1 + `"`
@@ -80,7 +82,15 @@ func adminWrapper(a proto.ExecArgs, cwd, ps1, out, errf, code string) string {
 		`>"` + code + `" echo %errorlevel%` + "\r\n"
 }
 
-func execAdmin(a proto.ExecArgs) (any, []byte, error) {
+// adminScript returns the ps1 run elevated for powershell; the last line gives the exit code
+// -Command would: 1 when the last statement failed (also for a failing native command).
+func adminScript(command string) string {
+	// UTF-8 BOM so Windows PowerShell reads the script as UTF-8.
+	return "\xEF\xBB\xBF[Console]::OutputEncoding=[Text.Encoding]::UTF8\r\n" + command +
+		"\r\nif (-not $?) { exit 1 }\r\n"
+}
+
+func execAdmin(ctx context.Context, a proto.ExecArgs) (any, []byte, error) {
 	if a.Shell != "" && a.Shell != "powershell" && a.Shell != "cmd" {
 		return nil, nil, fmt.Errorf("unknown shell %q", a.Shell)
 	}
@@ -95,8 +105,7 @@ func execAdmin(a proto.ExecArgs) (any, []byte, error) {
 	}
 	ps1, out, errf, code := filepath.Join(dir, "cmd.ps1"), filepath.Join(dir, "out"), filepath.Join(dir, "err"), filepath.Join(dir, "code")
 	wrapper := filepath.Join(dir, "run.cmd")
-	// UTF-8 BOM so Windows PowerShell reads the script as UTF-8.
-	if err := os.WriteFile(ps1, []byte("\xEF\xBB\xBF[Console]::OutputEncoding=[Text.Encoding]::UTF8\r\n"+a.Command), 0o644); err != nil {
+	if err := os.WriteFile(ps1, []byte(adminScript(a.Command)), 0o644); err != nil {
 		return nil, nil, err
 	}
 	if err := os.WriteFile(wrapper, []byte(adminWrapper(a, cwd, ps1, out, errf, code)), 0o644); err != nil {
@@ -108,9 +117,20 @@ func execAdmin(a proto.ExecArgs) (any, []byte, error) {
 	}
 	defer windows.CloseHandle(h)
 	var r proto.ExecResult
-	ev, _ := windows.WaitForSingleObject(h, uint32(timeout(a.TimeoutMs)/time.Millisecond))
-	if ev == uint32(windows.WAIT_TIMEOUT) {
-		r.TimedOut = true
+	deadline := time.Now().Add(timeout(a.TimeoutMs))
+	for {
+		if ev, _ := windows.WaitForSingleObject(h, 200); ev != uint32(windows.WAIT_TIMEOUT) {
+			break
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			r.TimedOut = true
+			break
+		}
+	}
+	if r.TimedOut || ctx.Err() != nil {
 		if pid, err := windows.GetProcessId(h); err == nil {
 			if k, err := runElevated("taskkill.exe", "/T /F /PID "+strconv.Itoa(int(pid))); err == nil {
 				windows.WaitForSingleObject(k, 10000)
@@ -118,6 +138,9 @@ func execAdmin(a proto.ExecArgs) (any, []byte, error) {
 			}
 		}
 		windows.WaitForSingleObject(h, 5000)
+		if !r.TimedOut {
+			return nil, nil, ctx.Err()
+		}
 	}
 	if b, err := os.ReadFile(code); err == nil {
 		r.ExitCode, _ = strconv.Atoi(strings.TrimSpace(string(b)))
