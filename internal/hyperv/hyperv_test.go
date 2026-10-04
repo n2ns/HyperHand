@@ -15,6 +15,7 @@ func TestParseKeys(t *testing.T) {
 		"f12":            {0x7B},
 		"ctrl+5":         {0x11, '5'},
 		"ctrl + /":       {0x11, 0xBF},
+		"ctrl+plus":      {0x11, 0xBB},
 	}
 	for in, want := range cases {
 		got, err := parseKeys(in)
@@ -48,6 +49,20 @@ func TestRGB565ToRGBA(t *testing.T) {
 	}
 	if _, err := rgb565ToRGBA([]byte{1, 2}, 2, 1); err == nil {
 		t.Error("short data should fail")
+	}
+}
+
+func TestVariantBytes(t *testing.T) {
+	for _, size := range []int{16, 24} {
+		want := []byte{0x00, 0x7F, 0xFF}
+		raw := make([]byte, len(want)*size)
+		for i, b := range want {
+			raw[i*size] = 0x11 // VT_UI1 tag, must not be read
+			raw[i*size+8] = b
+		}
+		if got := variantBytes(raw, size); !reflect.DeepEqual(got, want) {
+			t.Errorf("variantBytes(size %d) = %v, want %v", size, got, want)
+		}
 	}
 }
 

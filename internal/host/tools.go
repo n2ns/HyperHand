@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -55,7 +56,7 @@ type typeIn struct {
 }
 type keyIn struct {
 	VM   string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
-	Keys string `json:"keys" jsonschema:"a key or combination, e.g. enter, esc, tab, f2, ctrl+v, win+r, alt+f4"`
+	Keys string `json:"keys" jsonschema:"a key or combination, e.g. enter, esc, tab, f2, ctrl+v, win+r, alt+f4, ctrl+plus"`
 }
 type execIn struct {
 	VM        string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
@@ -82,7 +83,7 @@ type checkpointIn struct {
 type restoreIn struct {
 	VM    string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
 	Name  string `json:"name" jsonschema:"checkpoint name"`
-	Start *bool  `json:"start,omitempty" jsonschema:"start the VM after restoring if it is off; default true"`
+	Start *bool  `json:"start,omitempty" jsonschema:"start the VM after restoring if it is not running; default true"`
 }
 type titleIn struct {
 	VM    string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
@@ -140,10 +141,22 @@ func NewServer(m *Manager) *mcp.Server {
 		return text("%s", b.String()), nil
 	})
 	add(s, "vm_start", "Start a VM.", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
-		return done(hyperv.Start(in.VM))
+		v, err := hyperv.Find(in.VM)
+		if err != nil {
+			return nil, err
+		}
+		err = hyperv.Start(v.Name)
+		m.Drop(v.ID)
+		return done(err)
 	})
 	add(s, "vm_stop", "Turn off a VM.", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
-		return done(hyperv.Stop(in.VM))
+		v, err := hyperv.Find(in.VM)
+		if err != nil {
+			return nil, err
+		}
+		err = hyperv.Stop(v.Name)
+		m.Drop(v.ID)
+		return done(err)
 	})
 	add(s, "vm_checkpoints", "List the VM's checkpoints (name, creation time).", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
 		cps, err := hyperv.ListCheckpoints(in.VM)
@@ -162,7 +175,7 @@ func NewServer(m *Manager) *mcp.Server {
 	add(s, "vm_checkpoint", "Create a checkpoint of the VM.", func(ctx context.Context, in checkpointIn) (*mcp.CallToolResult, error) {
 		return done(hyperv.CreateCheckpoint(in.VM, in.Name))
 	})
-	add(s, "vm_restore", "Restore a checkpoint, then start the VM if it is off (unless start is false).", func(ctx context.Context, in restoreIn) (*mcp.CallToolResult, error) {
+	add(s, "vm_restore", "Restore a checkpoint (exact name), then start the VM if it is not running (unless start is false).", func(ctx context.Context, in restoreIn) (*mcp.CallToolResult, error) {
 		v, err := hyperv.Find(in.VM) // resolve "" now: after the restore the VM may be off
 		if err != nil {
 			return nil, err
@@ -174,7 +187,7 @@ func NewServer(m *Manager) *mcp.Server {
 		if in.Start == nil || *in.Start {
 			if v, err = hyperv.Find(v.Name); err != nil {
 				return nil, err
-			} else if v.State == "Off" {
+			} else if v.State != "Running" { // a production checkpoint restores to Off, a standard one to Saved
 				return done(hyperv.Start(v.Name))
 			}
 		}
@@ -218,21 +231,23 @@ func NewServer(m *Manager) *mcp.Server {
 	add(s, "vm_scroll", "Scroll the mouse wheel at (x, y).", func(ctx context.Context, in scrollIn) (*mcp.CallToolResult, error) {
 		return done(hyperv.Scroll(in.VM, in.X, in.Y, in.Delta))
 	})
-	add(s, "vm_type", "Type text into the focused window. Non-ASCII text is pasted through the clipboard (needs the agent).",
+	var typeMu sync.Mutex // keeps clipboard_set -> ctrl+v of one vm_type together
+	add(s, "vm_type", "Type text into the focused window. Pasted through the guest clipboard (agent clipboard_set + ctrl+v) so an IME cannot swallow it; without the agent, ASCII text is typed on the keyboard instead (an IME in Chinese mode may swallow it).",
 		func(ctx context.Context, in typeIn) (*mcp.CallToolResult, error) {
-			ascii := true
+			typeMu.Lock()
+			defer typeMu.Unlock()
+			_, err := call(ctx, in.VM, proto.OpClipboardSet, proto.TextArgs{Text: in.Text}, nil, nil)
+			if err == nil {
+				return done(hyperv.PressKeys(in.VM, "ctrl+v"))
+			}
 			for _, r := range in.Text {
-				ascii = ascii && r < 128
+				if r >= 128 {
+					return nil, fmt.Errorf("non-ASCII text needs the agent: %w", err)
+				}
 			}
-			if ascii {
-				return done(hyperv.TypeText(in.VM, in.Text))
-			}
-			if _, err := call(ctx, in.VM, proto.OpClipboardSet, proto.TextArgs{Text: in.Text}, nil, nil); err != nil {
-				return nil, err
-			}
-			return done(hyperv.PressKeys(in.VM, "ctrl+v"))
+			return done(hyperv.TypeText(in.VM, in.Text))
 		})
-	add(s, "vm_key", "Press a key or key combination.", func(ctx context.Context, in keyIn) (*mcp.CallToolResult, error) {
+	add(s, "vm_key", "Press a key or key combination. Keys: ctrl, shift, alt, win, enter, esc, tab, space, backspace, delete, insert, home, end, pageup, pagedown, up, down, left, right, f1-f12, a-z, 0-9, punctuation such as ; = , - . / ` [ \\ ] ' and plus for the +/= key.", func(ctx context.Context, in keyIn) (*mcp.CallToolResult, error) {
 		return done(hyperv.PressKeys(in.VM, in.Keys))
 	})
 	add(s, "vm_exec", "Run a command in the guest (as the logged-on user); returns exit code, stdout and stderr.",
@@ -253,7 +268,7 @@ func NewServer(m *Manager) *mcp.Server {
 			if err != nil {
 				return err
 			}
-			dst := in.GuestPath
+			dst := pushTarget(in.GuestPath, filepath.Base(p))
 			if rel != "." {
 				dst = strings.TrimRight(in.GuestPath, `\/`) + `\` + rel
 			}
@@ -308,7 +323,7 @@ func NewServer(m *Manager) *mcp.Server {
 		}
 		return text("satisfied: %v", r.Satisfied), nil
 	})
-	add(s, "vm_install_agent", "Install the HyperHand agent in the guest (copies it in and runs its installer via the keyboard; a user must be logged on), then wait until it answers.",
+	add(s, "vm_install_agent", "Install the HyperHand agent in the guest (copies it in and runs its installer via the keyboard; a user must be logged on), then wait until it answers. The install command is typed on the keyboard, so the guest IME must be in English mode; if it fails, check with vm_screenshot.",
 		func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
 			exe, err := agentExe()
 			if err != nil {
@@ -383,6 +398,24 @@ func waitPing(ctx context.Context, c *Client) (*mcp.CallToolResult, error) {
 	return nil, errors.Join(errors.New("agent did not answer within 30 s"), err)
 }
 
+// pushTarget: a single file pushed to a guest path ending in \ or / goes into that directory under its own name.
+func pushTarget(guestPath, name string) string {
+	if strings.HasSuffix(guestPath, `\`) || strings.HasSuffix(guestPath, "/") {
+		return guestPath + name
+	}
+	return guestPath
+}
+
+// pullTarget: a single guest file pulled to an existing host directory, or to a path ending in \ or /, goes into it
+// under the guest file's name.
+func pullTarget(hostPath, guestPath string) string {
+	if fi, err := os.Stat(hostPath); err == nil && fi.IsDir() || strings.HasSuffix(hostPath, `\`) || strings.HasSuffix(hostPath, "/") {
+		g := strings.TrimRight(guestPath, `\/`)
+		return filepath.Join(hostPath, g[strings.LastIndexAny(g, `\/`)+1:])
+	}
+	return hostPath
+}
+
 // pull copies a guest file, or a guest directory recursively (walked with list_dir), to hostPath; returns files and bytes.
 func pull(ctx context.Context, c *Client, guestPath, hostPath string) (files, size int, err error) {
 	var ls proto.ListDirResult
@@ -391,6 +424,7 @@ func pull(ctx context.Context, c *Client, guestPath, hostPath string) (files, si
 		if err != nil {
 			return 0, 0, fmt.Errorf("%s: %w", guestPath, err)
 		}
+		hostPath = pullTarget(hostPath, guestPath)
 		if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
 			return 0, 0, err
 		}
