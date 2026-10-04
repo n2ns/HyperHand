@@ -104,8 +104,11 @@ HyperHand sends no telemetry and makes no network connections beyond the local M
 
 ## Uninstall
 
-1. Host: delete the scheduled task `HyperHand`, quit the tray, delete the HyperHand folder.
-2. Guest: quit the agent from its tray menu, delete the `HyperHandAgent` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` and the folders `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`.
+Guest first, then host:
+
+1. Guest: run `%LOCALAPPDATA%\HyperHand\hyperhand-agent.exe uninstall` in the guest itself, by hand or from the host with `vm_key` `win+r` and `vm_type`. Not through `vm_exec`: the uninstall stops the agent that would be running it. It deletes the `HyperHandAgent` Run value and the folders `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`.
+2. Host: run `hyperhand.exe uninstall` (one UAC prompt). It stops the tray and deletes the scheduled task `HyperHand`, the Hyper-V socket service registration and the log folder.
+3. Delete the HyperHand folder and remove the server from your MCP client.
 
 Details in the [user guide](docs/user-guide.md#uninstalling).
 

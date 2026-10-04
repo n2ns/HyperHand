@@ -162,9 +162,10 @@ Where UAC prompts appear, and where they do not:
 | When | Where | Prompt |
 |---|---|---|
 | `hyperhand.exe install` | Host | Once. The scheduled task it creates starts the tray elevated at logon without a prompt. |
+| `hyperhand.exe uninstall` | Host | Once; it relaunches itself elevated. |
 | Starting `hyperhand.exe` by hand without elevation | Host | Once; it relaunches itself elevated. |
 | Replacing the tray with `scripts\restart-tray.ps1` | Host | Once per update (the script must run elevated). |
-| `vm_install_agent`, `hyperhand-agent.exe install`, `vm_update_agent`, the agent at logon | Guest | None. The agent runs as the logged-on user, not elevated. |
+| `vm_install_agent`, `hyperhand-agent.exe install`, `hyperhand-agent.exe uninstall`, `vm_update_agent`, the agent at logon | Guest | None. The agent runs as the logged-on user, not elevated. |
 | `vm_exec` with `admin: true` | Guest | None if `ConsentPromptBehaviorAdmin` is `0` (see [Allow `admin` exec without a prompt](#allow-admin-exec-without-a-prompt)); otherwise a prompt that the command waits for. |
 | A program started in the guest that asks for elevation | Guest | As configured in the guest; answer it from the host with `vm_screenshot` and `vm_key` (or `vm_click`). |
 
@@ -224,34 +225,32 @@ Pushing a `vX.Y.Z` tag runs a GitHub Actions workflow that runs the tests, build
 
 ## Uninstalling
 
-On the host, from an elevated prompt:
+Uninstall the guest agent first, then the host.
 
-1. Quit the tray from its menu.
-2. Delete the scheduled task:
+In each guest, as the user the agent was installed for, run:
 
-   ```
-   schtasks /Delete /TN HyperHand /F
-   ```
+```
+%LOCALAPPDATA%\HyperHand\hyperhand-agent.exe uninstall
+```
 
-3. Delete the Hyper-V socket service registration:
+Run it in the guest itself: by hand, or from the host with `vm_key` `win+r`, `vm_type` for the command and `vm_key` `enter`. Do not run it through `vm_exec`: the uninstall stops the other running agent instances, including the one executing the command. It needs no elevation. It:
 
-   ```
-   reg delete "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\3ce544e1-2645-4383-b332-fedf8a18736b" /f
-   ```
+- stops the other running agent instances;
+- deletes the `HyperHandAgent` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`;
+- deletes `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand` (a folder it is running from is removed right after it exits);
+- shows a message box listing what was removed.
 
-4. Remove the server from your MCP client: `claude mcp remove hyperhand` (Claude Code) or `codex mcp remove hyperhand` (Codex).
-5. Optionally delete `%LOCALAPPDATA%\HyperHand` (the log) and the folder with `hyperhand.exe` (the extracted release or the build directory).
+On the host:
 
-In each guest, as the user the agent was installed for:
-
-1. Quit the agent from its tray menu, or run `taskkill /F /IM hyperhand-agent.exe`.
-2. Delete the Run value:
+1. Run:
 
    ```
-   reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v HyperHandAgent /f
+   hyperhand.exe uninstall
    ```
 
-3. Delete `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`.
+   It relaunches itself elevated if needed (one UAC prompt), stops the tray (ends the scheduled task and the other `hyperhand.exe` processes), deletes the scheduled task `HyperHand`, deletes the Hyper-V socket service registration `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\3ce544e1-2645-4383-b332-fedf8a18736b` and deletes `%LOCALAPPDATA%\HyperHand` (the log). It shows a message box listing what was removed. It does not delete `hyperhand.exe` or its folder.
+2. Delete the folder with `hyperhand.exe` (the extracted release or the build directory).
+3. Remove the server from your MCP client: `claude mcp remove hyperhand` (Claude Code) or `codex mcp remove hyperhand` (Codex).
 
 ## Troubleshooting
 
