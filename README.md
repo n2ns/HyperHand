@@ -1,4 +1,4 @@
-﻿# HyperHand: Hyper-V VM Control for Claude Code
+# HyperHand: Hyper-V VM Control for Claude Code
 
 Let Claude Code see and operate a Windows virtual machine on Hyper-V: take screenshots, click, type, run commands, move files and roll back to checkpoints, without a network connection to the guest and without a guest password. Built for Windows 10/11 hosts running Hyper-V with Windows guests.
 
