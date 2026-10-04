@@ -63,7 +63,17 @@ func uninstall() {
 
 	dir := filepath.Join(os.Getenv("LOCALAPPDATA"), "HyperHand")
 	if _, err := os.Stat(dir); err == nil {
-		step(dir, os.RemoveAll(dir))
+		// The stopping tray may still hold its log file, or append a last line (recreating the folder) while it
+		// exits: delete, wait a moment, and repeat until the folder stays gone (up to 5 s).
+		var err error
+		for i := 0; i < 10; i++ {
+			err = os.RemoveAll(dir)
+			time.Sleep(500 * time.Millisecond)
+			if _, statErr := os.Stat(dir); err == nil && os.IsNotExist(statErr) {
+				break
+			}
+		}
+		step(dir, err)
 	}
 
 	text := "HyperHand uninstalled.\n\nRemoved:\n  " + strings.Join(done, "\n  ")
