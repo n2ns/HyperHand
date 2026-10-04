@@ -115,6 +115,20 @@ Set-ItemProperty -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\
 
 The logged-on user must be a member of the Administrators group.
 
+The change itself needs elevation, and it can be made through HyperHand once the agent is installed:
+
+1. Request the change elevated; this opens a UAC prompt in the guest. Give the call a timeout long enough to answer the prompt, since the command waits for it:
+
+   ```
+   vm_exec  command: Start-Process reg.exe -Verb RunAs -Wait -ArgumentList 'add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v ConsentPromptBehaviorAdmin /t REG_DWORD /d 0 /f'
+            timeout_ms: 60000
+   ```
+
+2. While it waits, answer the prompt from the host: `vm_screenshot` shows it on the secure desktop; `vm_key shift+tab` moves the focus from No to Yes, then `vm_key enter` confirms. Host-side input reaches the secure desktop, unlike the agent.
+3. Check: `vm_exec` with `(Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System).ConsentPromptBehaviorAdmin` returns `0`.
+
+See [UAC](#uac) for every place a prompt can appear.
+
 ### Set the guest default input method to English
 
 If the guest uses a non-English input method by default, add the en-US language and make the US keyboard the default input method (in the guest, as the logged-on user):
@@ -127,6 +141,21 @@ Set-WinDefaultInputMethodOverride -InputTip "0409:00000409"
 ```
 
 Sign out and back in for the change to apply.
+
+## UAC
+
+Where UAC prompts appear, and where they do not:
+
+| When | Where | Prompt |
+|---|---|---|
+| `hyperhand.exe install` | Host | Once. The scheduled task it creates starts the tray elevated at logon without a prompt. |
+| Starting `hyperhand.exe` by hand without elevation | Host | Once; it relaunches itself elevated. |
+| Replacing the tray with `scripts\restart-tray.ps1` | Host | Once per update (the script must run elevated). |
+| `vm_install_agent`, `vm_update_agent`, the agent at logon | Guest | None. The agent runs as the logged-on user, not elevated. |
+| `vm_exec` with `admin: true` | Guest | None if `ConsentPromptBehaviorAdmin` is `0` (see [Allow `admin` exec without a prompt](#allow-admin-exec-without-a-prompt)); otherwise a prompt that the command waits for. |
+| A program started in the guest that asks for elevation | Guest | As configured in the guest; answer it from the host with `vm_screenshot` and `vm_key` (or `vm_click`). |
+
+Host-side screenshots and input work on the guest's secure desktop, so a guest UAC prompt can always be answered through HyperHand. The agent cannot see or answer it.
 
 ## Using the tools
 
