@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
 	_ "image/png"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -71,6 +74,7 @@ type pushIn struct {
 	VM        string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
 	HostPath  string `json:"host_path" jsonschema:"file or directory on the host"`
 	GuestPath string `json:"guest_path" jsonschema:"destination file or directory in the guest"`
+	Force     bool   `json:"force,omitempty" jsonschema:"upload every file even if the guest already has an identical copy; default false"`
 }
 type pullIn struct {
 	VM        string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
@@ -259,34 +263,16 @@ func NewServer(m *Manager) *mcp.Server {
 			}
 			return text("exit_code: %d\ntimed_out: %v\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.TimedOut, r.Stdout, r.Stderr), nil
 		})
-	add(s, "vm_push", "Copy a file, or a directory recursively, from the host into the guest.", func(ctx context.Context, in pushIn) (*mcp.CallToolResult, error) {
-		n := 0
-		err := filepath.WalkDir(in.HostPath, func(p string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return err
-			}
-			rel, err := filepath.Rel(in.HostPath, p)
-			if err != nil {
-				return err
-			}
-			dst := pushTarget(in.GuestPath, filepath.Base(p))
-			if rel != "." {
-				dst = strings.TrimRight(in.GuestPath, `\/`) + `\` + rel
-			}
-			c, err := m.Client(in.VM)
-			if err != nil {
-				return err
-			}
-			if err := pushFile(ctx, c, p, dst); err != nil {
-				return fmt.Errorf("%s: %w", dst, err)
-			}
-			n++
-			return nil
-		})
+	add(s, "vm_push", "Copy a file, or a directory recursively, from the host into the guest. Files whose SHA-256 already matches the guest copy are skipped unless force is true.", func(ctx context.Context, in pushIn) (*mcp.CallToolResult, error) {
+		c, err := m.Client(in.VM)
+		if err != nil {
+			return nil, err
+		}
+		n, skipped, sent, err := push(ctx, c, in.HostPath, in.GuestPath, in.Force)
 		if err != nil {
 			return nil, fmt.Errorf("%w (%d files copied)", err, n)
 		}
-		return text("%d files copied", n), nil
+		return text("%d files copied, %d unchanged skipped (%d bytes sent)", n, skipped, sent), nil
 	})
 	add(s, "vm_pull", "Copy a file, or a directory recursively, from the guest to the host.", func(ctx context.Context, in pullIn) (*mcp.CallToolResult, error) {
 		c, err := m.Client(in.VM)
@@ -455,19 +441,89 @@ func pull(ctx context.Context, c *Client, guestPath, hostPath string) (files, si
 	return files, size, nil
 }
 
+// push copies the host file or directory hostPath to guestPath. Unless force is set, files whose SHA-256 matches the
+// guest's (asked once via hash_files; an agent without hash_files gets everything) are skipped.
+func push(ctx context.Context, c *Client, hostPath, guestPath string, force bool) (copied, skipped int, sent int64, err error) {
+	var srcs, dsts []string
+	err = filepath.WalkDir(hostPath, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(hostPath, p)
+		if err != nil {
+			return err
+		}
+		dst := pushTarget(guestPath, filepath.Base(p))
+		if rel != "." {
+			dst = strings.TrimRight(guestPath, `\/`) + `\` + rel
+		}
+		srcs, dsts = append(srcs, p), append(dsts, dst)
+		return nil
+	})
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	var guest []string
+	if !force {
+		for i := 0; i < len(dsts); i += 1000 {
+			var r proto.HashesResult
+			if _, err := c.Call(ctx, proto.OpHashFiles, proto.PathsArgs{Paths: dsts[i:min(i+1000, len(dsts))]}, nil, &r); err != nil {
+				if strings.HasPrefix(err.Error(), "unknown op") { // older agent: upload everything
+					guest = nil
+					break
+				}
+				return 0, 0, 0, err
+			}
+			guest = append(guest, r.Hashes...)
+		}
+	}
+	for i, src := range srcs {
+		if i < len(guest) && guest[i] != "" {
+			if h, err := hashFile(src); err != nil {
+				return copied, skipped, sent, err
+			} else if h == guest[i] {
+				skipped++
+				continue
+			}
+		}
+		n, err := pushFile(ctx, c, src, dsts[i])
+		if err != nil {
+			return copied, skipped, sent, fmt.Errorf("%s: %w", dsts[i], err)
+		}
+		copied, sent = copied+1, sent+n
+	}
+	return copied, skipped, sent, nil
+}
+
+// hashFile returns the lowercase hex SHA-256 of the file at p.
+func hashFile(p string) (string, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.CopyBuffer(h, f, make([]byte, 1<<20)); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // pushFile streams the host file hostPath to guestPath.
-func pushFile(ctx context.Context, c *Client, hostPath, guestPath string) error {
+func pushFile(ctx context.Context, c *Client, hostPath, guestPath string) (int64, error) {
 	f, err := os.Open(hostPath)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
-		return err
+		return 0, err
 	}
-	_, err = c.CallIO(ctx, proto.OpWriteFile, proto.PathArgs{Path: guestPath}, f, fi.Size(), nil, nil)
-	return err
+	if _, err = c.CallIO(ctx, proto.OpWriteFile, proto.PathArgs{Path: guestPath}, f, fi.Size(), nil, nil); err != nil {
+		return 0, err
+	}
+	return fi.Size(), nil
 }
 
 // pullFile streams the guest file guestPath into hostPath + ".hhpart", then renames it over hostPath.

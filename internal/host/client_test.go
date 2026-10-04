@@ -3,6 +3,8 @@ package host
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"math/rand/v2"
@@ -15,7 +17,13 @@ import (
 	"hyperhand/internal/proto"
 )
 
-// fakeAgent answers exec, write_file, list_dir and read_file requests on conn until it is closed.
+// fakePushed holds what write_file stored (other than C:\x.bin); hash_files reports its hashes unless fakeNoHash.
+var (
+	fakePushed = map[string][]byte{}
+	fakeNoHash bool
+)
+
+// fakeAgent answers exec, write_file, list_dir, read_file and hash_files requests on conn until it is closed.
 func fakeAgent(t *testing.T, conn net.Conn, written *[]byte) {
 	defer conn.Close()
 	for {
@@ -34,10 +42,11 @@ func fakeAgent(t *testing.T, conn net.Conn, written *[]byte) {
 		case proto.OpWriteFile:
 			var a proto.PathArgs
 			json.Unmarshal(req.Args, &a)
-			if a.Path != `C:\x.bin` {
-				resp.Error = "bad path " + a.Path
+			if a.Path == `C:\x.bin` {
+				*written = payload
+			} else {
+				fakePushed[a.Path] = payload
 			}
-			*written = payload
 		case proto.OpListDir:
 			var a proto.PathArgs
 			json.Unmarshal(req.Args, &a)
@@ -56,6 +65,23 @@ func fakeAgent(t *testing.T, conn net.Conn, written *[]byte) {
 			} else {
 				resp.Error = "no file " + a.Path
 			}
+		case proto.OpHashFiles:
+			if fakeNoHash {
+				resp.Error = `unknown op "hash_files"`
+				break
+			}
+			var a proto.PathsArgs
+			json.Unmarshal(req.Args, &a)
+			var r proto.HashesResult
+			for _, p := range a.Paths {
+				h := ""
+				if d, ok := fakePushed[p]; ok {
+					sum := sha256.Sum256(d)
+					h = hex.EncodeToString(sum[:])
+				}
+				r.Hashes = append(r.Hashes, h)
+			}
+			resp.Result, _ = json.Marshal(r)
 		default:
 			resp.Error = "unknown op"
 		}
@@ -203,7 +229,7 @@ func TestPushPullStream(t *testing.T) {
 	if err := os.WriteFile(src, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := pushFile(ctx, c, src, `C:\x.bin`); err != nil {
+	if _, err := pushFile(ctx, c, src, `C:\x.bin`); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(written, data) {
@@ -253,4 +279,39 @@ func TestCallIOCancel(t *testing.T) {
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("took %v", d)
 	}
+}
+
+// A second push sends only the changed file; force sends everything; an agent without hash_files gets everything.
+func TestPushSkipsUnchanged(t *testing.T) {
+	c := NewClient(func(context.Context) (net.Conn, error) {
+		a, b := net.Pipe()
+		go fakeAgent(t, b, new([]byte))
+		return a, nil
+	})
+	defer c.Close()
+	ctx, dir := context.Background(), t.TempDir()
+	for _, n := range []string{"a.txt", "b.txt", "c.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(n), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(force bool, wantCopied, wantSkipped int, wantSent int64) {
+		t.Helper()
+		n, skipped, sent, err := push(ctx, c, dir, `C:\p`, force)
+		if err != nil || n != wantCopied || skipped != wantSkipped || sent != wantSent {
+			t.Fatalf("force=%v: %d copied, %d skipped, %d bytes, %v; want %d, %d, %d", force, n, skipped, sent, err, wantCopied, wantSkipped, wantSent)
+		}
+	}
+	check(false, 3, 0, 15)
+	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	check(false, 1, 2, 7)
+	if string(fakePushed[`C:\p\b.txt`]) != "changed" {
+		t.Fatalf("guest b.txt = %q", fakePushed[`C:\p\b.txt`])
+	}
+	check(true, 3, 0, 17)
+	fakeNoHash = true
+	defer func() { fakeNoHash = false }()
+	check(false, 3, 0, 17)
 }
