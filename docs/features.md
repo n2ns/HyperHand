@@ -295,6 +295,13 @@ Because step 3 types blindly, a failure there is visible only on screen; the too
 - It starts the installed copy.
 - On error it shows a message box and exits with code 1.
 
+`hyperhand-agent.exe uninstall` reverses the install. It runs as the logged-on user without administrator rights. Run it in the guest directly, not through `vm_exec`, because it stops the agent that would be executing it.
+
+- It stops every other running `hyperhand-agent.exe`.
+- It deletes the `HyperHandAgent` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+- It deletes `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`; a folder it is running from is removed right after it exits.
+- It shows a message box listing what was removed.
+
 ### 8.3 Single instance and startup
 
 - The agent uses the mutex `HyperHandAgent`; a second instance exits immediately.
@@ -338,6 +345,15 @@ The update replaces the file the agent is running from; the HKCU Run entry is un
 - It removes the 72 h execution time limit and allows the task to start and keep running on battery.
 - It runs the task immediately and shows a message box with the executable path and the MCP URL.
 - On error it logs the error and shows it in a message box.
+
+`hyperhand.exe uninstall` reverses the install.
+
+- If not elevated, it relaunches itself elevated with `uninstall` (one UAC prompt).
+- It stops the tray: it ends the `HyperHand` task and kills the other `hyperhand.exe` processes.
+- It deletes the scheduled task `HyperHand` and the Hyper-V socket service registration (see 1.2), the key `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\<service GUID>`.
+- It deletes `%LOCALAPPDATA%\HyperHand` (the log directory).
+- It does not delete `hyperhand.exe` or its folder.
+- It shows a message box listing what was removed.
 
 ### 9.3 Log
 

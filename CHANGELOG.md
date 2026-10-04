@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `hyperhand.exe uninstall`: relaunches itself elevated if needed, stops the tray, deletes the `HyperHand` scheduled task, the Hyper-V socket service registration and `%LOCALAPPDATA%\HyperHand`, and shows what was removed. The exe and its folder are kept.
+- `hyperhand-agent.exe uninstall`: without administrator rights, stops the running agent and deletes the `HyperHandAgent` Run value, `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`, and shows what was removed.
+
 ## [0.1.0] - 2026-10-05
 
 Initial release.
