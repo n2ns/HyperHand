@@ -127,3 +127,14 @@ func (m *Manager) Client(vm string) (*Client, error) {
 	}
 	return c, nil
 }
+
+// Drop closes and forgets the client for a VM id, e.g. after a checkpoint restore restarted its agent.
+func (m *Manager) Drop(id string) {
+	m.mu.Lock()
+	c := m.clients[id]
+	delete(m.clients, id)
+	m.mu.Unlock()
+	if c != nil {
+		c.Close()
+	}
+}

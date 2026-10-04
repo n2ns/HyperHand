@@ -63,6 +63,7 @@ type execIn struct {
 	Shell     string `json:"shell,omitempty" jsonschema:"powershell (default) or cmd"`
 	Cwd       string `json:"cwd,omitempty" jsonschema:"working directory in the guest"`
 	TimeoutMs int    `json:"timeout_ms,omitempty" jsonschema:"default 60000"`
+	Admin     bool   `json:"admin,omitempty" jsonschema:"run elevated (administrator)"`
 }
 type pushIn struct {
 	VM        string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
@@ -71,8 +72,17 @@ type pushIn struct {
 }
 type pullIn struct {
 	VM        string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
-	GuestPath string `json:"guest_path" jsonschema:"file in the guest"`
-	HostPath  string `json:"host_path" jsonschema:"destination file on the host"`
+	GuestPath string `json:"guest_path" jsonschema:"file or directory in the guest"`
+	HostPath  string `json:"host_path" jsonschema:"destination file or directory on the host"`
+}
+type checkpointIn struct {
+	VM   string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
+	Name string `json:"name" jsonschema:"checkpoint name"`
+}
+type restoreIn struct {
+	VM    string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
+	Name  string `json:"name" jsonschema:"checkpoint name"`
+	Start *bool  `json:"start,omitempty" jsonschema:"start the VM after restoring if it is off; default true"`
 }
 type titleIn struct {
 	VM    string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
@@ -135,6 +145,41 @@ func NewServer(m *Manager) *mcp.Server {
 	add(s, "vm_stop", "Turn off a VM.", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
 		return done(hyperv.Stop(in.VM))
 	})
+	add(s, "vm_checkpoints", "List the VM's checkpoints (name, creation time).", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
+		cps, err := hyperv.ListCheckpoints(in.VM)
+		if err != nil {
+			return nil, err
+		}
+		var b strings.Builder
+		for _, c := range cps {
+			fmt.Fprintf(&b, "%s\t%s\n", c.Name, c.CreationTime)
+		}
+		if b.Len() == 0 {
+			return text("no checkpoints"), nil
+		}
+		return text("%s", b.String()), nil
+	})
+	add(s, "vm_checkpoint", "Create a checkpoint of the VM.", func(ctx context.Context, in checkpointIn) (*mcp.CallToolResult, error) {
+		return done(hyperv.CreateCheckpoint(in.VM, in.Name))
+	})
+	add(s, "vm_restore", "Restore a checkpoint, then start the VM if it is off (unless start is false).", func(ctx context.Context, in restoreIn) (*mcp.CallToolResult, error) {
+		v, err := hyperv.Find(in.VM) // resolve "" now: after the restore the VM may be off
+		if err != nil {
+			return nil, err
+		}
+		if err := hyperv.RestoreCheckpoint(v.Name, in.Name); err != nil {
+			return nil, err
+		}
+		m.Drop(v.ID)
+		if in.Start == nil || *in.Start {
+			if v, err = hyperv.Find(v.Name); err != nil {
+				return nil, err
+			} else if v.State == "Off" {
+				return done(hyperv.Start(v.Name))
+			}
+		}
+		return text("ok"), nil
+	})
 	add(s, "vm_screenshot", "Take a PNG screenshot of the VM screen. Its pixel coordinates are the coordinates for vm_click, vm_drag and vm_scroll.",
 		func(ctx context.Context, in screenshotIn) (*mcp.CallToolResult, error) {
 			var png []byte
@@ -193,7 +238,7 @@ func NewServer(m *Manager) *mcp.Server {
 	add(s, "vm_exec", "Run a command in the guest (as the logged-on user); returns exit code, stdout and stderr.",
 		func(ctx context.Context, in execIn) (*mcp.CallToolResult, error) {
 			var r proto.ExecResult
-			if _, err := call(ctx, in.VM, proto.OpExec, proto.ExecArgs{Command: in.Command, Shell: in.Shell, Cwd: in.Cwd, TimeoutMs: in.TimeoutMs}, nil, &r); err != nil {
+			if _, err := call(ctx, in.VM, proto.OpExec, proto.ExecArgs{Command: in.Command, Shell: in.Shell, Cwd: in.Cwd, TimeoutMs: in.TimeoutMs, Admin: in.Admin}, nil, &r); err != nil {
 				return nil, err
 			}
 			return text("exit_code: %d\ntimed_out: %v\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.TimedOut, r.Stdout, r.Stderr), nil
@@ -227,18 +272,16 @@ func NewServer(m *Manager) *mcp.Server {
 		}
 		return text("%d files copied", n), nil
 	})
-	add(s, "vm_pull", "Copy a file from the guest to the host.", func(ctx context.Context, in pullIn) (*mcp.CallToolResult, error) {
-		data, err := call(ctx, in.VM, proto.OpReadFile, proto.PathArgs{Path: in.GuestPath}, nil, nil)
+	add(s, "vm_pull", "Copy a file, or a directory recursively, from the guest to the host.", func(ctx context.Context, in pullIn) (*mcp.CallToolResult, error) {
+		c, err := m.Client(in.VM)
 		if err != nil {
 			return nil, err
 		}
-		if err := os.MkdirAll(filepath.Dir(in.HostPath), 0o755); err != nil {
-			return nil, err
+		n, size, err := pull(ctx, c, in.GuestPath, in.HostPath)
+		if err != nil {
+			return nil, fmt.Errorf("%w (%d files copied)", err, n)
 		}
-		if err := os.WriteFile(in.HostPath, data, 0o644); err != nil {
-			return nil, err
-		}
-		return text("%d bytes written to %s", len(data), in.HostPath), nil
+		return text("%d files (%d bytes) written to %s", n, size, in.HostPath), nil
 	})
 	add(s, "vm_clipboard_get", "Get the guest clipboard text.", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
 		var r proto.TextResult
@@ -338,4 +381,41 @@ func waitPing(ctx context.Context, c *Client) (*mcp.CallToolResult, error) {
 		}
 	}
 	return nil, errors.Join(errors.New("agent did not answer within 30 s"), err)
+}
+
+// pull copies a guest file, or a guest directory recursively (walked with list_dir), to hostPath; returns files and bytes.
+func pull(ctx context.Context, c *Client, guestPath, hostPath string) (files, size int, err error) {
+	var ls proto.ListDirResult
+	if _, err := c.Call(ctx, proto.OpListDir, proto.PathArgs{Path: guestPath}, nil, &ls); err != nil {
+		data, err := c.Call(ctx, proto.OpReadFile, proto.PathArgs{Path: guestPath}, nil, nil)
+		if err != nil {
+			return 0, 0, fmt.Errorf("%s: %w", guestPath, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(hostPath), 0o755); err != nil {
+			return 0, 0, err
+		}
+		return 1, len(data), os.WriteFile(hostPath, data, 0o644)
+	}
+	if err := os.MkdirAll(hostPath, 0o755); err != nil {
+		return 0, 0, err
+	}
+	for _, e := range ls.Entries {
+		g, h := strings.TrimRight(guestPath, `\/`)+`\`+e.Name, filepath.Join(hostPath, e.Name)
+		var n, b int
+		if e.IsDir {
+			n, b, err = pull(ctx, c, g, h)
+		} else {
+			var data []byte
+			if data, err = c.Call(ctx, proto.OpReadFile, proto.PathArgs{Path: g}, nil, nil); err != nil {
+				err = fmt.Errorf("%s: %w", g, err)
+			} else if err = os.WriteFile(h, data, 0o644); err == nil {
+				n, b = 1, len(data)
+			}
+		}
+		files, size = files+n, size+b
+		if err != nil {
+			return files, size, err
+		}
+	}
+	return files, size, nil
 }
