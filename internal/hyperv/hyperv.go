@@ -557,6 +557,7 @@ var (
 	oleaut32                  = windows.NewLazySystemDLL("oleaut32.dll")
 	procSafeArrayAccessData   = oleaut32.NewProc("SafeArrayAccessData")
 	procSafeArrayUnaccessData = oleaut32.NewProc("SafeArrayUnaccessData")
+	procSafeArrayGetElemsize  = oleaut32.NewProc("SafeArrayGetElemsize")
 )
 
 // safeArrayBytes reads WMI's uint8[] SAFEARRAY. VT_UI1 and VT_VARIANT arrays are read straight from the array data
@@ -572,10 +573,13 @@ func safeArrayBytes(arr *ole.SafeArrayConversion) ([]byte, error) {
 		return nil, err
 	}
 	if (ole.VT(vt) == ole.VT_UI1 || ole.VT(vt) == ole.VT_VARIANT) && n > 0 {
-		size, err := arr.GetSize() // element size: 1, or 16/24 for a VARIANT (32/64-bit)
-		if err != nil {
-			return nil, err
+		// Element size: 1, or 16/24 for a VARIANT (32/64-bit). Called directly: go-ole's GetSize returns the size cast
+		// to a pointer (dereferencing it crashes).
+		es, _, _ := procSafeArrayGetElemsize.Call(uintptr(unsafe.Pointer(arr.Array)))
+		if es == 0 {
+			return nil, errors.New("SafeArrayGetElemsize returned 0")
 		}
+		size := &[]uint32{uint32(es)}[0]
 		var p unsafe.Pointer
 		if hr, _, _ := procSafeArrayAccessData.Call(uintptr(unsafe.Pointer(arr.Array)), uintptr(unsafe.Pointer(&p))); hr != 0 {
 			return nil, fmt.Errorf("SafeArrayAccessData: 0x%08x", uint32(hr))

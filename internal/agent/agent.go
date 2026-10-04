@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"os/user"
-	"time"
 
 	"hyperhand/internal/proto"
 )
@@ -52,35 +51,51 @@ func Dispatch(ctx context.Context, op string, args json.RawMessage, payload []by
 
 // Serve reads requests from c and writes responses until the connection fails.
 func Serve(c net.Conn) error {
-	for {
-		var req proto.Request
-		payload, err := proto.ReadFrame(c, &req)
-		if err != nil {
-			return err
-		}
-		// The host sends nothing while it waits for the response, so any return of this read
-		// (EOF, error or data) means the host went away: cancel the request.
-		ctx, cancel := context.WithCancel(context.Background())
-		watchErr := make(chan error, 1)
-		go func() {
-			var b [1]byte
-			_, err := c.Read(b[:])
-			if err == nil {
-				err = errors.New("unexpected data from host while a request is running")
+	// One goroutine reads frames for the whole connection. The host sends nothing while it waits for a response, so a
+	// read error while a request runs means the host went away: the request's context is cancelled.
+	type frame struct {
+		req     proto.Request
+		payload []byte
+		err     error
+	}
+	frames := make(chan frame, 1)
+	gone := make(chan struct{})
+	go func() {
+		for {
+			var f frame
+			f.payload, f.err = proto.ReadFrame(c, &f.req)
+			if f.err != nil {
+				close(gone)
 			}
-			cancel()
-			watchErr <- err
+			frames <- f
+			if f.err != nil {
+				return
+			}
+		}
+	}()
+	for {
+		f := <-frames
+		if f.err != nil {
+			return f.err
+		}
+		req, payload := f.req, f.payload
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			select {
+			case <-gone:
+				cancel()
+			case <-ctx.Done():
+			}
 		}()
 		var resp proto.Response
 		result, out, err := Dispatch(ctx, req.Op, req.Args, payload)
-		// Stop the watcher before the next ReadFrame so it does not take bytes of the next frame.
-		c.SetReadDeadline(time.Unix(1, 0))
-		werr := <-watchErr
-		c.SetReadDeadline(time.Time{})
-		cancel()
-		if ne, ok := werr.(net.Error); ok && ne.Timeout() {
-			werr = nil // stopped by the deadline above: the host is still there
+		var werr error
+		select {
+		case <-gone:
+			werr = errors.New("host disconnected")
+		default:
 		}
+		cancel()
 		if err == nil && result != nil {
 			resp.Result, err = json.Marshal(result)
 		}
