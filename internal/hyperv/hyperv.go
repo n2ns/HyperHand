@@ -95,7 +95,16 @@ func Screenshot(vm string) (pngData []byte, width, height int, err error) {
 		if arr == nil {
 			return errors.New("no image data")
 		}
-		img, err := rgb565ToRGBA(arr.ToByteArray(), width, height)
+		vals := arr.ToValueArray() // ToByteArray misreads WMI's uint8 array (every byte came back as 0x11, the VT_UI1 tag)
+		data := make([]byte, len(vals))
+		for i, x := range vals {
+			if b, ok := x.(uint8); ok {
+				data[i] = b
+			} else {
+				data[i] = byte(toInt(x))
+			}
+		}
+		img, err := rgb565ToRGBA(data, width, height)
 		if err != nil {
 			return err
 		}
