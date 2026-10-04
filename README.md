@@ -40,7 +40,7 @@ claude mcp add --transport http hyperhand http://127.0.0.1:8770/mcp
 | vm_click / vm_drag / vm_scroll | 鼠标点击、拖动、滚轮 |
 | vm_type / vm_key | 输入文本（经 agent 写剪贴板再 ctrl+v 粘贴，避免来宾中文输入法吞字；agent 不可用时 ASCII 文本退回键盘输入）、按键/组合键（如 `ctrl+plus` 表示 Ctrl 加 +/= 键） |
 | vm_exec | 在来宾中执行命令，返回退出码、stdout、stderr；`admin`: true 以管理员身份运行 |
-| vm_push / vm_pull | 主机↔来宾复制文件或目录（目录递归）；单个文件推到以 `\` 结尾的来宾路径、或拉到已存在的主机目录/以 `\` 结尾的路径时，自动补上文件名 |
+| vm_push / vm_pull | 主机↔来宾复制文件或目录（目录递归）；单个文件推到以 `\` 结尾的来宾路径、或拉到已存在的主机目录/以 `\` 结尾的路径时，自动补上文件名；vm_push 默认先比对 SHA-256（`hash_files`），来宾端已相同的文件跳过不传，`force=true` 则全部上传（旧版 agent 不支持时自动全部上传） |
 | vm_clipboard_get / vm_clipboard_set | 读写来宾剪贴板 |
 | vm_focus_window | 按标题激活窗口 |
 | vm_wait | 等待进程退出/运行或文件出现 |
