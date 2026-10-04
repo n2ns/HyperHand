@@ -1,6 +1,6 @@
 # User Guide
 
-This guide covers building HyperHand, installing the host tray and the guest agent, connecting Claude Code, updating, uninstalling, and troubleshooting.
+This guide covers building HyperHand, installing the host tray and the guest agent, connecting an MCP client (Claude Code, Codex or another client), updating, uninstalling, and troubleshooting.
 
 HyperHand has two parts:
 
@@ -50,15 +50,32 @@ The tray menu shows the MCP URL, or the error if the port could not be opened.
 hyperhand.exe -port 8771
 ```
 
-The server always listens on `127.0.0.1`. The scheduled task created by `install` runs without arguments; to use another port at logon, add `-port <n>` to the task's action arguments in Task Scheduler, and use the matching URL when adding the server to Claude Code.
+The server always listens on `127.0.0.1`. The scheduled task created by `install` runs without arguments; to use another port at logon, add `-port <n>` to the task's action arguments in Task Scheduler, and use the matching URL when adding the server to your MCP client.
 
-## 3. Add HyperHand to Claude Code
+## 3. Add HyperHand to an MCP client
+
+Claude Code:
 
 ```
 claude mcp add --transport http hyperhand http://127.0.0.1:8770/mcp
 ```
 
-Start a new Claude Code session afterwards. The tools are loaded when the session starts.
+Codex:
+
+```powershell
+codex mcp add hyperhand --url http://127.0.0.1:8770/mcp
+```
+
+or in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.hyperhand]
+url = "http://127.0.0.1:8770/mcp"
+```
+
+Other clients: add a Streamable HTTP server with the URL `http://127.0.0.1:8770/mcp`. No token or other authentication is needed.
+
+Start a new session in the client afterwards. The tools are loaded when the session starts.
 
 All tools take an optional `vm` argument (the VM name). If it is omitted, HyperHand uses the only running VM, or the only VM if none is running. With several running VMs, pass `vm` explicitly. `vm_list` shows names, states and IDs.
 
@@ -69,7 +86,7 @@ Before you start:
 - The VM is running and a user is logged on to the desktop.
 - The guest keyboard layout and IME are in English mode. The install command is typed on the keyboard, and a non-English IME can swallow or alter the keystrokes. See [Set the guest default input method to English](#set-the-guest-default-input-method-to-english).
 
-Ask Claude to call `vm_install_agent`. It:
+Ask the AI to call `vm_install_agent`. It:
 
 1. Enables the Guest Service Interface integration service if it is off (required by `Copy-VMFile`; no guest password is needed).
 2. Copies `hyperhand-agent.exe` to `C:\Users\Public\HyperHand\hyperhand-agent.exe` in the guest.
@@ -138,7 +155,7 @@ Sign out and back in for the change to apply.
 
    The script stops the running tray, moves `build\hyperhand.exe.new` over `build\hyperhand.exe` if it exists, and starts the `HyperHand` scheduled task again. It assumes the task points at `build\hyperhand.exe` in the repository.
 
-3. Ask Claude to call `vm_update_agent`. The host sends the `hyperhand-agent.exe` next to `hyperhand.exe` to the running agent, which replaces itself, restarts, and is pinged until it answers (up to 30 seconds). Repeat for each VM.
+3. Ask the AI to call `vm_update_agent`. The host sends the `hyperhand-agent.exe` next to `hyperhand.exe` to the running agent, which replaces itself, restarts, and is pinged until it answers (up to 30 seconds). Repeat for each VM.
 
 `vm_update_agent` needs a running agent. If the agent does not answer, use `vm_install_agent` instead.
 
@@ -159,7 +176,7 @@ On the host, from an elevated prompt:
    reg delete "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\3ce544e1-2645-4383-b332-fedf8a18736b" /f
    ```
 
-4. Remove the server from Claude Code: `claude mcp remove hyperhand`.
+4. Remove the server from your MCP client: `claude mcp remove hyperhand` (Claude Code) or `codex mcp remove hyperhand` (Codex).
 5. Optionally delete `%LOCALAPPDATA%\HyperHand` (the log) and the build directory.
 
 In each guest, as the user the agent was installed for:
@@ -197,7 +214,7 @@ The host keyboard sends key strokes, and a non-English IME in the guest can swal
 
 ### Port 8770 is already in use
 
-The tray menu shows the error instead of the MCP URL, and the log records it. Start the tray with `-port <n>` (and change the scheduled task arguments as described in [Using a different port](#using-a-different-port)), then re-add the server in Claude Code with the new URL.
+The tray menu shows the error instead of the MCP URL, and the log records it. Start the tray with `-port <n>` (and change the scheduled task arguments as described in [Using a different port](#using-a-different-port)), then re-add the server in your MCP client with the new URL.
 
 ### `admin` exec hangs or times out
 

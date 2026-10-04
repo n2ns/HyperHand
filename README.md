@@ -1,6 +1,6 @@
-# HyperHand: Hyper-V VM Control for Claude Code
+# HyperHand: Hyper-V VM Control for AI Agents
 
-Let Claude Code see and operate a Windows virtual machine on Hyper-V: take screenshots, click, type, run commands, move files and roll back to checkpoints, without a network connection to the guest and without a guest password. Built for Windows 10/11 hosts running Hyper-V with Windows guests.
+Let an AI agent such as Claude Code or Codex see and operate a Windows virtual machine on Hyper-V: take screenshots, click, type, run commands, move files and roll back to checkpoints, without a network connection to the guest and without a guest password. Built for Windows 10/11 hosts running Hyper-V with Windows guests; works with any MCP client that supports Streamable HTTP.
 
 HyperHand has two parts:
 
@@ -15,7 +15,7 @@ HyperHand has two parts:
 - **Checkpoints**: list, create and restore; a restored VM is started again automatically.
 - **Clipboard, windows and waiting**: read and write the guest clipboard, bring a window to the front, wait until a process exits or a file appears.
 - **No guest network, no guest password**: host and agent talk over a Hyper-V socket; the agent is copied in with Hyper-V's guest file copy and installed from the keyboard.
-- **Cancellation**: when Claude Code cancels a long command, the agent kills it and is ready for the next request immediately.
+- **Cancellation**: when the MCP client cancels a long command, the agent kills it and is ready for the next request immediately.
 
 ## Requirements
 
@@ -23,7 +23,7 @@ HyperHand has two parts:
 - A Windows guest with a logged-on user.
 - VMConnect in basic session mode. Enhanced session moves the user's session to remote desktop, so host-side screenshots and input would reach the console lock screen instead.
 - Go 1.27 or later to build.
-- Claude Code (any MCP client that supports Streamable HTTP works).
+- An MCP client that supports Streamable HTTP: Claude Code, Codex, Cursor and others.
 
 ## Install
 
@@ -37,15 +37,25 @@ build\hyperhand.exe install
 
 ## Quick start
 
-1. Add HyperHand to Claude Code and start a new session:
+1. Add HyperHand to your MCP client and start a new session:
+
+   Claude Code:
 
    ```powershell
    claude mcp add --transport http hyperhand http://127.0.0.1:8770/mcp
    ```
 
+   Codex:
+
+   ```powershell
+   codex mcp add hyperhand --url http://127.0.0.1:8770/mcp
+   ```
+
+   Other clients: add a Streamable HTTP server with the URL `http://127.0.0.1:8770/mcp`.
+
 2. Start the VM and log on in the guest. Switch the guest keyboard to English: the agent's install command is typed on the keyboard, and an input method in Chinese mode would garble it.
-3. Ask Claude to install the agent (`vm_install_agent`). It copies the agent into the guest, runs its installer and waits until it answers. The agent then starts at every logon.
-4. Ask Claude to work in the VM: take a screenshot, open an application, run a command, copy a build in, restore a checkpoint.
+3. Ask the AI to install the agent (`vm_install_agent`). It copies the agent into the guest, runs its installer and waits until it answers. The agent then starts at every logon.
+4. Ask the AI to work in the VM: take a screenshot, open an application, run a command, copy a build in, restore a checkpoint.
 
 ## Tools
 
@@ -69,7 +79,7 @@ Screen, mouse, keyboard, VM and checkpoint tools work without the agent; the oth
 
 ## Known limitations
 
-- One AI client at a time: requests to a VM's agent are handled one after another.
+- One AI client per VM at a time: several clients can connect, but requests to a VM's agent are handled one after another and their mouse and keyboard actions would interleave.
 - `vm_install_agent` types its command on the keyboard; the guest input method must be in English mode.
 - `admin` commands elevate without a prompt only if the guest's UAC is set to elevate administrators without prompting; otherwise they wait at the UAC prompt.
 - Host-side screenshots and input act on the VM console; they do not reach a remote desktop or enhanced session.
