@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/png"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -101,15 +102,70 @@ func toUTF8(b []byte) string {
 	return string(utf16.Decode(u))
 }
 
-func writeFile(_ context.Context, args json.RawMessage, payload []byte) (any, []byte, error) {
-	var a proto.PathArgs
-	if err := decode(args, &a); err != nil {
-		return nil, nil, err
+// writeFileStream writes the next size bytes of r (a write_file payload) to the file named in args, via
+// <path>.hhpart. opErr is the request's error; the payload is always consumed, so connErr is set only when reading r
+// fails (the stream is then broken).
+func writeFileStream(r io.Reader, args json.RawMessage, size int64) (opErr, connErr error) {
+	er := &errReader{r: r}
+	var n int64
+	opErr = func() error {
+		var a proto.PathArgs
+		if err := decode(args, &a); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(a.Path), 0o755); err != nil {
+			return err
+		}
+		part := a.Path + ".hhpart"
+		f, err := os.Create(part)
+		if err != nil {
+			return err
+		}
+		// struct{io.Writer} hides os.File.ReadFrom so the 1 MB buffer is used.
+		n, err = io.CopyBuffer(struct{ io.Writer }{f}, io.LimitReader(er, size), make([]byte, 1<<20))
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err == nil && n < size {
+			err = io.ErrUnexpectedEOF
+		}
+		if err == nil {
+			err = os.Rename(part, a.Path)
+		}
+		if err != nil {
+			os.Remove(part)
+		}
+		return err
+	}()
+	if er.err != nil {
+		return opErr, er.err
 	}
-	if err := os.MkdirAll(filepath.Dir(a.Path), 0o755); err != nil {
-		return nil, nil, err
+	if n < size {
+		if _, err := io.CopyN(io.Discard, r, size-n); err != nil {
+			return opErr, err
+		}
 	}
-	return nil, nil, os.WriteFile(a.Path, payload, 0o644)
+	return opErr, nil
+}
+
+// errReader records the first read error.
+type errReader struct {
+	r   io.Reader
+	err error
+}
+
+func (e *errReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err != nil && e.err == nil {
+		e.err = err
+	}
+	return n, err
+}
+
+// fileStream is read_file's result: Serve streams the open file as the response payload and closes it.
+type fileStream struct {
+	f    *os.File
+	size int64
 }
 
 func readFile(_ context.Context, args json.RawMessage, _ []byte) (any, []byte, error) {
@@ -117,8 +173,19 @@ func readFile(_ context.Context, args json.RawMessage, _ []byte) (any, []byte, e
 	if err := decode(args, &a); err != nil {
 		return nil, nil, err
 	}
-	b, err := os.ReadFile(a.Path)
-	return nil, b, err
+	f, err := os.Open(a.Path)
+	if err != nil {
+		return nil, nil, err
+	}
+	st, err := f.Stat()
+	if err == nil && st.IsDir() {
+		err = fmt.Errorf("%s is a directory", a.Path)
+	}
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	return fileStream{f, st.Size()}, nil, nil
 }
 
 func listDir(_ context.Context, args json.RawMessage, _ []byte) (any, []byte, error) {

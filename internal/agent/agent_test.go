@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -206,4 +207,53 @@ func TestServeSequential(t *testing.T) {
 		var p proto.PingResult
 		call(t, client, proto.OpPing, nil, nil, &p)
 	}
+}
+
+// A multi-MB write_file is streamed to the file and the stream stays in sync.
+func TestServeWriteFileLarge(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	go Serve(server)
+	data := make([]byte, 5<<20+123)
+	for i := range data {
+		data[i] = byte(i * 7)
+	}
+	path := filepath.Join(t.TempDir(), "big", "f.bin")
+	call(t, client, proto.OpWriteFile, proto.PathArgs{Path: path}, data, nil)
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("file content differs (err %v, len %d)", err, len(got))
+	}
+	if _, err := os.Stat(path + ".hhpart"); err == nil {
+		t.Fatal(".hhpart left behind")
+	}
+	if got := call(t, client, proto.OpReadFile, proto.PathArgs{Path: path}, nil, nil); !bytes.Equal(got, data) {
+		t.Fatal("read_file content differs")
+	}
+	var p proto.PingResult
+	call(t, client, proto.OpPing, nil, nil, &p)
+}
+
+// A failing write_file returns an error, its payload is skipped and the next request works.
+func TestServeWriteFileError(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	go Serve(server)
+	for _, args := range []json.RawMessage{mustJSON(proto.PathArgs{Path: `Q:
+ope\<bad>|f.txt`}), json.RawMessage(`"x"`)} {
+		proto.WriteFrame(client, proto.Request{Op: proto.OpWriteFile, Args: args}, make([]byte, 3<<20))
+		var resp proto.Response
+		if _, err := proto.ReadFrame(client, &resp); err != nil || resp.Error == "" {
+			t.Fatalf("%s: want error, got %v %+v", args, err, resp)
+		}
+		var p proto.PingResult
+		call(t, client, proto.OpPing, nil, nil, &p)
+	}
+	proto.WriteFrame(client, proto.Request{Op: proto.OpReadFile, Args: mustJSON(proto.PathArgs{Path: `C:
+ope-hh.txt`})}, nil)
+	var resp proto.Response
+	if out, err := proto.ReadFrame(client, &resp); err != nil || resp.Error == "" || len(out) != 0 {
+		t.Fatalf("read_file missing: %v %+v", err, resp)
+	}
+	var p proto.PingResult
+	call(t, client, proto.OpPing, nil, nil, &p)
 }

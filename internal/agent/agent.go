@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/user"
@@ -20,7 +21,6 @@ type Handler func(ctx context.Context, args json.RawMessage, payload []byte) (re
 var handlers = map[string]Handler{
 	proto.OpPing:         ping,
 	proto.OpExec:         execOp,
-	proto.OpWriteFile:    writeFile,
 	proto.OpReadFile:     readFile,
 	proto.OpListDir:      listDir,
 	proto.OpScreenshot:   screenshotOp,
@@ -53,9 +53,13 @@ func Dispatch(ctx context.Context, op string, args json.RawMessage, payload []by
 func Serve(c net.Conn) error {
 	// One goroutine reads frames for the whole connection. The host sends nothing while it waits for a response, so a
 	// read error while a request runs means the host went away: the request's context is cancelled.
+	// write_file payloads are streamed to the file right here (done is set and opErr carries the result), so the
+	// stream stays in sync whatever happens to the file.
 	type frame struct {
 		req     proto.Request
 		payload []byte
+		done    bool
+		opErr   error
 		err     error
 	}
 	frames := make(chan frame, 1)
@@ -63,7 +67,15 @@ func Serve(c net.Conn) error {
 	go func() {
 		for {
 			var f frame
-			f.payload, f.err = proto.ReadFrame(c, &f.req)
+			var size int64
+			size, f.err = proto.ReadHeader(c, &f.req)
+			if f.err == nil && f.req.Op == proto.OpWriteFile {
+				f.done = true
+				f.opErr, f.err = writeFileStream(c, f.req.Args, size)
+			} else if f.err == nil {
+				f.payload = make([]byte, size)
+				_, f.err = io.ReadFull(c, f.payload)
+			}
 			if f.err != nil {
 				close(gone)
 			}
@@ -88,7 +100,18 @@ func Serve(c net.Conn) error {
 			}
 		}()
 		var resp proto.Response
-		result, out, err := Dispatch(ctx, req.Op, req.Args, payload)
+		var result any
+		var out []byte
+		var err error
+		if f.done {
+			err = f.opErr
+		} else {
+			result, out, err = Dispatch(ctx, req.Op, req.Args, payload)
+		}
+		stream, isStream := result.(fileStream) // read_file: the payload is streamed from the open file
+		if isStream {
+			result = nil
+		}
 		var werr error
 		select {
 		case <-gone:
@@ -103,7 +126,14 @@ func Serve(c net.Conn) error {
 			resp.Error, out = err.Error(), nil
 		}
 		if werr == nil {
-			werr = proto.WriteFrame(c, resp, out)
+			if isStream {
+				werr = proto.WriteFrameFrom(c, resp, stream.size, stream.f)
+			} else {
+				werr = proto.WriteFrame(c, resp, out)
+			}
+		}
+		if isStream {
+			stream.f.Close()
 		}
 		if req.Op == proto.OpUpdateAgent && resp.Error == "" && AfterUpdate != nil {
 			AfterUpdate() // the new exe is already in place, even if the response could not be sent
