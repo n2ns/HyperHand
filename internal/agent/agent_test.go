@@ -238,8 +238,7 @@ func TestServeWriteFileError(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go Serve(server)
-	for _, args := range []json.RawMessage{mustJSON(proto.PathArgs{Path: `Q:
-ope\<bad>|f.txt`}), json.RawMessage(`"x"`)} {
+	for _, args := range []json.RawMessage{mustJSON(proto.PathArgs{Path: `Q:\nope\<bad>|f.txt`}), json.RawMessage(`"x"`)} {
 		proto.WriteFrame(client, proto.Request{Op: proto.OpWriteFile, Args: args}, make([]byte, 3<<20))
 		var resp proto.Response
 		if _, err := proto.ReadFrame(client, &resp); err != nil || resp.Error == "" {
@@ -248,8 +247,7 @@ ope\<bad>|f.txt`}), json.RawMessage(`"x"`)} {
 		var p proto.PingResult
 		call(t, client, proto.OpPing, nil, nil, &p)
 	}
-	proto.WriteFrame(client, proto.Request{Op: proto.OpReadFile, Args: mustJSON(proto.PathArgs{Path: `C:
-ope-hh.txt`})}, nil)
+	proto.WriteFrame(client, proto.Request{Op: proto.OpReadFile, Args: mustJSON(proto.PathArgs{Path: `C:\nope-hh.txt`})}, nil)
 	var resp proto.Response
 	if out, err := proto.ReadFrame(client, &resp); err != nil || resp.Error == "" || len(out) != 0 {
 		t.Fatalf("read_file missing: %v %+v", err, resp)
