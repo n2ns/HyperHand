@@ -1,6 +1,8 @@
 // hyperhand-agent runs in the VM user's desktop session, shows a tray icon and serves
 // requests from the host over a Hyper-V socket. "hyperhand-agent.exe install" installs it
-// to %LOCALAPPDATA%\HyperHand and starts it at logon (HKCU Run key, no admin needed).
+// to %LOCALAPPDATA%\HyperHand and starts it at logon (HKCU Run key, no admin needed);
+// "hyperhand-agent.exe uninstall" stops it, removes the Run value and deletes
+// %LOCALAPPDATA%\HyperHand and C:\Users\Public\HyperHand (also no admin needed).
 //
 // Build: go build -ldflags "-H windowsgui" ./cmd/hyperhand-agent
 package main
@@ -16,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -35,6 +38,10 @@ func main() {
 			windows.MessageBox(0, windows.StringToUTF16Ptr(err.Error()), windows.StringToUTF16Ptr("HyperHand"), 0x10)
 			os.Exit(1)
 		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "uninstall" {
+		uninstall()
 		return
 	}
 	h, err := windows.CreateMutex(nil, false, windows.StringToUTF16Ptr("HyperHandAgent"))
@@ -139,6 +146,61 @@ func install() error {
 		return err
 	}
 	return exec.Command(dst).Start()
+}
+
+// uninstall undoes install (and the C:\Users\Public staging copy); every step runs even if
+// an earlier one fails, and the result is shown in a message box.
+func uninstall() {
+	var done, failed []string
+	pid := strconv.Itoa(os.Getpid())
+	hidden("taskkill", "/F", "/IM", "hyperhand-agent.exe", "/FI", "PID ne "+pid).Run()
+	for i := 0; i < 20; i++ {
+		out, _ := hidden("tasklist", "/NH", "/FI", "IMAGENAME eq hyperhand-agent.exe", "/FI", "PID ne "+pid).Output()
+		if !strings.Contains(strings.ToLower(string(out)), "hyperhand-agent.exe") {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	done = append(done, "已停止其他 hyperhand-agent.exe 进程")
+
+	if k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE); err != nil {
+		failed = append(failed, `HKCU\...\Run\HyperHandAgent: `+err.Error())
+	} else {
+		if err := k.DeleteValue("HyperHandAgent"); err != nil && err != registry.ErrNotExist {
+			failed = append(failed, `HKCU\...\Run\HyperHandAgent: `+err.Error())
+		} else {
+			done = append(done, `HKCU\...\Run\HyperHandAgent`)
+		}
+		k.Close()
+	}
+
+	self, _ := os.Executable()
+	for _, dir := range []string{filepath.Join(os.Getenv("LOCALAPPDATA"), "HyperHand"), `C:\Users\Public\HyperHand`} {
+		inside := self != "" && strings.HasPrefix(strings.ToLower(self), strings.ToLower(dir)+`\`)
+		err := os.RemoveAll(dir) // removes what it can even when some entries fail
+		switch {
+		case err == nil:
+			done = append(done, dir)
+		case inside: // our own exe is locked until we exit
+			c := hidden("cmd")
+			c.SysProcAttr.CmdLine = `cmd /c ping -n 3 127.0.0.1 >nul & rmdir /s /q "` + dir + `"` // raw: cmd ignores Go's \" escaping
+			if err := c.Start(); err != nil {
+				failed = append(failed, dir+": "+err.Error())
+			} else {
+				done = append(done, dir+"（本程序退出后删除）")
+			}
+		default:
+			failed = append(failed, dir+": "+err.Error())
+		}
+	}
+
+	msg := "已移除:\n" + strings.Join(done, "\n")
+	flags := uint32(0x40) // MB_ICONINFORMATION
+	if len(failed) > 0 {
+		msg += "\n\n失败:\n" + strings.Join(failed, "\n")
+		flags = 0x30 // MB_ICONWARNING
+	}
+	windows.MessageBox(0, windows.StringToUTF16Ptr(msg), windows.StringToUTF16Ptr("HyperHand 卸载"), flags)
 }
 
 func samePath(a, b string) bool {
