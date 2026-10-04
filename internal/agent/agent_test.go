@@ -3,6 +3,8 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -254,4 +256,26 @@ func TestServeWriteFileError(t *testing.T) {
 	}
 	var p proto.PingResult
 	call(t, client, proto.OpPing, nil, nil, &p)
+}
+
+func TestHashFiles(t *testing.T) {
+	dir := t.TempDir()
+	var paths, want []string
+	for i, content := range []string{"hello", strings.Repeat("x", 3<<20)} {
+		p := filepath.Join(dir, fmt.Sprintf("f%d", i))
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256([]byte(content))
+		paths, want = append(paths, p), append(want, hex.EncodeToString(sum[:]))
+	}
+	paths, want = append(paths, filepath.Join(dir, "missing"), dir), append(want, "", "")
+	res, _, err := Dispatch(context.Background(), proto.OpHashFiles, mustJSON(proto.PathsArgs{Paths: paths}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := res.(proto.HashesResult).Hashes
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
 }
