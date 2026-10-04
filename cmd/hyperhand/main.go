@@ -2,6 +2,7 @@
 //
 //	hyperhand.exe [-port 8770]   run the tray and the MCP server (needs elevation)
 //	hyperhand.exe install        run this exe at logon, elevated (scheduled task)
+//	hyperhand.exe uninstall      stop it, remove the task, the Hyper-V socket service key and the log folder (keeps the exe)
 package main
 
 import (
@@ -25,6 +26,11 @@ import (
 )
 
 func main() {
+	// Before the log file is opened, so uninstall can delete its folder.
+	if len(os.Args) > 1 && os.Args[1] == "uninstall" {
+		uninstall()
+		return
+	}
 	dir := filepath.Join(os.Getenv("LOCALAPPDATA"), "HyperHand")
 	os.MkdirAll(dir, 0o755)
 	if f, err := os.OpenFile(filepath.Join(dir, "hyperhand.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
