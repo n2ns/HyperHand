@@ -18,7 +18,7 @@ go build -ldflags "-H windowsgui" -o build\hyperhand-agent.exe .\cmd\hyperhand-a
 build\hyperhand.exe install
 ```
 
-会弹一次 UAC，把两个 exe 复制到 `%LOCALAPPDATA%\HyperHand\`，创建登录时以最高权限运行的计划任务 `HyperHand` 并立即启动（托盘出现图标）。
+会弹一次 UAC，创建登录时以最高权限运行这个 exe（就在它现在的位置）的计划任务 `HyperHand` 并立即启动（托盘出现图标）。`hyperhand-agent.exe` 要和它放在同一目录。
 
 ## 接入 Claude Code
 

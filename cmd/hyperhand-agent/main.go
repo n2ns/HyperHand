@@ -1,6 +1,6 @@
 // hyperhand-agent runs in the VM user's desktop session, shows a tray icon and serves
 // requests from the host over a Hyper-V socket. "hyperhand-agent.exe install" installs it
-// to %LOCALAPPDATA%\HyperHand and registers a logon task.
+// to %LOCALAPPDATA%\HyperHand and starts it at logon (HKCU Run key, no admin needed).
 //
 // Build: go build -ldflags "-H windowsgui" ./cmd/hyperhand-agent
 package main
@@ -8,14 +8,12 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"io"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"syscall"
@@ -23,12 +21,11 @@ import (
 
 	"fyne.io/systray"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 
 	"hyperhand/internal/agent"
 	"hyperhand/internal/hvsock"
 )
-
-const taskName = "HyperHandAgent"
 
 var mutex windows.Handle
 
@@ -126,24 +123,15 @@ func install() error {
 			return err
 		}
 	}
-	u, err := user.Current()
+	k, _, err := registry.CreateKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE)
 	if err != nil {
 		return err
 	}
-	out, err := hidden("schtasks", "/Create", "/F", "/TN", taskName, "/SC", "ONLOGON", "/RL", "LIMITED",
-		"/IT", "/RU", u.Username, "/TR", `"`+dst+`"`).CombinedOutput()
-	if err != nil {
-		return fmtErr("schtasks /Create", out, err)
+	defer k.Close()
+	if err := k.SetStringValue("HyperHandAgent", `"`+dst+`"`); err != nil {
+		return err
 	}
-	// Run through the task so the agent lands in the user's interactive session.
-	if out, err := hidden("schtasks", "/Run", "/TN", taskName).CombinedOutput(); err != nil {
-		return fmtErr("schtasks /Run", out, err)
-	}
-	return nil
-}
-
-func fmtErr(what string, out []byte, err error) error {
-	return fmt.Errorf("%s: %v\n%s", what, err, out)
+	return exec.Command(dst).Start()
 }
 
 func samePath(a, b string) bool {

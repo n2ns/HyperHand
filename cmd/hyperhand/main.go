@@ -1,7 +1,7 @@
 // Command hyperhand is the HyperHand host tray program: an MCP server (Streamable HTTP) that controls Hyper-V VMs.
 //
 //	hyperhand.exe [-port 8770]   run the tray and the MCP server (needs elevation)
-//	hyperhand.exe install        install to %LOCALAPPDATA%\HyperHand and run at logon (scheduled task)
+//	hyperhand.exe install        run this exe at logon, elevated (scheduled task)
 package main
 
 import (
@@ -32,7 +32,7 @@ func main() {
 	}
 
 	if len(os.Args) > 1 && os.Args[1] == "install" {
-		if err := install(dir); err != nil {
+		if err := install(); err != nil {
 			log.Print("install: ", err)
 			msgBox("HyperHand install failed:\n"+err.Error(), windows.MB_ICONERROR)
 		}
