@@ -35,6 +35,9 @@ func execOp(args json.RawMessage, _ []byte) (any, []byte, error) {
 	if err := decode(args, &a); err != nil {
 		return nil, nil, err
 	}
+	if a.Admin {
+		return execAdmin(a)
+	}
 	var cmd *exec.Cmd
 	attr := &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 	switch a.Shell {
@@ -106,6 +109,22 @@ func readFile(args json.RawMessage, _ []byte) (any, []byte, error) {
 	}
 	b, err := os.ReadFile(a.Path)
 	return nil, b, err
+}
+
+func listDir(args json.RawMessage, _ []byte) (any, []byte, error) {
+	var a proto.PathArgs
+	if err := decode(args, &a); err != nil {
+		return nil, nil, err
+	}
+	ents, err := os.ReadDir(a.Path)
+	if err != nil {
+		return nil, nil, err
+	}
+	r := proto.ListDirResult{Entries: make([]proto.DirEntry, len(ents))}
+	for i, e := range ents {
+		r.Entries[i] = proto.DirEntry{Name: e.Name(), IsDir: e.IsDir()}
+	}
+	return r, nil, nil
 }
 
 func screenshotOp(json.RawMessage, []byte) (any, []byte, error) {

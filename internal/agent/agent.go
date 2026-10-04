@@ -19,6 +19,7 @@ var handlers = map[string]Handler{
 	proto.OpExec:         execOp,
 	proto.OpWriteFile:    writeFile,
 	proto.OpReadFile:     readFile,
+	proto.OpListDir:      listDir,
 	proto.OpScreenshot:   screenshotOp,
 	proto.OpClipboardGet: clipboardGet,
 	proto.OpClipboardSet: clipboardSet,
