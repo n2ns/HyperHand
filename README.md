@@ -7,6 +7,25 @@ HyperHand has two parts:
 - **`hyperhand.exe`**, a tray program on the host. It serves MCP at `http://127.0.0.1:8770/mcp` and drives the VM's screen, mouse and keyboard through Hyper-V.
 - **`hyperhand-agent.exe`**, a tray program inside the guest. It runs commands, transfers files and handles the clipboard and windows in the logged-on user's session, talking to the host over a Hyper-V socket.
 
+```mermaid
+flowchart LR
+    subgraph Host["Hyper-V host"]
+        Client["MCP client<br/>Claude Code, Codex, ..."]
+        Tray["hyperhand.exe<br/>tray, elevated"]
+        HV["Hyper-V<br/>WMI and cmdlets"]
+        Client -- "MCP, Streamable HTTP<br/>127.0.0.1:8770" --> Tray
+        Tray -- "screen, mouse, keyboard<br/>VM state, checkpoints,<br/>agent file copy" --> HV
+    end
+    subgraph Guest["Windows VM"]
+        Console["VM console<br/>screen and input devices"]
+        Agent["hyperhand-agent.exe<br/>tray, user session"]
+        Session["Applications, files,<br/>clipboard, windows"]
+        Agent --> Session
+    end
+    HV --> Console
+    Tray -- "Hyper-V socket<br/>commands, files, clipboard" --> Agent
+```
+
 ## Features
 
 - **Screen, mouse and keyboard from the host**: screenshots at the guest's resolution, clicks, drag, wheel, typing and key combinations. Works on the login screen and UAC prompts too, since it does not depend on anything running in the guest.
