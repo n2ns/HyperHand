@@ -21,6 +21,7 @@ const (
 	OpExec         = "exec"          // ExecArgs -> ExecResult
 	OpWriteFile    = "write_file"    // PathArgs + payload
 	OpReadFile     = "read_file"     // PathArgs -> payload
+	OpListDir      = "list_dir"      // PathArgs -> ListDirResult
 	OpScreenshot   = "screenshot"    // -> payload PNG
 	OpClipboardGet = "clipboard_get" // -> TextResult
 	OpClipboardSet = "clipboard_set" // TextArgs
@@ -45,12 +46,14 @@ type PingResult struct {
 	User     string `json:"user"`
 }
 
-// ExecArgs: Shell is "powershell" (default) or "cmd"; TimeoutMs 0 means 60 s.
+// ExecArgs: Shell is "powershell" (default) or "cmd"; TimeoutMs 0 means 60 s. Admin runs it elevated (the VM's UAC is
+// set to elevate administrators without prompting).
 type ExecArgs struct {
 	Command   string `json:"command"`
 	Shell     string `json:"shell,omitempty"`
 	Cwd       string `json:"cwd,omitempty"`
 	TimeoutMs int    `json:"timeout_ms,omitempty"`
+	Admin     bool   `json:"admin,omitempty"`
 }
 
 type ExecResult struct {
@@ -58,6 +61,15 @@ type ExecResult struct {
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
 	TimedOut bool   `json:"timed_out"`
+}
+
+type DirEntry struct {
+	Name  string `json:"name"`
+	IsDir bool   `json:"is_dir"`
+}
+
+type ListDirResult struct {
+	Entries []DirEntry `json:"entries"`
 }
 
 type PathArgs struct {
