@@ -4,6 +4,7 @@ package hyperv
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -217,20 +218,68 @@ func Stop(vm string) error { return requestState(vm, 3) }
 
 // CopyToGuest copies a host file into the guest (enables the Guest Service Interface if needed; no guest password).
 func CopyToGuest(vm, hostPath, guestPath string) error {
+	_, err := vmScript(vm, `$gs=Get-VMIntegrationService -VM $vm | Where-Object { $_.Id -like '*6C09BB55-D683-4DA0-8931-C9BF705F6480' }
+if ($gs -and -not $gs.Enabled) { Enable-VMIntegrationService -VMIntegrationService $gs; Start-Sleep -Seconds 3 }
+Copy-VMFile -VM $vm -SourcePath `+psq(hostPath)+` -DestinationPath `+psq(guestPath)+` -CreateFullPath -FileSource Host -Force`)
+	return err
+}
+
+type Checkpoint struct {
+	Name         string `json:"Name"`
+	CreationTime string `json:"CreationTime"`
+}
+
+func ListCheckpoints(vm string) ([]Checkpoint, error) {
+	out, err := vmScript(vm, `$c=@(Get-VMSnapshot -VM $vm | Sort-Object CreationTime | Select-Object Name,@{n='CreationTime';e={$_.CreationTime.ToString('yyyy-MM-dd HH:mm:ss')}})
+if ($c.Count) { ConvertTo-Json -InputObject $c -Compress }`)
+	if err != nil {
+		return nil, err
+	}
+	return parseCheckpoints(out)
+}
+
+func CreateCheckpoint(vm, name string) error {
+	_, err := vmScript(vm, `Checkpoint-VM -VM $vm -SnapshotName `+psq(name))
+	return err
+}
+
+// RestoreCheckpoint applies a checkpoint. A production checkpoint leaves the VM off.
+func RestoreCheckpoint(vm, name string) error {
+	_, err := vmScript(vm, `Restore-VMSnapshot -VM $vm -Name `+psq(name)+` -Confirm:$false`)
+	return err
+}
+
+// parseCheckpoints reads ConvertTo-Json output: an array, a single object, or nothing.
+func parseCheckpoints(out []byte) ([]Checkpoint, error) {
+	out = bytes.TrimSpace(bytes.TrimPrefix(out, []byte("\xef\xbb\xbf")))
+	if len(out) == 0 {
+		return nil, nil
+	}
+	var cps []Checkpoint
+	if out[0] == '{' {
+		cps = make([]Checkpoint, 1)
+		return cps, json.Unmarshal(out, &cps[0])
+	}
+	return cps, json.Unmarshal(out, &cps)
+}
+
+func psq(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+
+// vmScript runs a PowerShell script with $vm set to the VM (looked up by Id) and returns its UTF-8 output.
+func vmScript(vm, script string) ([]byte, error) {
 	v, err := Find(vm)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
-	script := `$ErrorActionPreference='Stop'; $vm=Get-VM -Id ` + q(v.ID) + `
-$gs=Get-VMIntegrationService -VM $vm | Where-Object { $_.Id -like '*6C09BB55-D683-4DA0-8931-C9BF705F6480' }
-if ($gs -and -not $gs.Enabled) { Enable-VMIntegrationService -VMIntegrationService $gs; Start-Sleep -Seconds 3 }
-Copy-VMFile -VM $vm -SourcePath ` + q(hostPath) + ` -DestinationPath ` + q(guestPath) + ` -CreateFullPath -FileSource Host -Force`
-	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	script = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; $vm=Get-VM -Id " + psq(v.ID) + "\n" + script
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("Copy-VMFile: %v: %s", err, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("powershell: %v: %s", err, strings.TrimSpace(stderr.String()+"\n"+string(out)))
 	}
-	return nil
+	return out, nil
 }
 
 func requestState(vm string, state int32) error {

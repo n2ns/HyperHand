@@ -35,11 +35,12 @@ claude mcp add --transport http hyperhand http://127.0.0.1:8770/mcp
 | 工具 | 说明 |
 |---|---|
 | vm_list / vm_start / vm_stop | 列出、启动、关闭虚拟机 |
+| vm_checkpoints / vm_checkpoint / vm_restore | 列出、创建、还原检查点；还原后若虚拟机已关机默认自动开机（`start`: false 不开机） |
 | vm_screenshot | 截屏（PNG）；`source`: host（默认）或 agent |
 | vm_click / vm_drag / vm_scroll | 鼠标点击、拖动、滚轮 |
 | vm_type / vm_key | 输入文本（非 ASCII 走剪贴板粘贴）、按键/组合键 |
-| vm_exec | 在来宾中执行命令，返回退出码、stdout、stderr |
-| vm_push / vm_pull | 主机→来宾复制文件或目录；来宾→主机复制文件 |
+| vm_exec | 在来宾中执行命令，返回退出码、stdout、stderr；`admin`: true 以管理员身份运行 |
+| vm_push / vm_pull | 主机↔来宾复制文件或目录（目录递归） |
 | vm_clipboard_get / vm_clipboard_set | 读写来宾剪贴板 |
 | vm_focus_window | 按标题激活窗口 |
 | vm_wait | 等待进程退出/运行或文件出现 |

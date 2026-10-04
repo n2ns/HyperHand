@@ -50,3 +50,18 @@ func TestRGB565ToRGBA(t *testing.T) {
 		t.Error("short data should fail")
 	}
 }
+
+func TestParseCheckpoints(t *testing.T) {
+	one := Checkpoint{Name: "干净", CreationTime: "2026-10-04 10:00:00"}
+	cases := map[string][]Checkpoint{
+		"": nil,
+		"\xef\xbb\xbf{\"Name\":\"干净\",\"CreationTime\":\"2026-10-04 10:00:00\"}\r\n":           {one},
+		`[{"Name":"干净","CreationTime":"2026-10-04 10:00:00"},{"Name":"b","CreationTime":"x"}]`: {one, {Name: "b", CreationTime: "x"}},
+	}
+	for in, want := range cases {
+		got, err := parseCheckpoints([]byte(in))
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("parseCheckpoints(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+}
