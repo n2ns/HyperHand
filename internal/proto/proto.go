@@ -16,7 +16,8 @@ import (
 // ServiceID is the Hyper-V socket service GUID the agent listens on.
 const ServiceID = "3ce544e1-2645-4383-b332-fedf8a18736b"
 
-const Version = "0.1.0"
+// Version is set at build time for releases: -ldflags "-X hyperhand/internal/proto.Version=0.1.0".
+var Version = "dev"
 
 const (
 	OpPing         = "ping"          // -> PingResult

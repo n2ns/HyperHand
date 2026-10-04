@@ -27,18 +27,26 @@ HyperHand has two parts:
 - Windows 10/11 Pro or Enterprise host with Hyper-V, and an administrator account on it.
 - A Windows guest with a logged-on user.
 - VMConnect in basic session mode. Enhanced session moves the user's session to remote desktop, so host-side screenshots and input would reach the console lock screen instead.
-- Go 1.27 or later to build.
+- Go 1.27 or later, only to build from source.
 - An MCP client that supports Streamable HTTP: Claude Code, Codex, Cursor and others.
 
 ## Install
+
+Download `hyperhand-X.Y.Z-windows-amd64.zip` from [Releases](https://github.com/n2ns/HyperHand/releases) and extract it to a permanent folder: the scheduled task runs `hyperhand.exe` from where it is. Then run:
+
+```powershell
+hyperhand.exe install
+```
+
+`install` asks for UAC once, registers a scheduled task that starts `hyperhand.exe` elevated at logon (from where it is now) and starts it. Keep `hyperhand-agent.exe` in the same folder.
+
+To build from source instead (the version then reads `dev`):
 
 ```powershell
 go build -ldflags "-H windowsgui" -o build\hyperhand.exe .\cmd\hyperhand
 go build -ldflags "-H windowsgui" -o build\hyperhand-agent.exe .\cmd\hyperhand-agent
 build\hyperhand.exe install
 ```
-
-`install` asks for UAC once, registers a scheduled task that starts `hyperhand.exe` elevated at logon (from where it is now) and starts it. Keep `hyperhand-agent.exe` in the same folder.
 
 ## Quick start
 
@@ -59,7 +67,7 @@ build\hyperhand.exe install
    Other clients: add a Streamable HTTP server with the URL `http://127.0.0.1:8770/mcp`.
 
 2. Start the VM and log on in the guest. Switch the guest keyboard to English: the agent's install command is typed on the keyboard, and an input method in Chinese mode would garble it.
-3. Ask the AI to install the agent (`vm_install_agent`). It copies the agent into the guest, runs its installer and waits until it answers. The agent then starts at every logon.
+3. Ask the AI to install the agent (`vm_install_agent`). It copies the agent into the guest, runs its installer and waits until it answers. The agent then starts at every logon. Alternatively, copy `hyperhand-agent.exe` into the guest yourself and run `hyperhand-agent.exe install` there; see [Install the guest agent manually](docs/user-guide.md#install-the-guest-agent-manually).
 4. Ask the AI to work in the VM: take a screenshot, open an application, run a command, copy a build in, restore a checkpoint.
 
 ## Tools
@@ -85,7 +93,7 @@ Screen, mouse, keyboard, VM and checkpoint tools work without the agent; the oth
 ## Known limitations
 
 - One AI client per VM at a time: several clients can connect, but requests to a VM's agent are handled one after another and their mouse and keyboard actions would interleave.
-- `vm_install_agent` types its command on the keyboard; the guest input method must be in English mode.
+- `vm_install_agent` types its command on the keyboard; the guest input method must be in English mode. Installing the agent manually avoids this.
 - `admin` commands elevate without a prompt only if the guest's UAC is set to elevate administrators without prompting; otherwise they wait at the UAC prompt.
 - Host-side screenshots and input act on the VM console; they do not reach a remote desktop or enhanced session.
 - Checkpoints cannot be deleted from HyperHand.
@@ -96,14 +104,14 @@ HyperHand sends no telemetry and makes no network connections beyond the local M
 
 ## Uninstall
 
-1. Host: delete the scheduled task `HyperHand`, quit the tray, delete the build folder.
+1. Host: delete the scheduled task `HyperHand`, quit the tray, delete the HyperHand folder.
 2. Guest: quit the agent from its tray menu, delete the `HyperHandAgent` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` and the folders `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`.
 
 Details in the [user guide](docs/user-guide.md#uninstalling).
 
 ## Documentation
 
-- [User guide](docs/user-guide.md): setup step by step, updating, troubleshooting.
+- [User guide](docs/user-guide.md): setup step by step, updating, releasing, troubleshooting.
 - [Features](docs/features.md): detailed behaviour of every tool.
 - [Privacy](docs/privacy.md): what is stored and what goes over the wire.
 - [Changelog](CHANGELOG.md)

@@ -1,6 +1,6 @@
 # User Guide
 
-This guide covers building HyperHand, installing the host tray and the guest agent, connecting an MCP client (Claude Code, Codex or another client), updating, uninstalling, and troubleshooting.
+This guide covers downloading or building HyperHand, installing the host tray and the guest agent, connecting an MCP client (Claude Code, Codex or another client), updating, releasing, uninstalling, and troubleshooting.
 
 HyperHand has two parts:
 
@@ -11,26 +11,30 @@ HyperHand has two parts:
 
 - Host: Windows 10 or Windows 11 Pro or Enterprise with Hyper-V enabled. The tray must run elevated; it relaunches itself through UAC if started without elevation.
 - Guest: a Windows VM with a user logged on to the desktop.
-- Go 1.27 or later to build.
+- Go 1.27 or later, only to build from source.
 - VMConnect in basic session mode. In an enhanced session, the guest user session moves to RDP, and the host-side screenshot and input reach the console session, which shows the lock screen. Switch with View > Enhanced Session in VMConnect, or close VMConnect while HyperHand is working.
 
-## 1. Build
+## 1. Download or build
 
-From the repository root:
+Download `hyperhand-X.Y.Z-windows-amd64.zip` from [Releases](https://github.com/n2ns/HyperHand/releases). It contains `hyperhand.exe`, `hyperhand-agent.exe` (both Windows amd64, with the version stamped in), `README.md` and `CHANGELOG.md`. Extract it to a folder you will keep, for example `C:\Tools\HyperHand`: the scheduled task created in step 2 runs `hyperhand.exe` from there.
+
+To build from source instead, from the repository root:
 
 ```
 go build -ldflags "-H windowsgui" -o build\hyperhand.exe .\cmd\hyperhand
 go build -ldflags "-H windowsgui" -o build\hyperhand-agent.exe .\cmd\hyperhand-agent
 ```
 
-`-H windowsgui` builds both as GUI programs, so no console window appears.
+`-H windowsgui` builds both as GUI programs, so no console window appears. A source build reports its version as `dev`.
 
 Keep `hyperhand-agent.exe` in the same directory as `hyperhand.exe`. `vm_install_agent` and `vm_update_agent` take the agent from there.
 
 ## 2. Install the host tray
 
+From the folder with `hyperhand.exe` (`build` for a source build):
+
 ```
-build\hyperhand.exe install
+hyperhand.exe install
 ```
 
 This shows one UAC prompt, then:
@@ -84,7 +88,7 @@ All tools take an optional `vm` argument (the VM name). If it is omitted, HyperH
 Before you start:
 
 - The VM is running and a user is logged on to the desktop.
-- The guest keyboard layout and IME are in English mode. The install command is typed on the keyboard, and a non-English IME can swallow or alter the keystrokes. See [Set the guest default input method to English](#set-the-guest-default-input-method-to-english).
+- The guest keyboard layout and IME are in English mode. The install command is typed on the keyboard, and a non-English IME can swallow or alter the keystrokes. See [Set the guest default input method to English](#set-the-guest-default-input-method-to-english), or [install the agent manually](#install-the-guest-agent-manually).
 
 Ask the AI to call `vm_install_agent`. It:
 
@@ -102,6 +106,15 @@ The agent installer, running as the logged-on user:
 If the install fails, call `vm_screenshot` to see what the guest shows, fix the cause (for example the IME mode or a dialog in the way) and run `vm_install_agent` again.
 
 Tools that need the agent: `vm_exec`, `vm_push`, `vm_pull`, `vm_clipboard_get`, `vm_clipboard_set`, `vm_focus_window`, `vm_wait`, `vm_update_agent`, and `vm_screenshot` with `source: agent`. `vm_type` uses the agent when it is available.
+
+### Install the guest agent manually
+
+Instead of `vm_install_agent`, you can install the agent yourself. This does not type anything on the keyboard, so the guest input method does not matter.
+
+1. Copy `hyperhand-agent.exe` into the guest by any means: drag and drop in VMConnect, a shared folder, an ISO.
+2. In the guest, as the logged-on user, run `hyperhand-agent.exe install`. No administrator rights and no UAC prompt are needed.
+
+The installer does the same as above: it copies itself to `%LOCALAPPDATA%\HyperHand\`, adds the `HyperHandAgent` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` and starts the agent. Running `hyperhand-agent.exe` without `install` starts the agent for this session only, without autostart.
 
 ## 5. Optional guest setup
 
@@ -151,7 +164,7 @@ Where UAC prompts appear, and where they do not:
 | `hyperhand.exe install` | Host | Once. The scheduled task it creates starts the tray elevated at logon without a prompt. |
 | Starting `hyperhand.exe` by hand without elevation | Host | Once; it relaunches itself elevated. |
 | Replacing the tray with `scripts\restart-tray.ps1` | Host | Once per update (the script must run elevated). |
-| `vm_install_agent`, `vm_update_agent`, the agent at logon | Guest | None. The agent runs as the logged-on user, not elevated. |
+| `vm_install_agent`, `hyperhand-agent.exe install`, `vm_update_agent`, the agent at logon | Guest | None. The agent runs as the logged-on user, not elevated. |
 | `vm_exec` with `admin: true` | Guest | None if `ConsentPromptBehaviorAdmin` is `0` (see [Allow `admin` exec without a prompt](#allow-admin-exec-without-a-prompt)); otherwise a prompt that the command waits for. |
 | A program started in the guest that asks for elevation | Guest | As configured in the guest; answer it from the host with `vm_screenshot` and `vm_key` (or `vm_click`). |
 
@@ -168,6 +181,16 @@ Host-side screenshots and input work on the guest's secure desktop, so a guest U
 - `vm_restore` takes the exact checkpoint name (case-sensitive, no wildcards). If the VM is not running after the restore, it is started unless `start` is false.
 
 ## Updating
+
+### From a release
+
+1. Download the new zip from [Releases](https://github.com/n2ns/HyperHand/releases).
+2. Quit the tray from its menu (or, from an elevated prompt, `schtasks /End /TN HyperHand` followed by `taskkill /F /IM hyperhand.exe`).
+3. Extract the new `hyperhand.exe` and `hyperhand-agent.exe` over the old ones in the same folder.
+4. Start the tray again: `schtasks /Run /TN HyperHand`, or log off and on.
+5. Ask the AI to call `vm_update_agent` for each VM. It sends the new `hyperhand-agent.exe` to the running agent, which replaces itself and restarts.
+
+### From source
 
 1. Rebuild. While the tray is running, `build\hyperhand.exe` is locked, so build the host to `build\hyperhand.exe.new`:
 
@@ -188,6 +211,17 @@ Host-side screenshots and input work on the guest's secure desktop, so a guest U
 
 `vm_update_agent` needs a running agent. If the agent does not answer, use `vm_install_agent` instead.
 
+## Releasing
+
+For maintainers. Add a section for the version to `CHANGELOG.md`, commit, and push a tag:
+
+```
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Pushing a `vX.Y.Z` tag runs a GitHub Actions workflow that runs the tests, builds `hyperhand.exe` and `hyperhand-agent.exe` for Windows amd64 with the version stamped in, and publishes a GitHub Release with `hyperhand-X.Y.Z-windows-amd64.zip` (both exes, `README.md` and `CHANGELOG.md`). The release notes are the version's section of `CHANGELOG.md`.
+
 ## Uninstalling
 
 On the host, from an elevated prompt:
@@ -206,7 +240,7 @@ On the host, from an elevated prompt:
    ```
 
 4. Remove the server from your MCP client: `claude mcp remove hyperhand` (Claude Code) or `codex mcp remove hyperhand` (Codex).
-5. Optionally delete `%LOCALAPPDATA%\HyperHand` (the log) and the build directory.
+5. Optionally delete `%LOCALAPPDATA%\HyperHand` (the log) and the folder with `hyperhand.exe` (the extracted release or the build directory).
 
 In each guest, as the user the agent was installed for:
 
@@ -232,7 +266,7 @@ Tools that need the agent fail, or `vm_install_agent` reports that the agent did
 
 ### Typed text is garbled or missing
 
-The host keyboard sends key strokes, and a non-English IME in the guest can swallow or convert them. This affects `vm_install_agent` and `vm_type` without the agent. Switch the guest IME to English mode, or set English as the default input method (see above). With the agent installed, `vm_type` pastes through the clipboard and is not affected.
+The host keyboard sends key strokes, and a non-English IME in the guest can swallow or convert them. This affects `vm_install_agent` and `vm_type` without the agent. Switch the guest IME to English mode, or set English as the default input method (see above). [Installing the agent manually](#install-the-guest-agent-manually) avoids the problem for the install. With the agent installed, `vm_type` pastes through the clipboard and is not affected.
 
 ### The screenshot is black or shows the lock screen
 

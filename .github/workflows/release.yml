@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $ld = "-s -w -H windowsgui -X hyperhand/internal/proto.Version=$version"
+          go build -trimpath -ldflags $ld -o dist/hyperhand.exe ./cmd/hyperhand
+          go build -trimpath -ldflags $ld -o dist/hyperhand-agent.exe ./cmd/hyperhand-agent
+          Copy-Item README.md, CHANGELOG.md dist/
+          Compress-Archive -Path dist/* -DestinationPath "hyperhand-$version-windows-amd64.zip"
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Release notes
+        shell: pwsh
+        run: |
+          # The CHANGELOG section of this version: from its "## [x.y.z]" heading to the next "## [" heading.
+          $lines = Get-Content CHANGELOG.md
+          $start = ($lines | Select-String -Pattern "^## \[$([regex]::Escape($env:VERSION))\]" | Select-Object -First 1).LineNumber
+          if ($start) {
+            $rest = $lines[$start..($lines.Count - 1)]
+            $end = ($rest | Select-String -Pattern '^## \[' | Select-Object -First 1).LineNumber
+            $notes = if ($end) { $rest[0..($end - 2)] } else { $rest }
+          } else {
+            $notes = @("HyperHand $env:VERSION")
+          }
+          $notes | Set-Content notes.md
+
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" "hyperhand-$env:VERSION-windows-amd64.zip" --title "HyperHand $env:VERSION" --notes-file notes.md

@@ -12,7 +12,7 @@ HyperHand consists of two Windows executables.
 ### 1.1 Host side
 
 - The MCP endpoint is `http://127.0.0.1:<port>/mcp`, default port 8770 (see 9.1). It listens on the loopback interface only.
-- One MCP server instance (name `hyperhand`, version `0.1.0`) serves all HTTP sessions.
+- One MCP server instance (name `hyperhand`, version stamped at build time, `dev` for source builds) serves all HTTP sessions.
 - Screen capture, mouse, keyboard, VM state and checkpoints use Hyper-V directly and work without the guest agent (see 3, 4).
 - Commands, files, clipboard, window focus and waiting go through the guest agent (see 5, 6, 7).
 
@@ -287,7 +287,7 @@ Because step 3 types blindly, a failure there is visible only on screen; the too
 
 ### 8.2 Agent install command
 
-`hyperhand-agent.exe install` runs in the user's session and needs no administrator rights.
+`hyperhand-agent.exe install` runs in the user's session and needs no administrator rights. `vm_install_agent` runs it through the Run dialog; it can also be run by hand in the guest. Started without `install`, the agent runs for the current session only, without autostart.
 
 - It force-terminates every other running `hyperhand-agent.exe` and waits 500 ms.
 - Unless it already runs from there, it copies itself to `%LOCALAPPDATA%\HyperHand\hyperhand-agent.exe`, retrying up to 20 times 250 ms apart while the old image is still locked.

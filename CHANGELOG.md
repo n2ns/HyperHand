@@ -24,3 +24,5 @@ Initial release.
 - `vm_type`: pastes text through the guest clipboard when the agent is available, so an IME cannot alter it; falls back to keyboard input for ASCII text.
 - `vm_clipboard_get`, `vm_clipboard_set`, `vm_focus_window`, `vm_wait` (process exit, process running, file exists), and `vm_screenshot` with `source: agent`.
 - `scripts/restart-tray.ps1`: swaps in a rebuilt `build\hyperhand.exe.new` and restarts the tray.
+- Release builds through GitHub Actions: pushing a `vX.Y.Z` tag runs the tests, builds `hyperhand.exe` and `hyperhand-agent.exe` for Windows amd64, and publishes `hyperhand-X.Y.Z-windows-amd64.zip` on a GitHub Release with the version's changelog section as notes.
+- Version stamped at build time (`-X hyperhand/internal/proto.Version`); reported by the MCP server and the agent ping, `dev` for builds without it.
