@@ -71,8 +71,8 @@ func runElevated(file, params string) (windows.Handle, error) {
 func adminWrapper(a proto.ExecArgs, cwd, ps1, out, errf, code string) string {
 	run := a.Command
 	if a.Shell == "" || a.Shell == "powershell" {
-		run = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ` +
-			`"[Console]::OutputEncoding=[Text.Encoding]::UTF8; . '` + strings.ReplaceAll(ps1, "'", "''") + `'"`
+		// -File (not -Command ". script") so `exit N` in the command becomes the exit code.
+		run = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "` + ps1 + `"`
 	}
 	return "@echo off\r\nchcp 65001 >nul\r\n" +
 		`cd /d "` + cwd + `" || (>"` + code + `" echo 1& exit /b 1)` + "\r\n" +
@@ -96,7 +96,7 @@ func execAdmin(a proto.ExecArgs) (any, []byte, error) {
 	ps1, out, errf, code := filepath.Join(dir, "cmd.ps1"), filepath.Join(dir, "out"), filepath.Join(dir, "err"), filepath.Join(dir, "code")
 	wrapper := filepath.Join(dir, "run.cmd")
 	// UTF-8 BOM so Windows PowerShell reads the script as UTF-8.
-	if err := os.WriteFile(ps1, append([]byte("\xEF\xBB\xBF"), a.Command...), 0o644); err != nil {
+	if err := os.WriteFile(ps1, []byte("\xEF\xBB\xBF[Console]::OutputEncoding=[Text.Encoding]::UTF8\r\n"+a.Command), 0o644); err != nil {
 		return nil, nil, err
 	}
 	if err := os.WriteFile(wrapper, []byte(adminWrapper(a, cwd, ps1, out, errf, code)), 0o644); err != nil {

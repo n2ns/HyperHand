@@ -92,7 +92,7 @@ func TestServe(t *testing.T) {
 
 func TestAdminWrapper(t *testing.T) {
 	ps := adminWrapper(proto.ExecArgs{Command: "Get-Date"}, `C:\work dir`, `C:\t\cmd.ps1`, `C:\t\out`, `C:\t\err`, `C:\t\code`)
-	for _, want := range []string{`cd /d "C:\work dir"`, `. 'C:\t\cmd.ps1'`, `OutputEncoding`, `>"C:\t\out" 2>"C:\t\err"`, `>"C:\t\code" echo %errorlevel%`} {
+	for _, want := range []string{`cd /d "C:\work dir"`, `-File "C:\t\cmd.ps1"`,`>"C:\t\out" 2>"C:\t\err"`, `>"C:\t\code" echo %errorlevel%`} {
 		if !strings.Contains(ps, want) {
 			t.Errorf("powershell wrapper lacks %q:\n%s", want, ps)
 		}
