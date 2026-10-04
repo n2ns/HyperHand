@@ -7,7 +7,10 @@ HyperHand has two parts:
 - **`hyperhand.exe`**, a tray program on the host. It serves MCP at `http://127.0.0.1:8770/mcp` and drives the VM's screen, mouse and keyboard through Hyper-V.
 - **`hyperhand-agent.exe`**, a tray program inside the guest. It runs commands, transfers files and handles the clipboard and windows in the logged-on user's session, talking to the host over a Hyper-V socket.
 
-![HyperHand architecture](docs/images/architecture.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
+  <img alt="HyperHand architecture: an MCP client talks to hyperhand.exe on the host, which drives the VM console through Hyper-V and the guest agent through a Hyper-V socket" src="docs/images/architecture.svg">
+</picture>
 
 ## Features
 
