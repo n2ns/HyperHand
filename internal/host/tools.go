@@ -97,7 +97,7 @@ type titleIn struct {
 type waitIn struct {
 	VM        string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
 	Kind      string `json:"kind" jsonschema:"process_exit, process_running (use name) or file_exists (use path)"`
-	Name      string `json:"name,omitempty" jsonschema:"process name, e.g. acad"`
+	Name      string `json:"name,omitempty" jsonschema:"process name, e.g. notepad"`
 	Path      string `json:"path,omitempty" jsonschema:"file path in the guest"`
 	TimeoutMs int    `json:"timeout_ms,omitempty" jsonschema:"default 60000"`
 }

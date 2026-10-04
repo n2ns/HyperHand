@@ -100,7 +100,7 @@ type TextResult struct {
 	Text string `json:"text"`
 }
 
-// WaitArgs.Kind: "process_exit" / "process_running" (Name, e.g. "acad") or "file_exists" (Path). TimeoutMs 0 means 60 s.
+// WaitArgs.Kind: "process_exit" / "process_running" (Name, e.g. "notepad") or "file_exists" (Path). TimeoutMs 0 means 60 s.
 type WaitArgs struct {
 	Kind      string `json:"kind"`
 	Name      string `json:"name,omitempty"`
