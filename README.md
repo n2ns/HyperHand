@@ -26,21 +26,21 @@ build\hyperhand.exe install
 claude mcp add --transport http hyperhand http://127.0.0.1:8770/mcp
 ```
 
-然后让 Claude 调用 `vm_install_agent`，把 agent 装进虚拟机（虚拟机需已开机并有用户登录）。
+然后让 Claude 调用 `vm_install_agent`，把 agent 装进虚拟机（虚拟机需已开机并有用户登录；安装命令是用键盘敲进去的，来宾输入法需处于英文模式，失败时用 vm_screenshot 查看）。
 
 ## 工具
 
-所有工具都有可选参数 `vm`（虚拟机名，默认唯一正在运行的虚拟机）。
+所有工具都有可选参数 `vm`（虚拟机名，默认唯一正在运行的虚拟机；没有运行的虚拟机但只有一台时用那一台）。
 
 | 工具 | 说明 |
 |---|---|
 | vm_list / vm_start / vm_stop | 列出、启动、关闭虚拟机 |
-| vm_checkpoints / vm_checkpoint / vm_restore | 列出、创建、还原检查点；还原后若虚拟机已关机默认自动开机（`start`: false 不开机） |
+| vm_checkpoints / vm_checkpoint / vm_restore | 列出、创建、还原检查点；检查点名精确匹配（区分大小写，不按通配符）；还原后若虚拟机未在运行（关机或已保存）默认自动开机（`start`: false 不开机） |
 | vm_screenshot | 截屏（PNG）；`source`: host（默认）或 agent |
 | vm_click / vm_drag / vm_scroll | 鼠标点击、拖动、滚轮 |
-| vm_type / vm_key | 输入文本（非 ASCII 走剪贴板粘贴）、按键/组合键 |
+| vm_type / vm_key | 输入文本（经 agent 写剪贴板再 ctrl+v 粘贴，避免来宾中文输入法吞字；agent 不可用时 ASCII 文本退回键盘输入）、按键/组合键（如 `ctrl+plus` 表示 Ctrl 加 +/= 键） |
 | vm_exec | 在来宾中执行命令，返回退出码、stdout、stderr；`admin`: true 以管理员身份运行 |
-| vm_push / vm_pull | 主机↔来宾复制文件或目录（目录递归） |
+| vm_push / vm_pull | 主机↔来宾复制文件或目录（目录递归）；单个文件推到以 `\` 结尾的来宾路径、或拉到已存在的主机目录/以 `\` 结尾的路径时，自动补上文件名 |
 | vm_clipboard_get / vm_clipboard_set | 读写来宾剪贴板 |
 | vm_focus_window | 按标题激活窗口 |
 | vm_wait | 等待进程退出/运行或文件出现 |

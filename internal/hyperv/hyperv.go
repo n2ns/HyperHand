@@ -1,5 +1,6 @@
 // Package hyperv controls a Hyper-V VM from the host through WMI (root\virtualization\v2): screen, mouse, keyboard,
-// state, and copying a file into the guest. Needs an elevated process. vm is the VM name; "" means the only running VM.
+// state, and copying a file into the guest. Needs an elevated process. vm is the VM name; "" means the only running VM
+// (or the only VM if none is running).
 package hyperv
 
 import (
@@ -14,11 +15,18 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
+	"golang.org/x/sys/windows"
 )
+
+// inputMu serializes mouse and keyboard input so concurrent tool calls do not interleave.
+var inputMu sync.Mutex
 
 type VM struct {
 	Name  string `json:"name"`
@@ -38,7 +46,7 @@ func ListVMs() ([]VM, error) {
 	return vms, err
 }
 
-// Find resolves a VM name ("" = the only running VM).
+// Find resolves a VM name ("" = the only running VM, or the only VM if none is running).
 func Find(vm string) (VM, error) {
 	var v VM
 	err := withWMI(func(s *session) error {
@@ -96,14 +104,9 @@ func Screenshot(vm string) (pngData []byte, width, height int, err error) {
 		if arr == nil {
 			return errors.New("no image data")
 		}
-		vals := arr.ToValueArray() // ToByteArray misreads WMI's uint8 array (every byte came back as 0x11, the VT_UI1 tag)
-		data := make([]byte, len(vals))
-		for i, x := range vals {
-			if b, ok := x.(uint8); ok {
-				data[i] = b
-			} else {
-				data[i] = byte(toInt(x))
-			}
+		data, err := safeArrayBytes(arr)
+		if err != nil {
+			return err
 		}
 		img, err := rgb565ToRGBA(data, width, height)
 		if err != nil {
@@ -121,6 +124,8 @@ func Screenshot(vm string) (pngData []byte, width, height int, err error) {
 
 // Click: button 1 left, 2 right, 3 middle.
 func Click(vm string, x, y, button int, double bool) error {
+	inputMu.Lock()
+	defer inputMu.Unlock()
 	return withDevice(vm, "Msvm_SyntheticMouse", func(s *session, m *ole.IDispatch) error {
 		if err := s.move(m, x, y); err != nil {
 			return err
@@ -136,7 +141,9 @@ func Click(vm string, x, y, button int, double bool) error {
 }
 
 func Drag(vm string, x1, y1, x2, y2 int) error {
-	return withDevice(vm, "Msvm_SyntheticMouse", func(s *session, m *ole.IDispatch) error {
+	inputMu.Lock()
+	defer inputMu.Unlock()
+	return withDevice(vm, "Msvm_SyntheticMouse", func(s *session, m *ole.IDispatch) (err error) {
 		if err := s.move(m, x1, y1); err != nil {
 			return err
 		}
@@ -144,6 +151,11 @@ func Drag(vm string, x1, y1, x2, y2 int) error {
 		if _, err := s.call(m, "SetButtonState", "ButtonIndex", int32(1), "IsDown", true); err != nil {
 			return err
 		}
+		defer func() { // always release the button, even if a move failed
+			if _, uerr := s.call(m, "SetButtonState", "ButtonIndex", int32(1), "IsDown", false); err == nil {
+				err = uerr
+			}
+		}()
 		const steps = 8
 		for i := 1; i <= steps; i++ {
 			time.Sleep(50 * time.Millisecond)
@@ -152,13 +164,14 @@ func Drag(vm string, x1, y1, x2, y2 int) error {
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
-		_, err := s.call(m, "SetButtonState", "ButtonIndex", int32(1), "IsDown", false)
-		return err
+		return nil
 	})
 }
 
 // Scroll: positive delta scrolls up.
 func Scroll(vm string, x, y, delta int) error {
+	inputMu.Lock()
+	defer inputMu.Unlock()
 	return withDevice(vm, "Msvm_SyntheticMouse", func(s *session, m *ole.IDispatch) error {
 		if err := s.move(m, x, y); err != nil {
 			return err
@@ -177,6 +190,8 @@ func TypeText(vm, text string) error {
 			return fmt.Errorf("TypeText supports ASCII only (got %q)", r)
 		}
 	}
+	inputMu.Lock()
+	defer inputMu.Unlock()
 	return withDevice(vm, "Msvm_Keyboard", func(s *session, k *ole.IDispatch) error {
 		_, err := s.call(k, "TypeText", "AsciiText", text)
 		return err
@@ -189,6 +204,8 @@ func PressKeys(vm, keys string) error {
 	if err != nil {
 		return err
 	}
+	inputMu.Lock()
+	defer inputMu.Unlock()
 	return withDevice(vm, "Msvm_Keyboard", func(s *session, k *ole.IDispatch) error {
 		if len(codes) == 1 {
 			_, err := s.call(k, "TypeKey", "KeyCode", int32(codes[0]))
@@ -243,9 +260,12 @@ func CreateCheckpoint(vm, name string) error {
 	return err
 }
 
-// RestoreCheckpoint applies a checkpoint. A production checkpoint leaves the VM off.
+// RestoreCheckpoint applies a checkpoint (exact, case-sensitive name; no wildcards). A production checkpoint leaves the
+// VM off, a standard one leaves it saved.
 func RestoreCheckpoint(vm, name string) error {
-	_, err := vmScript(vm, `Restore-VMSnapshot -VM $vm -Name `+psq(name)+` -Confirm:$false`)
+	_, err := vmScript(vm, `$c=Get-VMSnapshot -VM $vm | Where-Object { $_.Name -ceq `+psq(name)+` } | Select-Object -First 1
+if (-not $c) { throw ('checkpoint not found: ' + `+psq(name)+`) }
+$c | Restore-VMSnapshot -Confirm:$false`)
 	return err
 }
 
@@ -273,6 +293,7 @@ func vmScript(vm, script string) ([]byte, error) {
 	}
 	script = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; $vm=Get-VM -Id " + psq(v.ID) + "\n" + script
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW} // no console flash (the tray is a GUI exe)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -475,6 +496,9 @@ func (s *session) find(vm string) (*ole.IDispatch, error) {
 			hits = append(hits, o)
 		}
 	}
+	if vm == "" && len(hits) == 0 && len(objs) == 1 { // nothing running but only one VM: use it (e.g. to start it)
+		return objs[0], nil
+	}
 	switch {
 	case len(hits) == 1:
 		return hits[0], nil
@@ -529,6 +553,61 @@ func boolInt(b bool) int {
 	return 0
 }
 
+var (
+	oleaut32                  = windows.NewLazySystemDLL("oleaut32.dll")
+	procSafeArrayAccessData   = oleaut32.NewProc("SafeArrayAccessData")
+	procSafeArrayUnaccessData = oleaut32.NewProc("SafeArrayUnaccessData")
+)
+
+// safeArrayBytes reads WMI's uint8[] SAFEARRAY. VT_UI1 and VT_VARIANT arrays are read straight from the array data
+// (ToValueArray builds millions of interface values); anything else falls back to ToValueArray.
+// ToByteArray misreads WMI's uint8 array (every byte came back as 0x11, the VT_UI1 tag).
+func safeArrayBytes(arr *ole.SafeArrayConversion) ([]byte, error) {
+	vt, err := arr.GetType()
+	if err != nil {
+		return nil, err
+	}
+	n, err := arr.TotalElements(0)
+	if err != nil {
+		return nil, err
+	}
+	if (ole.VT(vt) == ole.VT_UI1 || ole.VT(vt) == ole.VT_VARIANT) && n > 0 {
+		size, err := arr.GetSize() // element size: 1, or 16/24 for a VARIANT (32/64-bit)
+		if err != nil {
+			return nil, err
+		}
+		var p unsafe.Pointer
+		if hr, _, _ := procSafeArrayAccessData.Call(uintptr(unsafe.Pointer(arr.Array)), uintptr(unsafe.Pointer(&p))); hr != 0 {
+			return nil, fmt.Errorf("SafeArrayAccessData: 0x%08x", uint32(hr))
+		}
+		defer procSafeArrayUnaccessData.Call(uintptr(unsafe.Pointer(arr.Array)))
+		raw := unsafe.Slice((*byte)(p), int(n)*int(*size))
+		if ole.VT(vt) == ole.VT_UI1 {
+			return bytes.Clone(raw), nil
+		}
+		return variantBytes(raw, int(*size)), nil
+	}
+	vals := arr.ToValueArray()
+	data := make([]byte, len(vals))
+	for i, x := range vals {
+		if b, ok := x.(uint8); ok {
+			data[i] = b
+		} else {
+			data[i] = byte(toInt(x))
+		}
+	}
+	return data, nil
+}
+
+// variantBytes returns the value byte (offset 8) of each elemSize-byte VARIANT in a raw VARIANT array.
+func variantBytes(raw []byte, elemSize int) []byte {
+	out := make([]byte, len(raw)/elemSize)
+	for i := range out {
+		out[i] = raw[i*elemSize+8]
+	}
+	return out
+}
+
 // rgb565ToRGBA converts row-major little-endian RGB565 pixels to an RGBA image.
 func rgb565ToRGBA(data []byte, w, h int) (*image.RGBA, error) {
 	if w <= 0 || h <= 0 || len(data) < w*h*2 {
@@ -548,7 +627,7 @@ var keyNames = map[string]int{
 	"enter": 0x0D, "return": 0x0D, "esc": 0x1B, "escape": 0x1B, "tab": 0x09, "space": 0x20,
 	"backspace": 0x08, "delete": 0x2E, "del": 0x2E, "insert": 0x2D, "home": 0x24, "end": 0x23,
 	"pageup": 0x21, "pagedown": 0x22, "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
-	";": 0xBA, "=": 0xBB, ",": 0xBC, "-": 0xBD, ".": 0xBE, "/": 0xBF, "`": 0xC0,
+	";": 0xBA, "=": 0xBB, "plus": 0xBB, ",": 0xBC, "-": 0xBD, ".": 0xBE, "/": 0xBF, "`": 0xC0,
 	"[": 0xDB, "\\": 0xDC, "]": 0xDD, "'": 0xDE,
 }
 

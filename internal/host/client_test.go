@@ -92,6 +92,54 @@ func TestClient(t *testing.T) {
 	}
 }
 
+// A cached connection whose far end closed (agent restarted) is detected before sending and redialed.
+func TestClientRedialsDeadConn(t *testing.T) {
+	dials := 0
+	var far net.Conn
+	c := NewClient(func(context.Context) (net.Conn, error) {
+		dials++
+		a, b := net.Pipe()
+		far = b
+		go fakeAgent(t, b, new([]byte))
+		return a, nil
+	})
+	defer c.Close()
+	ctx := context.Background()
+	var r proto.ExecResult
+	if _, err := c.Call(ctx, proto.OpExec, proto.ExecArgs{Command: "a"}, nil, &r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Call(ctx, proto.OpExec, proto.ExecArgs{Command: "b"}, nil, &r); err != nil || dials != 1 {
+		t.Fatalf("live conn reused: dials %d, %v", dials, err)
+	}
+	far.Close()
+	if _, err := c.Call(ctx, proto.OpExec, proto.ExecArgs{Command: "c"}, nil, &r); err != nil || r.Stdout != "ran c" || dials != 2 {
+		t.Fatalf("after close: dials %d, %+v, %v", dials, r, err)
+	}
+}
+
+func TestPushPullTarget(t *testing.T) {
+	for _, c := range [][3]string{
+		{`C:\dst\`, "a.txt", `C:\dst\a.txt`},
+		{`C:\dst/`, "a.txt", `C:\dst/a.txt`},
+		{`C:\dst\b.txt`, "a.txt", `C:\dst\b.txt`},
+	} {
+		if got := pushTarget(c[0], c[1]); got != c[2] {
+			t.Errorf("pushTarget(%q, %q) = %q, want %q", c[0], c[1], got, c[2])
+		}
+	}
+	dir := t.TempDir()
+	for _, c := range [][3]string{
+		{dir, `C:\g\f.txt`, filepath.Join(dir, "f.txt")},
+		{dir + `\new\`, `C:\g\f.txt`, filepath.Join(dir, "new", "f.txt")},
+		{filepath.Join(dir, "x.txt"), `C:\g\f.txt`, filepath.Join(dir, "x.txt")},
+	} {
+		if got := pullTarget(c[0], c[1]); got != c[2] {
+			t.Errorf("pullTarget(%q, %q) = %q, want %q", c[0], c[1], got, c[2])
+		}
+	}
+}
+
 func TestNewServer(t *testing.T) { NewServer(&Manager{}) } // AddTool panics on a bad input schema
 
 var fakeDirs = map[string][]proto.DirEntry{

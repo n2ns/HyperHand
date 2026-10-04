@@ -15,9 +15,9 @@ import (
 	"hyperhand/internal/proto"
 )
 
-// Client talks to one guest agent: it keeps one connection and sends one request at a time. If the request could not
-// be sent (a stale connection, e.g. after the agent restarted) it reconnects and sends it once more; a request that was
-// sent is never resent, so a command cannot run twice.
+// Client talks to one guest agent: it keeps one connection and sends one request at a time. Before reusing the
+// connection it probes it and redials if it is dead (e.g. after the agent restarted). If the request could not be sent
+// it reconnects and sends it once more; a request that was sent is never resent, so a command cannot run twice.
 type Client struct {
 	dial func(context.Context) (net.Conn, error)
 	mu   sync.Mutex
@@ -40,6 +40,10 @@ func (c *Client) Call(ctx context.Context, op string, args any, payload []byte, 
 	}
 	var err error
 	for range 2 {
+		if c.conn != nil && !alive(c.conn) { // e.g. the agent or the VM restarted since the last call
+			c.conn.Close()
+			c.conn = nil
+		}
 		if c.conn == nil {
 			dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			c.conn, err = c.dial(dctx)
@@ -75,6 +79,18 @@ func (c *Client) Call(ctx context.Context, op string, args any, payload []byte, 
 		}
 	}
 	return nil, fmt.Errorf("agent: %w", err)
+}
+
+// alive probes an idle connection with a 1 ms read: a timeout means it is still open. EOF or any other error means it
+// is dead, and so does data (nothing is ever pending between requests).
+func alive(conn net.Conn) bool {
+	if conn.SetReadDeadline(time.Now().Add(time.Millisecond)) != nil {
+		return false
+	}
+	var b [1]byte
+	_, err := conn.Read(b[:])
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout() && conn.SetReadDeadline(time.Time{}) == nil
 }
 
 func (c *Client) roundtrip(ctx context.Context, req *proto.Request, payload []byte, resp *proto.Response) (out []byte, sent bool, err error) {
