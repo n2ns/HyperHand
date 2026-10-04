@@ -24,6 +24,7 @@ const (
 	OpWriteFile    = "write_file"    // PathArgs + payload
 	OpReadFile     = "read_file"     // PathArgs -> payload
 	OpListDir      = "list_dir"      // PathArgs -> ListDirResult
+	OpHashFiles    = "hash_files"    // PathsArgs -> HashesResult
 	OpScreenshot   = "screenshot"    // -> payload PNG
 	OpClipboardGet = "clipboard_get" // -> TextResult
 	OpClipboardSet = "clipboard_set" // TextArgs
@@ -72,6 +73,15 @@ type DirEntry struct {
 
 type ListDirResult struct {
 	Entries []DirEntry `json:"entries"`
+}
+
+type PathsArgs struct {
+	Paths []string `json:"paths"`
+}
+
+// HashesResult: the lowercase hex SHA-256 of each path, in order; "" when the file is missing or unreadable.
+type HashesResult struct {
+	Hashes []string `json:"hashes"`
 }
 
 type PathArgs struct {
