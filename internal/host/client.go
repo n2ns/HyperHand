@@ -15,7 +15,9 @@ import (
 	"hyperhand/internal/proto"
 )
 
-// Client talks to one guest agent: it keeps one connection, sends one request at a time and reconnects once on error.
+// Client talks to one guest agent: it keeps one connection and sends one request at a time. If the request could not
+// be sent (a stale connection, e.g. after the agent restarted) it reconnects and sends it once more; a request that was
+// sent is never resent, so a command cannot run twice.
 type Client struct {
 	dial func(context.Context) (net.Conn, error)
 	mu   sync.Mutex
@@ -49,7 +51,8 @@ func (c *Client) Call(ctx context.Context, op string, args any, payload []byte, 
 		}
 		var resp proto.Response
 		var out []byte
-		if out, err = c.roundtrip(ctx, &req, payload, &resp); err == nil {
+		var sent bool
+		if out, sent, err = c.roundtrip(ctx, &req, payload, &resp); err == nil {
 			if resp.Error != "" {
 				return nil, errors.New(resp.Error)
 			}
@@ -60,28 +63,33 @@ func (c *Client) Call(ctx context.Context, op string, args any, payload []byte, 
 			}
 			return out, nil
 		}
-		c.conn.Close()
-		c.conn = nil
+		if c.conn != nil {
+			c.conn.Close()
+			c.conn = nil
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		if sent {
+			break
 		}
 	}
 	return nil, fmt.Errorf("agent: %w", err)
 }
 
-func (c *Client) roundtrip(ctx context.Context, req *proto.Request, payload []byte, resp *proto.Response) ([]byte, error) {
+func (c *Client) roundtrip(ctx context.Context, req *proto.Request, payload []byte, resp *proto.Response) (out []byte, sent bool, err error) {
 	conn := c.conn
 	stop := context.AfterFunc(ctx, func() { conn.SetDeadline(time.Unix(1, 0)) })
 	if err := proto.WriteFrame(conn, req, payload); err != nil {
 		stop()
-		return nil, err
+		return nil, false, err
 	}
-	out, err := proto.ReadFrame(conn, resp)
+	out, err = proto.ReadFrame(conn, resp)
 	if !stop() && err == nil { // canceled after the answer: the deadline is set, drop the connection
 		conn.Close()
 		c.conn = nil
 	}
-	return out, err
+	return out, true, err
 }
 
 // Close drops the connection; the next Call dials again.
