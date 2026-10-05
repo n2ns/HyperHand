@@ -6,17 +6,115 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"hyperhand/internal/proto"
 )
+
+func TestClientQueuedCancellation(t *testing.T) {
+	for _, mode := range []string{"cancel", "deadline"} {
+		t.Run(mode, func(t *testing.T) {
+			firstReceived := make(chan struct{})
+			releaseFirst := make(chan struct{})
+			release := sync.OnceFunc(func() { close(releaseFirst) })
+			var requests []string
+			serverDone := make(chan struct{})
+			dials := 0
+			c := NewClient(func(context.Context) (net.Conn, error) {
+				dials++
+				if dials != 1 {
+					return nil, errors.New("unexpected redial")
+				}
+				a, b := net.Pipe()
+				go func() {
+					defer close(serverDone)
+					defer b.Close()
+					for {
+						var req proto.Request
+						if _, err := proto.ReadFrame(b, &req); err != nil {
+							return
+						}
+						requests = append(requests, req.Op)
+						if req.Op == "first" {
+							close(firstReceived)
+							<-releaseFirst
+						}
+						if err := proto.WriteFrame(b, proto.Response{}, nil); err != nil {
+							return
+						}
+					}
+				}()
+				return a, nil
+			})
+			defer c.Close()
+			defer release()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			firstDone := make(chan error, 1)
+			go func() { _, err := c.Call(ctx, "first", nil, nil, nil); firstDone <- err }()
+			select {
+			case <-firstReceived:
+			case <-ctx.Done():
+				t.Fatal("first request did not reach the agent")
+			}
+			queuedCtx, cancelQueued := context.WithCancel(ctx)
+			want := context.Canceled
+			if mode == "deadline" {
+				cancelQueued()
+				queuedCtx, cancelQueued = context.WithTimeout(ctx, 50*time.Millisecond)
+				want = context.DeadlineExceeded
+			}
+			defer cancelQueued()
+			queuedDone := make(chan error, 1)
+			go func() { _, err := c.Call(queuedCtx, "queued", nil, nil, nil); queuedDone <- err }()
+			if mode == "cancel" {
+				cancelQueued()
+			}
+			select {
+			case err := <-queuedDone:
+				if !errors.Is(err, want) {
+					t.Fatalf("queued error = %v, want %v", err, want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("canceled request still waiting for the active request")
+			}
+			release()
+			if err := <-firstDone; err != nil {
+				t.Fatalf("active request affected: %v", err)
+			}
+			if _, err := c.Call(ctx, "next", nil, nil, nil); err != nil {
+				t.Fatalf("next request: %v", err)
+			}
+			c.Close()
+			<-serverDone
+			if dials != 1 || fmt.Sprint(requests) != "[first next]" {
+				t.Fatalf("dials=%d requests=%v", dials, requests)
+			}
+		})
+	}
+}
+
+func TestClientAlreadyCanceled(t *testing.T) {
+	c := NewClient(func(context.Context) (net.Conn, error) {
+		t.Error("already canceled request dialed the agent")
+		return nil, errors.New("unexpected dial")
+	})
+	defer c.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.Call(ctx, proto.OpExec, proto.ExecArgs{Command: "echo unexpected"}, nil, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want cancellation, got %v", err)
+	}
+}
 
 // fakePushed holds what write_file stored (other than C:\x.bin); hash_files reports its hashes unless fakeNoHash.
 var (

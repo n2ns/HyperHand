@@ -22,11 +22,13 @@ import (
 // it reconnects and sends it once more; a request that was sent is never resent, so a command cannot run twice.
 type Client struct {
 	dial func(context.Context) (net.Conn, error)
-	mu   sync.Mutex
+	gate chan struct{} // serializes calls and Close; waiting calls can be canceled
 	conn net.Conn
 }
 
-func NewClient(dial func(context.Context) (net.Conn, error)) *Client { return &Client{dial: dial} }
+func NewClient(dial func(context.Context) (net.Conn, error)) *Client {
+	return &Client{dial: dial, gate: make(chan struct{}, 1)}
+}
 
 // Call sends op with args (JSON) and payload, decodes the result into result (if not nil) and returns the response payload.
 func (c *Client) Call(ctx context.Context, op string, args any, payload []byte, result any) ([]byte, error) {
@@ -41,8 +43,17 @@ func (c *Client) Call(ctx context.Context, op string, args any, payload []byte, 
 // and the response payload is copied to dst (nil discards it). It returns the response payload size. A request whose
 // send failed is resent only if src can be rewound (src nil or an io.Seeker).
 func (c *Client) CallIO(ctx context.Context, op string, args any, src io.Reader, srcSize int64, dst io.Writer, result any) (int64, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case c.gate <- struct{}{}:
+	}
+	defer func() { <-c.gate }()
+	// Cancellation and the gate may become ready together; do not touch the
+	// connection for a request that was canceled while it was waiting.
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	req := proto.Request{Op: op}
 	if args != nil {
 		b, err := json.Marshal(args)
@@ -138,8 +149,8 @@ func (c *Client) roundtrip(ctx context.Context, req *proto.Request, src io.Reade
 
 // Close drops the connection; the next Call dials again.
 func (c *Client) Close() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.gate <- struct{}{}
+	defer func() { <-c.gate }()
 	if c.conn != nil {
 		c.conn.Close()
 		c.conn = nil
