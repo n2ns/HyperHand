@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -57,7 +56,13 @@ func execOp(ctx context.Context, args json.RawMessage, _ []byte) (any, []byte, e
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	cmd.WaitDelay = 5 * time.Second
-	if err := cmd.Start(); err != nil {
+	job, err := windows.CreateJobObject(nil, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create command job: %w", err)
+	}
+	// Closing a job without KILL_ON_JOB_CLOSE preserves normally launched background apps.
+	defer windows.CloseHandle(job)
+	if err := startInJob(cmd, job); err != nil {
 		return nil, nil, err
 	}
 	done := make(chan error, 1)
@@ -74,9 +79,11 @@ func execOp(ctx context.Context, args json.RawMessage, _ []byte) (any, []byte, e
 	case <-ctx.Done():
 	}
 	if !completed && (r.TimedOut || ctx.Err() != nil) {
-		kill := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid))
-		kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
-		kill.Run()
+		if err := windows.TerminateJobObject(job, 1); err != nil {
+			cmd.Process.Kill()
+			<-done
+			return nil, nil, fmt.Errorf("terminate command job: %w", err)
+		}
 		<-done
 	}
 	if !r.TimedOut && ctx.Err() != nil {

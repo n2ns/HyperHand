@@ -173,7 +173,7 @@ A non-zero exit code is not a tool error. Errors from the agent (unknown shell, 
 ### 5.4 Timeout
 
 - `timeout_ms` defaults to 60000; zero or a negative value also means 60 s.
-- On timeout the process tree is killed (`taskkill /T /F`) and the result has `timed_out: true`, with the exit code and whatever output was captured.
+- For non-elevated commands, the shell is started suspended, assigned to a Windows Job Object and then resumed. On timeout the job's process tree is terminated, even if the shell has already exited, and the result has `timed_out: true`, with the exit code and whatever output was captured. Elevated commands use the separate path in 5.5.
 - If the host disconnects while the command runs (see 1.4), the process tree is killed in the same way and no result is returned.
 - After the process exits, the agent waits at most 5 s for its output pipes to close (for example when a child process still holds them).
 
