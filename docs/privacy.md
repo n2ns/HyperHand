@@ -27,7 +27,7 @@ In the guest:
 - The agent at `C:\Users\Public\HyperHand\hyperhand-agent.exe` (copied by `vm_install_agent`) and `%LOCALAPPDATA%\HyperHand\hyperhand-agent.exe` (installed copy).
 - Registry value `HyperHandAgent` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 - Unique `.hyperhand-*.hhpart` files in the destination directory while `vm_push` writes a file; renamed to the target on completion, deleted on failure.
-- Temporary `hh-admin-*.ps1` files under the elevated worker's temp directory for PowerShell commands with `admin: true`; deleted when the command finishes. Commands and results pass over a single-use local named pipe, not a guest network connection.
+- Temporary `hh-admin-*.ps1` or `hh-admin-*.cmd` files under the elevated worker's temp directory for commands with `admin: true`; deleted when the command finishes. Commands and results pass over a single-use local named pipe, not a guest network connection.
 
 ## Access control
 

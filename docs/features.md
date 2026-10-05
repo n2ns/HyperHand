@@ -184,7 +184,7 @@ A non-zero exit code is not a tool error. Errors from the agent (unknown shell, 
 
 - A hidden, ordinary launcher process requests elevation of a one-shot worker. The launcher can be stopped even while UAC is waiting, leaving the agent available for the next request.
 - The worker receives the command over a random, single-use local named pipe. It verifies the pipe server's PID and the original agent process's creation time. A late UAC approval after cancellation or timeout cannot retrieve the expired command.
-- `cwd` defaults to the agent's working directory. `cmd` uses the same command line as ordinary execution. PowerShell uses a temporary `%TEMP%\hh-admin-*.ps1` file with a UTF-8 BOM, preserving support for long scripts; the file is deleted afterwards. Explicit `exit N` is preserved, otherwise a failed last statement returns exit code 1.
+- `cwd` defaults to the agent's working directory. `cmd` uses a temporary `%TEMP%\hh-admin-*.cmd` wrapper to select UTF-8 before a nested `cmd /d /s /c` parses the command. PowerShell uses a temporary `%TEMP%\hh-admin-*.ps1` file with a UTF-8 BOM, preserving support for long scripts. Both files are deleted afterwards. Explicit `exit N` is preserved; for PowerShell, a failed last statement otherwise returns exit code 1.
 - The worker captures stdout/stderr and manages the command tree with a Windows Job Object. Pipe disconnection cancels the command; the original absolute deadline also terminates it. No second elevation prompt is needed to stop the command.
 - A timeout before execution returns `timed_out: true`, exit code `-1` and empty output. Once execution starts, the agent allows up to 5 seconds for job cleanup and the captured result to return. Cancellation is reported as a tool error.
 

@@ -79,6 +79,26 @@ func TestAdminLongPowerShellScript(t *testing.T) {
 	}
 }
 
+func TestAdminCmdUnicode(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HYPERHAND_CMD_TEST", "expanded")
+	result, _, err := execAdminWithLauncher(context.Background(), proto.ExecArgs{
+		Shell: "cmd", Cwd: dir,
+		Command: `echo 汉字 😀&echo 错误 😀 1>&2&echo %HYPERHAND_CMD_TEST%&echo 100%&echo 文件 😀>"汉字 😀 100%.txt"&exit /b 7`,
+	}, testAdminLauncher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := result.(proto.ExecResult)
+	if r.ExitCode != 7 || r.TimedOut || r.Stdout != "汉字 😀\r\nexpanded\r\n100%\r\n" || strings.TrimSpace(r.Stderr) != "错误 😀" {
+		t.Fatalf("result: %+v", r)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "汉字 😀 100%.txt"))
+	if err != nil || string(content) != "文件 😀\r\n" {
+		t.Fatalf("Unicode file: %q, %v", content, err)
+	}
+}
+
 func testAdminLauncher(_ context.Context, endpoint adminEndpoint) error {
 	// Exercise real named-pipe and process/job code without displaying host UAC.
 	return runAdminWorker(endpoint)

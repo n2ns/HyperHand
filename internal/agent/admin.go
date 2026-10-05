@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Microsoft/go-winio"
@@ -205,21 +206,32 @@ func runAdminWorker(endpoint adminEndpoint) error {
 }
 
 func execAdminCommand(ctx context.Context, a proto.ExecArgs) (any, []byte, error) {
-	if a.Shell != "" && a.Shell != "powershell" {
+	pattern := "hh-admin-*.ps1"
+	// -File needs a BOM for UTF-8 and explicit propagation of the last statement's failure.
+	script := "\xEF\xBB\xBF[Console]::OutputEncoding=[Text.Encoding]::UTF8\r\n" + a.Command + "\r\nif (-not $?) { exit 1 }\r\n"
+	if a.Shell == "cmd" {
+		pattern = "hh-admin-*.cmd"
+		// Change the code page before cmd parses the user's command. A same-line
+		// chcp prefix is too late. Escape batch expansion for the nested cmd.
+		script = "@echo off\r\nchcp 65001 >nul\r\ncmd.exe /d /s /c \"" + strings.ReplaceAll(a.Command, "%", "%%") + "\"\r\n"
+	} else if a.Shell != "" && a.Shell != "powershell" {
 		return execCommand(ctx, a, "")
 	}
-	f, err := os.CreateTemp("", "hh-admin-*.ps1")
+	f, err := os.CreateTemp("", pattern)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer os.Remove(f.Name())
-	// -File needs a BOM for UTF-8 and explicit propagation of the last statement's failure.
-	_, err = f.WriteString("\xEF\xBB\xBF[Console]::OutputEncoding=[Text.Encoding]::UTF8\r\n" + a.Command + "\r\nif (-not $?) { exit 1 }\r\n")
+	_, err = f.WriteString(script)
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
 	}
 	if err != nil {
 		return nil, nil, err
+	}
+	if a.Shell == "cmd" {
+		a.Command = `"` + f.Name() + `"`
+		return execCommand(ctx, a, "")
 	}
 	return execCommand(ctx, a, f.Name())
 }
