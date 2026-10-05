@@ -6,6 +6,18 @@ import (
 	"testing"
 )
 
+func TestStateName(t *testing.T) {
+	// Msvm_ComputerSystem.EnabledState uses Hyper-V-specific values for saved/paused VMs.
+	for state, want := range map[int]string{
+		2: "Running", 3: "Off", 32769: "Saved", 32768: "Paused",
+		0: "0", 6: "6", 9: "9", 32770: "32770",
+	} {
+		if got := stateName(state); got != want {
+			t.Errorf("stateName(%d) = %q, want %q", state, got, want)
+		}
+	}
+}
+
 func TestParseKeys(t *testing.T) {
 	cases := map[string][]int{
 		"enter":          {0x0D},

@@ -526,9 +526,9 @@ func stateName(st int) string {
 		return "Running"
 	case 3:
 		return "Off"
-	case 6:
+	case 32769:
 		return "Saved"
-	case 9:
+	case 32768:
 		return "Paused"
 	}
 	return strconv.Itoa(st)
