@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image/png"
 	"io"
@@ -39,12 +40,27 @@ func execOp(ctx context.Context, args json.RawMessage, _ []byte) (any, []byte, e
 	if a.Admin {
 		return execAdmin(ctx, a)
 	}
+	return execCommand(ctx, a, "")
+}
+
+// script is used by the elevated worker to preserve -File support for long scripts.
+func execCommand(ctx context.Context, a proto.ExecArgs, script string) (any, []byte, error) {
+	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return proto.ExecResult{ExitCode: -1, TimedOut: true}, nil, nil
+		}
+		return nil, nil, err
+	}
 	var cmd *exec.Cmd
 	attr := &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 	switch a.Shell {
 	case "", "powershell":
-		cmd = exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-			"-Command", "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"+a.Command)
+		if script != "" {
+			cmd = exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script)
+		} else {
+			cmd = exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+				"-Command", "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"+a.Command)
+		}
 	case "cmd":
 		cmd = exec.Command("cmd.exe")
 		attr.CmdLine = `cmd.exe /d /s /c "` + a.Command + `"`
@@ -77,17 +93,26 @@ func execOp(ctx context.Context, args json.RawMessage, _ []byte) (any, []byte, e
 	case <-t.C:
 		r.TimedOut = true
 	case <-ctx.Done():
+		r.TimedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
 	}
-	if !completed && (r.TimedOut || ctx.Err() != nil) {
+	ctxErr := ctx.Err()
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
+		r.TimedOut = true
+	}
+	if r.TimedOut || ctxErr != nil {
 		if err := windows.TerminateJobObject(job, 1); err != nil {
 			cmd.Process.Kill()
-			<-done
+			if !completed {
+				<-done
+			}
 			return nil, nil, fmt.Errorf("terminate command job: %w", err)
 		}
-		<-done
+		if !completed {
+			<-done
+		}
 	}
-	if !r.TimedOut && ctx.Err() != nil {
-		return nil, nil, ctx.Err()
+	if !r.TimedOut && ctxErr != nil {
+		return nil, nil, ctxErr
 	}
 	r.ExitCode = cmd.ProcessState.ExitCode()
 	r.Stdout, r.Stderr = toUTF8(stdout.Bytes()), toUTF8(stderr.Bytes())

@@ -2,155 +2,224 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"time"
-	"unsafe"
 
+	"github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
 
 	"hyperhand/internal/proto"
 )
 
-var (
-	shell32          = windows.NewLazySystemDLL("shell32.dll")
-	pShellExecuteExW = shell32.NewProc("ShellExecuteExW")
-)
-
-// shellExecuteInfo is SHELLEXECUTEINFOW.
-type shellExecuteInfo struct {
-	cbSize       uint32
-	fMask        uint32
-	hwnd         uintptr
-	lpVerb       *uint16
-	lpFile       *uint16
-	lpParameters *uint16
-	lpDirectory  *uint16
-	nShow        int32
-	hInstApp     uintptr
-	lpIDList     uintptr
-	lpClass      *uint16
-	hkeyClass    uintptr
-	dwHotKey     uint32
-	hIcon        uintptr
-	hProcess     windows.Handle
+type adminEndpoint struct {
+	Pipe          string
+	ParentPID     uint32
+	ParentCreated windows.Filetime
 }
 
-const (
-	seeMaskNoCloseProcess = 0x40
-	seeMaskNoAsync        = 0x100
-	seeMaskFlagNoUI       = 0x400
-)
-
-// runElevated starts file with params via ShellExecuteEx "runas" (hidden) and returns the process handle.
-func runElevated(file, params string) (windows.Handle, error) {
-	verb, _ := windows.UTF16PtrFromString("runas")
-	f, _ := windows.UTF16PtrFromString(file)
-	p, _ := windows.UTF16PtrFromString(params)
-	sei := shellExecuteInfo{
-		fMask:        seeMaskNoCloseProcess | seeMaskNoAsync | seeMaskFlagNoUI,
-		lpVerb:       verb,
-		lpFile:       f,
-		lpParameters: p,
-		nShow:        windows.SW_HIDE,
-	}
-	sei.cbSize = uint32(unsafe.Sizeof(sei))
-	if r, _, err := pShellExecuteExW.Call(uintptr(unsafe.Pointer(&sei))); r == 0 {
-		return 0, fmt.Errorf("ShellExecuteEx runas: %w", err)
-	}
-	if sei.hProcess == 0 {
-		return 0, fmt.Errorf("ShellExecuteEx runas: no process handle")
-	}
-	return sei.hProcess, nil
-}
-
-// adminWrapper returns the .cmd wrapper run elevated: it changes to cwd, runs the command (via cmd /s /c for shell
-// "cmd", or the script ps1 for powershell) with stdout/stderr redirected to out/errf and writes the exit code to code.
-func adminWrapper(a proto.ExecArgs, cwd, ps1, out, errf, code string) string {
-	// Like normal exec's cmd /s /c; % doubled so the batch file passes it through unexpanded.
-	run := `cmd.exe /d /s /c "` + strings.ReplaceAll(a.Command, "%", "%%") + `"`
-	if a.Shell == "" || a.Shell == "powershell" {
-		// -File (not -Command ". script") so `exit N` in the command becomes the exit code.
-		run = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "` + ps1 + `"`
-	}
-	return "@echo off\r\nchcp 65001 >nul\r\n" +
-		`cd /d "` + cwd + `" || (>"` + code + `" echo 1& exit /b 1)` + "\r\n" +
-		run + ` >"` + out + `" 2>"` + errf + `"` + "\r\n" +
-		`>"` + code + `" echo %errorlevel%` + "\r\n"
-}
-
-// adminScript returns the ps1 run elevated for powershell; the last line gives the exit code
-// -Command would: 1 when the last statement failed (also for a failing native command).
-func adminScript(command string) string {
-	// UTF-8 BOM so Windows PowerShell reads the script as UTF-8.
-	return "\xEF\xBB\xBF[Console]::OutputEncoding=[Text.Encoding]::UTF8\r\n" + command +
-		"\r\nif (-not $?) { exit 1 }\r\n"
+type adminRequest struct {
+	Args     proto.ExecArgs
+	Deadline time.Time
 }
 
 func execAdmin(ctx context.Context, a proto.ExecArgs) (any, []byte, error) {
+	return execAdminWithLauncher(ctx, a, launchAdmin)
+}
+
+// The launcher runs only ShellExecuteEx, in a disposable ordinary process. The
+// elevated worker receives the command only over this live, single-use pipe.
+func execAdminWithLauncher(ctx context.Context, a proto.ExecArgs, launch func(context.Context, adminEndpoint) error) (any, []byte, error) {
+	opctx, cancel := context.WithTimeout(ctx, timeout(a.TimeoutMs))
+	defer cancel()
 	if a.Shell != "" && a.Shell != "powershell" && a.Shell != "cmd" {
 		return nil, nil, fmt.Errorf("unknown shell %q", a.Shell)
 	}
-	dir, err := os.MkdirTemp("", "hh-admin-")
+	if err := opctx.Err(); err != nil {
+		return adminInterrupted(ctx, err)
+	}
+	if a.Cwd == "" {
+		var err error
+		a.Cwd, err = os.Getwd()
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return nil, nil, err
 	}
-	defer os.RemoveAll(dir)
-	cwd := a.Cwd
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
-	ps1, out, errf, code := filepath.Join(dir, "cmd.ps1"), filepath.Join(dir, "out"), filepath.Join(dir, "err"), filepath.Join(dir, "code")
-	wrapper := filepath.Join(dir, "run.cmd")
-	if err := os.WriteFile(ps1, []byte(adminScript(a.Command)), 0o644); err != nil {
+	endpoint := adminEndpoint{Pipe: `\\.\pipe\hyperhand-admin-` + rand.Text(), ParentPID: uint32(os.Getpid())}
+	var exited, kernel, userTime windows.Filetime
+	if err := windows.GetProcessTimes(windows.CurrentProcess(), &endpoint.ParentCreated, &exited, &kernel, &userTime); err != nil {
 		return nil, nil, err
 	}
-	if err := os.WriteFile(wrapper, []byte(adminWrapper(a, cwd, ps1, out, errf, code)), 0o644); err != nil {
-		return nil, nil, err
-	}
-	h, err := runElevated("cmd.exe", `/d /c "`+wrapper+`"`)
+	listener, err := winio.ListenPipe(endpoint.Pipe, &winio.PipeConfig{
+		SecurityDescriptor: "D:P(A;;GA;;;" + user.User.Sid.String() + ")(A;;GA;;;BA)(A;;GA;;;SY)",
+	})
 	if err != nil {
 		return nil, nil, err
 	}
-	defer windows.CloseHandle(h)
-	var r proto.ExecResult
-	deadline := time.Now().Add(timeout(a.TimeoutMs))
+	var conn net.Conn
+	var acceptErr error
+	accepted := make(chan struct{})
+	go func() { conn, acceptErr = listener.Accept(); close(accepted) }()
+	stopAccept := context.AfterFunc(opctx, func() { listener.Close() })
+	defer func() {
+		stopAccept()
+		listener.Close()
+		<-accepted
+		if conn != nil {
+			conn.Close()
+		}
+	}()
+	launchCtx, stopLaunch := context.WithCancel(opctx)
+	var launchErr error
+	launched := make(chan struct{})
+	go func() { launchErr = launch(launchCtx, endpoint); close(launched) }()
+	defer func() { stopLaunch(); <-launched }()
+	launchDone := launched
 	for {
-		if ev, _ := windows.WaitForSingleObject(h, 200); ev != uint32(windows.WAIT_TIMEOUT) {
-			break
-		}
-		if ctx.Err() != nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			r.TimedOut = true
-			break
-		}
-	}
-	if r.TimedOut || ctx.Err() != nil {
-		if pid, err := windows.GetProcessId(h); err == nil {
-			if k, err := runElevated("taskkill.exe", "/T /F /PID "+strconv.Itoa(int(pid))); err == nil {
-				windows.WaitForSingleObject(k, 10000)
-				windows.CloseHandle(k)
+		select {
+		case <-opctx.Done():
+			return adminInterrupted(ctx, opctx.Err())
+		case <-launchDone:
+			if opctx.Err() != nil {
+				return adminInterrupted(ctx, opctx.Err())
 			}
-		}
-		windows.WaitForSingleObject(h, 5000)
-		if !r.TimedOut {
-			return nil, nil, ctx.Err()
+			if launchErr != nil {
+				return nil, nil, launchErr
+			}
+			launchDone = nil // runas succeeded; the worker may still be connecting
+		case <-accepted:
+			if opctx.Err() != nil {
+				return adminInterrupted(ctx, opctx.Err())
+			}
+			if acceptErr != nil {
+				return nil, nil, acceptErr
+			}
+			deadline, _ := opctx.Deadline()
+			// The worker enforces the original deadline. Allow it to reap its job
+			// and return captured output; caller cancellation closes the pipe immediately.
+			conn.SetDeadline(deadline.Add(5 * time.Second))
+			stopIO := context.AfterFunc(ctx, func() { conn.Close() })
+			defer stopIO()
+			a.Admin = false
+			if err := json.NewEncoder(conn).Encode(adminRequest{a, deadline}); err != nil {
+				return adminInterrupted(ctx, err)
+			}
+			var reply struct {
+				Result proto.ExecResult
+				Error  string
+			}
+			if err := json.NewDecoder(conn).Decode(&reply); err != nil {
+				if opctx.Err() != nil {
+					return adminInterrupted(ctx, opctx.Err())
+				}
+				return adminInterrupted(ctx, err)
+			}
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			if reply.Error != "" {
+				return nil, nil, errors.New(reply.Error)
+			}
+			return reply.Result, nil, nil
 		}
 	}
-	if b, err := os.ReadFile(code); err == nil {
-		r.ExitCode, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+}
+
+func adminInterrupted(ctx context.Context, err error) (any, []byte, error) {
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return proto.ExecResult{ExitCode: -1, TimedOut: true}, nil, nil
+	}
+	return nil, nil, err
+}
+
+// runAdminWorker executes one request. Checking both PID and creation time stops
+// a late UAC approval from trusting a replacement pipe server after its parent exits.
+func runAdminWorker(endpoint adminEndpoint) error {
+	parent, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, endpoint.ParentPID)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(parent)
+	var created, exited, kernel, userTime windows.Filetime
+	if err := windows.GetProcessTimes(parent, &created, &exited, &kernel, &userTime); err != nil {
+		return err
+	}
+	state, err := windows.WaitForSingleObject(parent, 0)
+	if err != nil || state != uint32(windows.WAIT_TIMEOUT) || created != endpoint.ParentCreated {
+		return errors.New("admin request owner is no longer running")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := winio.DialPipeContext(ctx, endpoint.Pipe)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var serverPID uint32
+	if err := windows.GetNamedPipeServerProcessId(windows.Handle(conn.(interface{ Fd() uintptr }).Fd()), &serverPID); err != nil {
+		return err
+	}
+	if serverPID != endpoint.ParentPID {
+		return errors.New("admin pipe server is not the request owner")
+	}
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var request adminRequest
+	if err := json.NewDecoder(conn).Decode(&request); err != nil {
+		return err
+	}
+	conn.SetReadDeadline(time.Time{})
+	execCtx, stopExec := context.WithDeadline(context.Background(), request.Deadline)
+	defer stopExec()
+	watchDone := make(chan struct{})
+	go func() {
+		var b [1]byte
+		conn.Read(b[:]) // EOF (or any further input) revokes the request
+		stopExec()
+		close(watchDone)
+	}()
+	defer func() { conn.Close(); <-watchDone }()
+	request.Args.Admin = false
+	result, _, execErr := execAdminCommand(execCtx, request.Args)
+	reply := struct {
+		Result proto.ExecResult
+		Error  string
+	}{}
+	if execErr != nil {
+		reply.Error = execErr.Error()
 	} else {
-		var c uint32
-		windows.GetExitCodeProcess(h, &c)
-		r.ExitCode = int(int32(c))
+		reply.Result = result.(proto.ExecResult)
 	}
-	so, _ := os.ReadFile(out)
-	se, _ := os.ReadFile(errf)
-	r.Stdout, r.Stderr = toUTF8(so), toUTF8(se)
-	return r, nil, nil
+	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	return json.NewEncoder(conn).Encode(reply)
+}
+
+func execAdminCommand(ctx context.Context, a proto.ExecArgs) (any, []byte, error) {
+	if a.Shell != "" && a.Shell != "powershell" {
+		return execCommand(ctx, a, "")
+	}
+	f, err := os.CreateTemp("", "hh-admin-*.ps1")
+	if err != nil {
+		return nil, nil, err
+	}
+	defer os.Remove(f.Name())
+	// -File needs a BOM for UTF-8 and explicit propagation of the last statement's failure.
+	_, err = f.WriteString("\xEF\xBB\xBF[Console]::OutputEncoding=[Text.Encoding]::UTF8\r\n" + a.Command + "\r\nif (-not $?) { exit 1 }\r\n")
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return execCommand(ctx, a, f.Name())
 }

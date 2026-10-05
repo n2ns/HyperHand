@@ -94,7 +94,7 @@ Screen, mouse, keyboard, VM and checkpoint tools work without the agent; the oth
 
 - One AI client per VM at a time: several clients can connect, but requests to a VM's agent are handled one after another and their mouse and keyboard actions would interleave.
 - `vm_install_agent` types its command on the keyboard; the guest input method must be in English mode. Installing the agent manually avoids this.
-- `admin` commands elevate without a prompt only if the guest's UAC is set to elevate administrators without prompting; otherwise they wait at the UAC prompt.
+- `admin` commands elevate without a prompt only if the guest's UAC is set to elevate administrators without prompting; otherwise the UAC wait counts toward the command timeout. A late approval cannot execute a cancelled or expired request.
 - Host-side screenshots and input act on the VM console; they do not reach a remote desktop or enhanced session.
 - Checkpoints cannot be deleted from HyperHand.
 

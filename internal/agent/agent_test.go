@@ -97,39 +97,6 @@ func TestServe(t *testing.T) {
 	}
 }
 
-func TestAdminWrapper(t *testing.T) {
-	ps := adminWrapper(proto.ExecArgs{Command: "Get-Date"}, `C:\work dir`, `C:\t\cmd.ps1`, `C:\t\out`, `C:\t\err`, `C:\t\code`)
-	for _, want := range []string{`cd /d "C:\work dir"`, `-File "C:\t\cmd.ps1"`, `>"C:\t\out" 2>"C:\t\err"`, `>"C:\t\code" echo %errorlevel%`} {
-		if !strings.Contains(ps, want) {
-			t.Errorf("powershell wrapper lacks %q:\n%s", want, ps)
-		}
-	}
-	c := adminWrapper(proto.ExecArgs{Command: "echo 100% & dir /b", Shell: "cmd"}, `C:\w`, `C:\t\cmd.ps1`, `C:\t\out`, `C:\t\err`, `C:\t\code`)
-	if want := `cmd.exe /d /s /c "echo 100%% & dir /b" >"C:\t\out" 2>"C:\t\err"`; !strings.Contains(c, want) {
-		t.Errorf("cmd wrapper lacks %q:\n%s", want, c)
-	}
-}
-
-// The admin ps1 (run with -File) must give the same exit code as normal exec (-Command).
-func TestAdminScriptExitCode(t *testing.T) {
-	dir := t.TempDir()
-	for i, command := range []string{"exit 3", `Get-Item C:\nope-hh`, "cmd /c exit 5", "Write-Output ok", "cmd /c exit 0"} {
-		r, _, err := execOp(context.Background(), mustJSON(proto.ExecArgs{Command: command}), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := r.(proto.ExecResult).ExitCode
-		ps1 := filepath.Join(dir, fmt.Sprintf("s%d.ps1", i))
-		os.WriteFile(ps1, []byte(adminScript(command)), 0o644)
-		cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", ps1)
-		cmd.Run()
-		if got := cmd.ProcessState.ExitCode(); got != want {
-			t.Errorf("%q: admin script exit %d, exec exit %d", command, got, want)
-		}
-		t.Logf("%q -> %d", command, want)
-	}
-}
-
 func mustJSON(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
@@ -284,11 +251,19 @@ func TestHashFiles(t *testing.T) {
 // Cancel exactly at the post-completion Err check to exercise the completion/cancellation race.
 type cancelOnErrContext struct {
 	context.Context
-	cancel context.CancelFunc
+	cancel  context.CancelFunc
+	waiting bool
 }
 
-func (c cancelOnErrContext) Err() error {
-	c.cancel()
+func (c *cancelOnErrContext) Done() <-chan struct{} {
+	c.waiting = true
+	return c.Context.Done()
+}
+
+func (c *cancelOnErrContext) Err() error {
+	if c.waiting {
+		c.cancel()
+	}
 	return c.Context.Err()
 }
 
@@ -297,7 +272,7 @@ func TestExecCompletedThenCanceled(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := execOp(cancelOnErrContext{ctx, cancel}, mustJSON(proto.ExecArgs{Shell: "cmd", Command: "exit 0", TimeoutMs: 5000}), nil)
+		_, _, err := execOp(&cancelOnErrContext{Context: ctx, cancel: cancel}, mustJSON(proto.ExecArgs{Shell: "cmd", Command: "exit 0", TimeoutMs: 5000}), nil)
 		done <- err
 	}()
 	select {

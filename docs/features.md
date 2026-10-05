@@ -180,15 +180,13 @@ A non-zero exit code is not a tool error. Errors from the agent (unknown shell, 
 
 ### 5.5 Elevated execution (admin)
 
-`admin` = `true` runs the command elevated. It relies on the guest's UAC being configured to elevate administrators without prompting; the agent requests elevation with no UI.
+`admin` = `true` runs the command elevated. UAC may ask for consent or administrator credentials; waiting for it counts toward `timeout_ms`.
 
-- The agent writes a temporary directory `%TEMP%\hh-admin-*` containing a `run.cmd` wrapper and, for PowerShell, a `cmd.ps1` script. The directory is removed afterwards.
-- `run.cmd` is started hidden with the `runas` verb. It switches to code page 65001, changes to `cwd` (default: the agent's working directory) and runs the command with stdout and stderr redirected to files.
-  - If changing to `cwd` fails, the exit code is 1.
-  - For `cmd`, the command runs as `cmd.exe /d /s /c "<command>"`; `%` is doubled so it reaches the command unexpanded.
-  - For `powershell`, the script is run with `-File` (UTF-8 with BOM, output encoding UTF-8). An `exit N` in the command sets the exit code; otherwise the exit code is 1 when the last statement failed and 0 when it succeeded.
-- The exit code is read from the wrapper's code file, or from the process exit code if that file is missing.
-- On timeout or cancellation the process tree is killed with an elevated `taskkill /T /F` (waited for up to 10 s), then the agent waits up to 5 s for the wrapper to end.
+- A hidden, ordinary launcher process requests elevation of a one-shot worker. The launcher can be stopped even while UAC is waiting, leaving the agent available for the next request.
+- The worker receives the command over a random, single-use local named pipe. It verifies the pipe server's PID and the original agent process's creation time. A late UAC approval after cancellation or timeout cannot retrieve the expired command.
+- `cwd` defaults to the agent's working directory. `cmd` uses the same command line as ordinary execution. PowerShell uses a temporary `%TEMP%\hh-admin-*.ps1` file with a UTF-8 BOM, preserving support for long scripts; the file is deleted afterwards. Explicit `exit N` is preserved, otherwise a failed last statement returns exit code 1.
+- The worker captures stdout/stderr and manages the command tree with a Windows Job Object. Pipe disconnection cancels the command; the original absolute deadline also terminates it. No second elevation prompt is needed to stop the command.
+- A timeout before execution returns `timed_out: true`, exit code `-1` and empty output. Once execution starts, the agent allows up to 5 seconds for job cleanup and the captured result to return. Cancellation is reported as a tool error.
 
 ### 5.6 Output decoding
 
