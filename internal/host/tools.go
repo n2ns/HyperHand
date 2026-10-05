@@ -21,7 +21,6 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"hyperhand/internal/hyperv"
 	"hyperhand/internal/proto"
 )
 
@@ -126,6 +125,7 @@ func done(err error) (*mcp.CallToolResult, error) {
 
 // NewServer builds the MCP server with all HyperHand tools.
 func NewServer(m *Manager) *mcp.Server {
+	backend := m.backend()
 	s := mcp.NewServer(&mcp.Implementation{Name: "hyperhand", Version: proto.Version}, nil)
 	call := func(ctx context.Context, vm, op string, args any, payload []byte, result any) ([]byte, error) {
 		c, err := m.Client(vm)
@@ -136,7 +136,7 @@ func NewServer(m *Manager) *mcp.Server {
 	}
 
 	add(s, "vm_list", "List Hyper-V VMs (name, state, id).", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
-		vms, err := hyperv.ListVMs()
+		vms, err := backend.ListVMs()
 		if err != nil {
 			return nil, err
 		}
@@ -150,25 +150,25 @@ func NewServer(m *Manager) *mcp.Server {
 		return text("%s", b.String()), nil
 	})
 	add(s, "vm_start", "Start a VM.", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
-		v, err := hyperv.Find(in.VM)
+		v, err := backend.Find(in.VM)
 		if err != nil {
 			return nil, err
 		}
-		err = hyperv.Start(v.Name)
+		err = backend.Start(v.Name)
 		m.Drop(v.ID)
 		return done(err)
 	})
 	add(s, "vm_stop", "Turn off a VM.", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
-		v, err := hyperv.Find(in.VM)
+		v, err := backend.Find(in.VM)
 		if err != nil {
 			return nil, err
 		}
-		err = hyperv.Stop(v.Name)
+		err = backend.Stop(v.Name)
 		m.Drop(v.ID)
 		return done(err)
 	})
 	add(s, "vm_checkpoints", "List the VM's checkpoints (name, creation time).", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
-		cps, err := hyperv.ListCheckpoints(in.VM)
+		cps, err := backend.ListCheckpoints(in.VM)
 		if err != nil {
 			return nil, err
 		}
@@ -182,22 +182,22 @@ func NewServer(m *Manager) *mcp.Server {
 		return text("%s", b.String()), nil
 	})
 	add(s, "vm_checkpoint", "Create a checkpoint of the VM.", func(ctx context.Context, in checkpointIn) (*mcp.CallToolResult, error) {
-		return done(hyperv.CreateCheckpoint(in.VM, in.Name))
+		return done(backend.CreateCheckpoint(in.VM, in.Name))
 	})
 	add(s, "vm_restore", "Restore a checkpoint (exact name), then start the VM if it is not running (unless start is false).", func(ctx context.Context, in restoreIn) (*mcp.CallToolResult, error) {
-		v, err := hyperv.Find(in.VM) // resolve "" now: after the restore the VM may be off
+		v, err := backend.Find(in.VM) // resolve "" now: after the restore the VM may be off
 		if err != nil {
 			return nil, err
 		}
-		if err := hyperv.RestoreCheckpoint(v.Name, in.Name); err != nil {
+		if err := backend.RestoreCheckpoint(v.Name, in.Name); err != nil {
 			return nil, err
 		}
 		m.Drop(v.ID)
 		if in.Start == nil || *in.Start {
-			if v, err = hyperv.Find(v.Name); err != nil {
+			if v, err = backend.Find(v.Name); err != nil {
 				return nil, err
 			} else if v.State != "Running" { // a production checkpoint restores to Off, a standard one to Saved
-				return done(hyperv.Start(v.Name))
+				return done(backend.Start(v.Name))
 			}
 		}
 		return text("ok"), nil
@@ -209,7 +209,7 @@ func NewServer(m *Manager) *mcp.Server {
 			var err error
 			switch in.Source {
 			case "", "host":
-				png, w, h, err = hyperv.Screenshot(in.VM)
+				png, w, h, err = backend.Screenshot(in.VM)
 			case "agent":
 				if png, err = call(ctx, in.VM, proto.OpScreenshot, nil, nil, nil); err == nil {
 					var cfg image.Config
@@ -248,13 +248,13 @@ func NewServer(m *Manager) *mcp.Server {
 		if err != nil {
 			return nil, err
 		}
-		return done(hyperv.Click(in.VM, x, y, b, in.Double))
+		return done(backend.Click(in.VM, x, y, b, in.Double))
 	})
 	add(s, "vm_drag", "Drag with the left button from (x1, y1) to (x2, y2).", func(ctx context.Context, in dragIn) (*mcp.CallToolResult, error) {
-		return done(hyperv.Drag(in.VM, in.X1, in.Y1, in.X2, in.Y2))
+		return done(backend.Drag(in.VM, in.X1, in.Y1, in.X2, in.Y2))
 	})
 	add(s, "vm_scroll", "Scroll the mouse wheel at (x, y).", func(ctx context.Context, in scrollIn) (*mcp.CallToolResult, error) {
-		return done(hyperv.Scroll(in.VM, in.X, in.Y, in.Delta))
+		return done(backend.Scroll(in.VM, in.X, in.Y, in.Delta))
 	})
 	var typeMu sync.Mutex // keeps clipboard_set -> ctrl+v of one vm_type together
 	add(s, "vm_type", "Type text into the focused window. Pasted through the guest clipboard (agent clipboard_set + ctrl+v) so an IME cannot swallow it; without the agent, ASCII text is typed on the keyboard instead (an IME in Chinese mode may swallow it).",
@@ -263,17 +263,17 @@ func NewServer(m *Manager) *mcp.Server {
 			defer typeMu.Unlock()
 			_, err := call(ctx, in.VM, proto.OpClipboardSet, proto.TextArgs{Text: in.Text}, nil, nil)
 			if err == nil {
-				return done(hyperv.PressKeys(in.VM, "ctrl+v"))
+				return done(backend.PressKeys(in.VM, "ctrl+v"))
 			}
 			for _, r := range in.Text {
 				if r >= 128 {
 					return nil, fmt.Errorf("non-ASCII text needs the agent: %w", err)
 				}
 			}
-			return done(hyperv.TypeText(in.VM, in.Text))
+			return done(backend.TypeText(in.VM, in.Text))
 		})
 	add(s, "vm_key", "Press a key or key combination. Keys: ctrl, shift, alt, win, enter, esc, tab, space, backspace, delete, insert, home, end, pageup, pagedown, up, down, left, right, f1-f12, a-z, 0-9, punctuation such as ; = , - . / ` [ \\ ] ' and plus for the +/= key.", func(ctx context.Context, in keyIn) (*mcp.CallToolResult, error) {
-		return done(hyperv.PressKeys(in.VM, in.Keys))
+		return done(backend.PressKeys(in.VM, in.Keys))
 	})
 	add(s, "vm_exec", "Run a command in the guest (as the logged-on user); returns exit code, stdout and stderr.",
 		func(ctx context.Context, in execIn) (*mcp.CallToolResult, error) {
@@ -332,17 +332,17 @@ func NewServer(m *Manager) *mcp.Server {
 			if err != nil {
 				return nil, err
 			}
-			if err := hyperv.CopyToGuest(in.VM, exe, GuestAgentPath); err != nil {
+			if err := backend.CopyToGuest(in.VM, exe, GuestAgentPath); err != nil {
 				return nil, fmt.Errorf("copy agent: %w", err)
 			}
-			if err := hyperv.PressKeys(in.VM, "win+r"); err != nil {
+			if err := backend.PressKeys(in.VM, "win+r"); err != nil {
 				return nil, err
 			}
 			time.Sleep(1500 * time.Millisecond)
-			if err := hyperv.TypeText(in.VM, GuestAgentPath+" install"); err != nil {
+			if err := backend.TypeText(in.VM, GuestAgentPath+" install"); err != nil {
 				return nil, err
 			}
-			if err := hyperv.PressKeys(in.VM, "enter"); err != nil {
+			if err := backend.PressKeys(in.VM, "enter"); err != nil {
 				return nil, err
 			}
 			c, err := m.Client(in.VM)

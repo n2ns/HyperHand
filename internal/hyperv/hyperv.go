@@ -1,10 +1,11 @@
 // Package hyperv controls a Hyper-V VM from the host through WMI (root\virtualization\v2): screen, mouse, keyboard,
-// state, and copying a file into the guest. Needs an elevated process. vm is the VM name; "" means the only running VM
+// state, and copying a file into the guest. Needs Hyper-V management rights. vm is the VM name; "" means the only running VM
 // (or the only VM if none is running).
 package hyperv
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -309,9 +310,104 @@ func requestState(vm string, state int32) error {
 		if err != nil {
 			return err
 		}
-		_, err = s.call(o, "RequestStateChange", "RequestedState", state)
-		return err
+		out, err := s.call(o, "RequestStateChange", "RequestedState", state)
+		if err != nil {
+			return err
+		}
+		if toInt(s.get(out, "ReturnValue")) != 4096 {
+			return nil
+		}
+		path, _ := s.get(out, "Job").(string)
+		if path == "" {
+			return errors.New("RequestStateChange started asynchronously without a job reference")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		return waitStateJob(ctx, 500*time.Millisecond, func() (stateJob, error) {
+			return s.readStateJob(path)
+		})
 	})
+}
+
+type stateJob struct {
+	State       int
+	ErrorCode   int
+	Description string
+}
+
+// RequestStateChange's 4096 means only that a transition started. Never replay the
+// request: poll its Msvm_ConcreteJob and require Completed with ErrorCode zero.
+// https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/msvm-concretejob
+func waitStateJob(ctx context.Context, interval time.Duration, poll func() (stateJob, error)) error {
+	var last stateJob
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("RequestStateChange job wait ended (JobState=%d, ErrorCode=%d, ErrorDescription=%q); operation may still be running: %w", last.State, last.ErrorCode, last.Description, err)
+		}
+		job, err := poll()
+		if err != nil {
+			return fmt.Errorf("read RequestStateChange job: %w", err)
+		}
+		last = job
+		switch job.State {
+		case 7: // Completed normally; ErrorCode still determines success.
+			if job.ErrorCode == 0 {
+				return nil
+			}
+			fallthrough
+		case 8, 9, 10: // Terminated, Killed, Exception.
+			return fmt.Errorf("RequestStateChange job failed (JobState=%d, ErrorCode=%d, ErrorDescription=%q)", job.State, job.ErrorCode, job.Description)
+		case 2, 3, 4, 5, 6, 11: // New, Starting, Running, Suspended, Shutting Down, Service.
+		default:
+			return fmt.Errorf("RequestStateChange job has unexpected JobState=%d (ErrorCode=%d, ErrorDescription=%q)", job.State, job.ErrorCode, job.Description)
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+}
+
+func (s *session) readStateJob(path string) (stateJob, error) {
+	// Get a fresh WMI object each time; release it before the next poll.
+	v, err := oleutil.CallMethod(s.svc, "Get", path)
+	if err != nil {
+		return stateJob{}, err
+	}
+	defer v.Clear()
+	o := v.ToIDispatch()
+	if o == nil {
+		return stateJob{}, errors.New("job object is unavailable")
+	}
+	readNumber := func(name string) (int, error) {
+		p, err := oleutil.GetProperty(o, name)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", name, err)
+		}
+		defer p.Clear()
+		if p.Value() == nil {
+			return 0, fmt.Errorf("job %s is missing", name)
+		}
+		return toInt(p.Value()), nil
+	}
+	var job stateJob
+	if job.State, err = readNumber("JobState"); err != nil {
+		return job, err
+	}
+	if job.ErrorCode, err = readNumber("ErrorCode"); err != nil {
+		if job.State >= 7 && job.State <= 10 {
+			return job, err
+		}
+		// The provider need not have a final error code while the job is pending.
+		job.ErrorCode = -1
+	}
+	job.Description, _ = s.get(o, "ErrorDescription").(string)
+	if job.Description == "" {
+		job.Description, _ = s.get(o, "ErrorSummaryDescription").(string)
+	}
+	return job, nil
 }
 
 // ---- WMI plumbing ----

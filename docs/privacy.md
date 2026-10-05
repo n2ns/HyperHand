@@ -6,19 +6,24 @@ HyperHand runs entirely on your machine and its Hyper-V VMs.
 
 - HyperHand collects no telemetry and makes no outbound network connections.
 - The host MCP server listens on `127.0.0.1` only (port 8770 by default, set with `-port`). It is not reachable from other machines.
-- Traffic between the host and the guest agent uses Hyper-V sockets. It does not pass through the guest's or the host's network adapters.
+- The ordinary host tray talks to `HyperHandService` through a local named pipe. The service tunnels guest traffic over the fixed HyperHand Hyper-V socket service. It does not pass through the guest's or the host's network adapters.
 - Copying the agent into the guest uses the Hyper-V Guest Service Interface (`Copy-VMFile`).
 
 ## Data handled
 
-Screenshots, typed text, clipboard contents, command output and file contents pass between the guest, the host tray and the MCP client that requested them. HyperHand does not store them, apart from the files you copy with `vm_push` and `vm_pull`.
+Screenshots, typed text, clipboard contents, command output and file contents pass between the guest, the host service, the host tray and the MCP client that requested them. Host file reads and writes for `vm_push` and `vm_pull` run under the tray user's permissions. The service has its own temporary working directory; see below for local storage.
 
 ## Data stored locally
 
 On the host:
 
 - Log file: `%LOCALAPPDATA%\HyperHand\hyperhand.log` (listening address, errors).
-- Scheduled task `HyperHand`, created by `hyperhand.exe install`.
+- Installed executables: `%ProgramFiles%\HyperHand\hyperhand.exe` and `hyperhand-agent.exe`.
+- Windows service `HyperHandService`, running automatically as `NT SERVICE\HyperHandService`; that dedicated account is added to Hyper-V Administrators.
+- `%ProgramData%\HyperHand\config.json`, including the installing user's SID used for local broker access control. This configuration is protected from ordinary user changes.
+- `%ProgramData%\HyperHand\service-data`, the service's writable working directory, including temporary staging for guest agent installation.
+- Service error log: `%ProgramData%\HyperHand\service-data\broker.log`, with an approximately 1 MiB size limit. Service errors may also appear in the Windows Application event log under `HyperHandService`; use the file log if the event source is unavailable.
+- Scheduled task `HyperHand`, created by `hyperhand.exe install` to start the ordinary tray for the installing user at logon, with least privilege.
 - Registry key `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\3ce544e1-2645-4383-b332-fedf8a18736b`, which registers the Hyper-V socket service.
 - Unique `.hyperhand-*.hhpart` files in the destination directory while `vm_pull` writes a file; renamed to the target on completion, deleted on failure.
 
@@ -29,6 +34,12 @@ In the guest:
 - Unique `.hyperhand-*.hhpart` files in the destination directory while `vm_push` writes a file; renamed to the target on completion, deleted on failure.
 - Temporary `hh-admin-*.ps1` or `hh-admin-*.cmd` files under the elevated worker's temp directory for commands with `admin: true`; deleted when the command finishes. Commands and results pass over a single-use local named pipe, not a guest network connection.
 
+Host uninstallation preserves user logs, guest files and nonempty service working data. When service data remains, the owner configuration is also retained for reinstallation. Otherwise the configuration and empty data directory are removed. Installed host and agent executables are deleted only if they still match the hashes recorded for cleanup; directories containing other files are left in place.
+
 ## Access control
 
 The MCP server has no authentication. Any local process that can reach `127.0.0.1:8770` can control the VMs through all HyperHand tools, including running commands in the guest and copying files between host and guest.
+
+The service's named pipe permits the configured owner, SYSTEM, administrators and the service account. This restricts direct broker access; it does **not** authenticate MCP callers or prevent another local process from using the tray's HTTP endpoint. The service exposes specific Hyper-V operations and the fixed guest socket tunnel, not an arbitrary host command execution endpoint. Guest `vm_exec` still runs in the guest.
+
+The tray runs without elevation. The service uses a dedicated virtual account, not LocalSystem, and installation does not add the human user to Hyper-V Administrators. That service account nevertheless has broad Hyper-V management rights, including VM and checkpoint operations. Host UAC settings are not changed.

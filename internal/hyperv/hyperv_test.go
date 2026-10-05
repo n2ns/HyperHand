@@ -1,10 +1,90 @@
 package hyperv
 
 import (
+	"context"
+	"errors"
 	"image/color"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
+
+func TestWaitStateJobCompletes(t *testing.T) {
+	jobs := []stateJob{{State: 2}, {State: 3}, {State: 4}, {State: 6}, {State: 7}}
+	reads := 0
+	err := waitStateJob(context.Background(), 0, func() (stateJob, error) {
+		if reads >= len(jobs) {
+			t.Fatal("polled again after completion")
+		}
+		j := jobs[reads]
+		reads++
+		return j, nil
+	})
+	if err != nil || reads != len(jobs) {
+		t.Fatalf("reads=%d error=%v", reads, err)
+	}
+}
+
+func TestWaitStateJobSurfacesAsyncFailure(t *testing.T) {
+	for _, state := range []int{7, 8, 9, 10} {
+		reads := 0
+		err := waitStateJob(context.Background(), 0, func() (stateJob, error) {
+			reads++
+			if reads == 1 {
+				return stateJob{State: 4}, nil
+			}
+			return stateJob{State: state, ErrorCode: 32768, Description: "insufficient resources"}, nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "32768") || !strings.Contains(err.Error(), "insufficient resources") || reads != 2 {
+			t.Fatalf("state=%d reads=%d error=%v", state, reads, err)
+		}
+	}
+}
+
+func TestWaitStateJobDoesNotAcceptAbnormalTerminationWithoutErrorCode(t *testing.T) {
+	for _, state := range []int{8, 9, 10, 0, 32768} {
+		if err := waitStateJob(context.Background(), 0, func() (stateJob, error) { return stateJob{State: state}, nil }); err == nil {
+			t.Fatalf("accepted state %d", state)
+		}
+	}
+}
+
+func TestWaitStateJobStopsOnTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	reads := 0
+	// Cancellation after the first observation deterministically exercises the
+	// bounded wait without allowing another query or any new state-change request.
+	err := waitStateJob(ctx, time.Hour, func() (stateJob, error) { reads++; cancel(); return stateJob{State: 4}, nil })
+	if !errors.Is(err, context.Canceled) || reads != 1 || !strings.Contains(err.Error(), "may still be running") {
+		t.Fatalf("reads=%d error=%v", reads, err)
+	}
+	deadline, done := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer done()
+	err = waitStateJob(deadline, 0, func() (stateJob, error) { t.Fatal("queried after deadline"); return stateJob{}, nil })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline, got %v", err)
+	}
+}
+
+func TestWaitStateJobQueryFailure(t *testing.T) {
+	want := errors.New("job disappeared")
+	err := waitStateJob(context.Background(), 0, func() (stateJob, error) { return stateJob{}, want })
+	if !errors.Is(err, want) {
+		t.Fatalf("query error hidden: %v", err)
+	}
+}
+
+func TestWaitStateJobPendingDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	reads := 0
+	err := waitStateJob(ctx, time.Hour, func() (stateJob, error) { reads++; return stateJob{State: 4}, nil })
+	if !errors.Is(err, context.DeadlineExceeded) || reads > 1 {
+		t.Fatalf("deadline did not interrupt polling wait: reads=%d error=%v", reads, err)
+	}
+}
 
 func TestStateName(t *testing.T) {
 	// Msvm_ComputerSystem.EnabledState uses Hyper-V-specific values for saved/paused VMs.

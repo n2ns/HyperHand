@@ -2,14 +2,15 @@
 
 Let an AI agent such as Claude Code or Codex see and operate a Windows virtual machine on Hyper-V: take screenshots, click, type, run commands, move files and roll back to checkpoints, without a network connection to the guest and without a guest password. Built for Windows 10/11 hosts running Hyper-V with Windows guests; works with any MCP client that supports Streamable HTTP.
 
-HyperHand has two parts:
+HyperHand has two executables and three roles:
 
-- **`hyperhand.exe`**, a tray program on the host. It serves MCP at `http://127.0.0.1:8770/mcp` and drives the VM's screen, mouse and keyboard through Hyper-V.
+- **`hyperhand.exe`**, an ordinary user tray program on the host. It serves MCP at `http://127.0.0.1:8770/mcp` and handles host file access.
+- **`HyperHandService`**, the same host executable running as a Windows service under its dedicated account, `NT SERVICE\HyperHandService`. The tray delegates Hyper-V operations through an access-controlled local named pipe; the service connects to the guest over a Hyper-V socket.
 - **`hyperhand-agent.exe`**, a tray program inside the guest. It runs commands, transfers files and handles the clipboard and windows in the logged-on user's session, talking to the host over a Hyper-V socket.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
-  <img alt="HyperHand architecture: an MCP client talks to hyperhand.exe on the host, which drives the VM console through Hyper-V and the guest agent through a Hyper-V socket" src="docs/images/architecture.svg">
+  <img alt="HyperHand architecture: an MCP client talks to the ordinary host tray, which delegates Hyper-V control and the guest socket connection to HyperHandService" src="docs/images/architecture.svg">
 </picture>
 
 ## Features
@@ -21,10 +22,11 @@ HyperHand has two parts:
 - **Clipboard, windows and waiting**: read and write the guest clipboard, bring a window to the front, wait until a process exits or a file appears.
 - **No guest network, no guest password**: host and agent talk over a Hyper-V socket; the agent is copied in with Hyper-V's guest file copy and installed from the keyboard.
 - **Cancellation**: when the MCP client cancels a long command, the agent kills it and is ready for the next request immediately.
+- **No UAC during normal host use**: install or update the service once with administrator approval, then start or restart the tray as an ordinary user. Restarting the tray reconnects MCP without restarting the service or any VM; in-progress requests are interrupted.
 
 ## Requirements
 
-- Windows 10/11 Pro or Enterprise host with Hyper-V, and an administrator account on it.
+- Windows 10/11 Pro or Enterprise host with Hyper-V, and administrator approval for installation, updates and uninstallation. Normal tray use does not require elevation.
 - A Windows guest with a logged-on user.
 - VMConnect in basic session mode. Enhanced session moves the user's session to remote desktop, so host-side screenshots and input would reach the console lock screen instead.
 - Go 1.27 or later, only to build from source.
@@ -32,13 +34,13 @@ HyperHand has two parts:
 
 ## Install
 
-Download `hyperhand-X.Y.Z-windows-amd64.zip` from [Releases](https://github.com/n2ns/HyperHand/releases) and extract it to a permanent folder: the scheduled task runs `hyperhand.exe` from where it is. Then run:
+Download `hyperhand-X.Y.Z-windows-amd64.zip` from [Releases](https://github.com/n2ns/hyper-hand/releases) and extract both executables to the same folder. Then run:
 
 ```powershell
 hyperhand.exe install
 ```
 
-`install` asks for UAC once, registers a scheduled task that starts `hyperhand.exe` elevated at logon (from where it is now) and starts it. Keep `hyperhand-agent.exe` in the same folder.
+`install` asks for UAC once, copies both executables to `%ProgramFiles%\HyperHand`, installs the automatic `HyperHandService` service and starts the ordinary tray. Only the dedicated service account is added to Hyper-V Administrators; your user account is not. The `HyperHand` logon task runs the installed tray with least privilege, replacing an older highest-privilege task. Run `install` again from a new release to update the installation.
 
 To build from source instead (the version then reads `dev`):
 
@@ -108,8 +110,8 @@ HyperHand sends no telemetry and makes no network connections beyond the local M
 Guest first, then host:
 
 1. Guest: run `%LOCALAPPDATA%\HyperHand\hyperhand-agent.exe uninstall` in the guest itself, by hand or from the host with `vm_key` `win+r` and `vm_type`. Not through `vm_exec`: the uninstall stops the agent that would be running it. It deletes the `HyperHandAgent` Run value and the folders `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`.
-2. Host: run `hyperhand.exe uninstall` (one UAC prompt). It stops the tray and deletes the scheduled task `HyperHand`, the Hyper-V socket service registration and the log folder.
-3. Delete the HyperHand folder and remove the server from your MCP client.
+2. Host: run `hyperhand.exe uninstall` (one UAC prompt). It removes the installed service, its Hyper-V group membership, the `HyperHand` logon task and the Hyper-V socket registration, then removes the installed executables if their hashes still match. User logs, guest files and nonempty service working data are preserved.
+3. Remove the server from your MCP client. See the user guide for installed files and logs.
 
 Details in the [user guide](docs/user-guide.md#uninstalling).
 

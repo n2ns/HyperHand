@@ -12,8 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"hyperhand/internal/hvsock"
-	"hyperhand/internal/hyperv"
 	"hyperhand/internal/proto"
 )
 
@@ -159,13 +157,15 @@ func (c *Client) Close() {
 
 // Manager keeps one Client per VM.
 type Manager struct {
+	Backend Backend
 	mu      sync.Mutex
 	clients map[string]*Client
 }
 
 // Client returns the agent client for a VM name ("" = the only running VM).
 func (m *Manager) Client(vm string) (*Client, error) {
-	v, err := hyperv.Find(vm)
+	b := m.backend()
+	v, err := b.Find(vm)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +177,7 @@ func (m *Manager) Client(vm string) (*Client, error) {
 	c := m.clients[v.ID]
 	if c == nil {
 		id := v.ID
-		c = NewClient(func(ctx context.Context) (net.Conn, error) { return hvsock.Dial(ctx, id) })
+		c = NewClient(func(ctx context.Context) (net.Conn, error) { return b.Dial(ctx, id) })
 		m.clients[v.ID] = c
 	}
 	return c, nil

@@ -8,12 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Dedicated `HyperHandService` Windows service under `NT SERVICE\HyperHandService`, with Hyper-V rights assigned to the service account and an access-controlled local named pipe for specific VM operations and the guest socket tunnel.
+- Host tray restart action: restarts the ordinary tray/MCP process without restarting the service or any VM; in-progress requests are interrupted.
 - `vm_windows` lists the guest's visible top-level windows with handle, title, class, process, position, enabled, foreground, owner and modal state.
 - `vm_focus_window` accepts a window `handle` and returns the focused window's handle.
 - `vm_click` accepts `window` or `handle`: coordinates are then relative to that window, and the click is refused unless it is the enabled foreground window and the point is inside it, on screen and not covered by another window.
 
+### Changed
+
+- Normal host tray startup no longer requests elevation. Installation, updates and uninstallation still require administrator approval.
+- `hyperhand.exe install` installs both executables under `%ProgramFiles%\HyperHand`, records the owner under `%ProgramData%\HyperHand`, and migrates the `HyperHand` logon task from highest privileges to least privilege. Repeating `install` updates the installation.
+- Host file transfers use the ordinary tray user's permissions. The local MCP endpoint remains unauthenticated; the broker pipe ACL is not MCP authentication.
+- `scripts/restart-tray.ps1` now invokes installation/update of the built executables instead of terminating every process named `hyperhand.exe`.
+
 ### Fixed
 
+- VM start and stop wait up to 45 seconds for asynchronous Hyper-V jobs and report failures or timeouts without automatically resending the operation.
 - `vm_focus_window` no longer puts ribbon programs such as AutoCAD into key-tip mode. When the window did not come to the front at once, the agent simulated an Alt press, which arrived after the switch in the focused window; it now injects a zero-distance mouse move instead.
 
 ## [0.1.2] - 2026-10-05

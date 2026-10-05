@@ -1,10 +1,9 @@
-# Replaces build\hyperhand.exe with build\hyperhand.exe.new (if present) and restarts the tray. Run elevated.
-$b = Join-Path (Split-Path $PSScriptRoot -Parent) 'build'
-Get-Process hyperhand -ErrorAction SilentlyContinue | Stop-Process -Force
-while (Get-Process hyperhand -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
-if (Test-Path "$b\hyperhand.exe.new") {
-    for ($i = 0; $i -lt 25; $i++) {
-        try { Move-Item "$b\hyperhand.exe.new" "$b\hyperhand.exe" -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 200 }
-    }
+# Install a rebuilt host and restart its user tray. The installer requests UAC.
+$ErrorActionPreference = 'Stop'
+$buildDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'build'
+$candidate = Join-Path $buildDir 'hyperhand.exe'
+if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+    throw 'Build build\hyperhand.exe before installing.'
 }
-schtasks /Run /TN HyperHand | Out-Null
+# The installer owns service replacement and migration; do not kill processes by name.
+Start-Process -FilePath $candidate -ArgumentList 'install' -WindowStyle Hidden

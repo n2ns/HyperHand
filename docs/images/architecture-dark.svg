@@ -61,8 +61,8 @@
   <rect x="120" y="270" width="48" height="48" rx="14" fill="#ffffff" fill-opacity="0.18"/>
   <g transform="translate(132,282)" fill="none" stroke="#ffffff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 7-6 2-2 6z"/><path d="M13 12l5 5"/></g>
   <text x="184" y="292" font-size="21" font-weight="700" fill="#ffffff">hyperhand.exe</text>
-  <text x="184" y="314" font-size="13" fill="#e0e7ff">Host tray · elevated · MCP on 127.0.0.1:8770</text>
-  <text x="120" y="352" font-size="13" fill="#1e2340">Turns tool calls into Hyper-V actions and agent requests</text>
+  <text x="184" y="314" font-size="13" fill="#e0e7ff">Ordinary tray · MCP on 127.0.0.1:8770</text>
+  <text x="120" y="352" font-size="13" fill="#1e2340">Host files as user · VM calls through the service</text>
 
   <!-- row 2, guest: agent -->
   <g filter="url(#glowG)"><rect x="740" y="246" width="440" height="128" rx="22" fill="url(#agent)"/></g>
@@ -76,8 +76,8 @@
   <g filter="url(#soft)"><rect x="100" y="424" width="440" height="108" rx="18" fill="#161b22" stroke="#30363d"/></g>
   <rect x="120" y="448" width="44" height="44" rx="13" fill="#21262d"/>
   <g transform="translate(130,458)" fill="none" stroke="#9da7b3" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></g>
-  <text x="180" y="466" font-size="17" font-weight="650" fill="#e6edf3">Hyper-V</text>
-  <text x="180" y="488" font-size="13" fill="#9da7b3">Host-side WMI and cmdlets</text>
+  <text x="180" y="466" font-size="17" font-weight="650" fill="#e6edf3">HyperHandService</text>
+  <text x="180" y="488" font-size="13" fill="#9da7b3">Dedicated account · Hyper-V WMI and cmdlets</text>
   <text x="180" y="512" font-size="12.5" fill="#7d8590">VM state · checkpoints · first copy of the agent</text>
 
   <!-- row 3, guest: console -->
@@ -93,10 +93,11 @@
   <rect x="336" y="206" width="64" height="24" rx="12" fill="#161b22" stroke="#30363d"/>
   <text x="368" y="222" text-anchor="middle" font-size="11.5" font-weight="650" fill="#79b8ff">MCP</text>
   <path d="M320 374 L320 418" stroke="#64748b" stroke-width="3" stroke-linecap="round" marker-end="url(#tipS)"/>
+  <text x="338" y="400" font-size="11.5" fill="#9da7b3">Local pipe · owner ACL</text>
   <path d="M960 246 L960 202" stroke="#10b981" stroke-width="3" stroke-linecap="round" marker-end="url(#tipG)"/>
 
   <!-- horizontal channels across the boundary -->
-  <path d="M540 310 L734 310" stroke="#10b981" stroke-width="3" stroke-linecap="round" marker-end="url(#tipG)"/>
+  <path d="M540 478 L560 478 L560 310 L734 310" stroke="#10b981" stroke-width="3" stroke-linecap="round" fill="none" marker-end="url(#tipG)"/>
   <rect x="580" y="262" width="120" height="38" rx="12" fill="#161b22" stroke="#1f6f4f"/>
   <text x="640" y="278" text-anchor="middle" font-size="11.5" font-weight="650" fill="#56d4a0">Hyper-V socket</text>
   <text x="640" y="293" text-anchor="middle" font-size="10.5" fill="#7d8590">no network</text>

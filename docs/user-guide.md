@@ -2,21 +2,22 @@
 
 This guide covers downloading or building HyperHand, installing the host tray and the guest agent, connecting an MCP client (Claude Code, Codex or another client), updating, releasing, uninstalling, and troubleshooting.
 
-HyperHand has two parts:
+HyperHand has two executables and three roles:
 
-- `hyperhand.exe` runs on the Hyper-V host. It is a tray program that serves MCP over Streamable HTTP at `http://127.0.0.1:8770/mcp` and controls VMs through Hyper-V WMI and PowerShell. Screenshots, mouse, keyboard, VM state and checkpoints work without anything installed in the guest.
+- `hyperhand.exe` runs as an ordinary user tray program on the Hyper-V host. It serves MCP over Streamable HTTP at `http://127.0.0.1:8770/mcp` and reads and writes host files using that user's permissions.
+- `HyperHandService` runs the same executable as a Windows service under `NT SERVICE\HyperHandService`. The tray requests specific Hyper-V operations over an access-controlled local named pipe. Screenshots, mouse, keyboard, VM state and checkpoints work without anything installed in the guest; the service also tunnels the guest agent connection.
 - `hyperhand-agent.exe` runs inside the guest, in the logged-on user's desktop session. It answers requests from the host over a Hyper-V socket and provides command execution, file transfer, clipboard, window focus, waits and an in-guest screenshot.
 
 ## Requirements
 
-- Host: Windows 10 or Windows 11 Pro or Enterprise with Hyper-V enabled. The tray must run elevated; it relaunches itself through UAC if started without elevation.
+- Host: Windows 10 or Windows 11 Pro or Enterprise with Hyper-V enabled. Installation, updates and uninstallation require administrator approval; normal tray startup and restart do not.
 - Guest: a Windows VM with a user logged on to the desktop.
 - Go 1.27 or later, only to build from source.
 - VMConnect in basic session mode. In an enhanced session, the guest user session moves to RDP, and the host-side screenshot and input reach the console session, which shows the lock screen. Switch with View > Enhanced Session in VMConnect, or close VMConnect while HyperHand is working.
 
 ## 1. Download or build
 
-Download `hyperhand-X.Y.Z-windows-amd64.zip` from [Releases](https://github.com/n2ns/HyperHand/releases). It contains `hyperhand.exe`, `hyperhand-agent.exe` (both Windows amd64, with the version stamped in), `README.md` and `CHANGELOG.md`. Extract it to a folder you will keep, for example `C:\Tools\HyperHand`: the scheduled task created in step 2 runs `hyperhand.exe` from there.
+Download `hyperhand-X.Y.Z-windows-amd64.zip` from [Releases](https://github.com/n2ns/hyper-hand/releases). It contains `hyperhand.exe`, `hyperhand-agent.exe` (both Windows amd64, with the version stamped in), `README.md` and `CHANGELOG.md`. Extract both executables to the same folder. The installer copies them to `%ProgramFiles%\HyperHand`; the logon task uses that installed copy.
 
 To build from source instead, from the repository root:
 
@@ -27,9 +28,9 @@ go build -ldflags "-H windowsgui" -o build\hyperhand-agent.exe .\cmd\hyperhand-a
 
 `-H windowsgui` builds both as GUI programs, so no console window appears. A source build reports its version as `dev`.
 
-Keep `hyperhand-agent.exe` in the same directory as `hyperhand.exe`. `vm_install_agent` and `vm_update_agent` take the agent from there.
+Keep `hyperhand-agent.exe` in the same directory as `hyperhand.exe` when installing or updating. Guest installation and update use the installed agent executable.
 
-## 2. Install the host tray
+## 2. Install the host service and tray
 
 From the folder with `hyperhand.exe` (`build` for a source build):
 
@@ -39,14 +40,21 @@ hyperhand.exe install
 
 This shows one UAC prompt, then:
 
-1. Creates (or replaces) a scheduled task named `HyperHand` that runs `hyperhand.exe` from its current location, at logon, with highest privileges. The task has no run time limit and is allowed to start and keep running on battery.
-2. Starts the task immediately. A tray icon appears and a message box confirms the path and the MCP URL.
+1. Copies both executables to `%ProgramFiles%\HyperHand` and records the installing user's SID in `%ProgramData%\HyperHand\config.json`.
+2. Installs the automatic Windows service `HyperHandService`, running as `NT SERVICE\HyperHandService`. Only this dedicated account is added to Hyper-V Administrators. It does not add your user account or run the service as LocalSystem.
+3. Registers the HyperHand Hyper-V socket service under `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\3ce544e1-2645-4383-b332-fedf8a18736b`.
+4. Creates or replaces the `HyperHand` logon task for the installing user, using the installed executable with least privilege. This replaces the old highest-privilege task.
+5. Starts the service and ordinary tray.
 
-The task points at the exe where it is. If you move the exe, run `install` again from the new location.
+Run `install` again from a new release or build to update the installed copies. Keep the service installation separate from normal tray startup: launching the installed executable without `install` does not request UAC or change machine configuration.
 
-On every start the tray registers the HyperHand Hyper-V socket service under `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\3ce544e1-2645-4383-b332-fedf8a18736b`. Only one tray instance runs at a time.
+Only one tray instance runs at a time. Its connection to the service uses a local named pipe restricted to the configured owner, SYSTEM, administrators and the service account. This does not add authentication to the local MCP HTTP endpoint.
 
 The tray menu shows the MCP URL, or the error if the port could not be opened.
+
+### Restarting the tray
+
+Use the tray's restart action to restart the tray and MCP listener as the ordinary user, without a UAC prompt. It preserves the selected port. This disconnects MCP clients and interrupts in-progress requests; wait for the tray to return, then reconnect or retry from your MCP client. It does not restart the Windows service, guest agent or any VM. Use `install` to deploy updated binaries instead.
 
 ### Using a different port
 
@@ -161,10 +169,11 @@ Where UAC prompts appear, and where they do not:
 
 | When | Where | Prompt |
 |---|---|---|
-| `hyperhand.exe install` | Host | Once. The scheduled task it creates starts the tray elevated at logon without a prompt. |
+| `hyperhand.exe install` (including updates) | Host | Once per install/update, for the service, protected files and logon task. |
 | `hyperhand.exe uninstall` | Host | Once; it relaunches itself elevated. |
-| Starting `hyperhand.exe` by hand without elevation | Host | Once; it relaunches itself elevated. |
-| Replacing the tray with `scripts\restart-tray.ps1` | Host | Once per update (the script must run elevated). |
+| Starting the installed `hyperhand.exe`, at logon or by hand | Host | None. The tray runs as the ordinary user. |
+| Restarting from the tray menu | Host | None. Only the tray/MCP process restarts; active requests are interrupted. |
+| Updating with `scripts\restart-tray.ps1` | Host | Once per update; the script invokes the installer. This is not the tray-only restart action. |
 | `vm_install_agent`, `hyperhand-agent.exe install`, `hyperhand-agent.exe uninstall`, `vm_update_agent`, the agent at logon | Guest | None. The agent runs as the logged-on user, not elevated. |
 | `vm_exec` with `admin: true` | Guest | None if `ConsentPromptBehaviorAdmin` is `0` (see [Allow `admin` exec without a prompt](#allow-admin-exec-without-a-prompt)); otherwise a prompt that the command waits for. |
 | A program started in the guest that asks for elevation | Guest | As configured in the guest; answer it from the host with `vm_screenshot` and `vm_key` (or `vm_click`). |
@@ -187,28 +196,27 @@ Host-side screenshots and input work on the guest's secure desktop, so a guest U
 
 ### From a release
 
-1. Download the new zip from [Releases](https://github.com/n2ns/HyperHand/releases).
-2. Quit the tray from its menu (or, from an elevated prompt, `schtasks /End /TN HyperHand` followed by `taskkill /F /IM hyperhand.exe`).
-3. Extract the new `hyperhand.exe` and `hyperhand-agent.exe` over the old ones in the same folder.
-4. Start the tray again: `schtasks /Run /TN HyperHand`, or log off and on.
-5. Ask the AI to call `vm_update_agent` for each VM. It sends the new `hyperhand-agent.exe` to the running agent, which replaces itself and restarts.
+1. Download the new zip from [Releases](https://github.com/n2ns/hyper-hand/releases) and extract both executables together.
+2. Finish active VM tool requests, then run the extracted `hyperhand.exe install` and approve UAC. The installer updates the protected installation and restarts the host components. Existing highest-privilege tray tasks are migrated to the ordinary logon task.
+3. Reconnect the MCP client after the tray returns.
+4. Ask the AI to call `vm_update_agent` for each VM. It sends the installed `hyperhand-agent.exe` to the running agent, which replaces itself and restarts.
 
 ### From source
 
-1. Rebuild. While the tray is running, `build\hyperhand.exe` is locked, so build the host to `build\hyperhand.exe.new`:
+1. Rebuild both executables in `build`. The running service and tray use the installed copies under `%ProgramFiles%\HyperHand`:
 
    ```
-   go build -ldflags "-H windowsgui" -o build\hyperhand.exe.new .\cmd\hyperhand
+   go build -ldflags "-H windowsgui" -o build\hyperhand.exe .\cmd\hyperhand
    go build -ldflags "-H windowsgui" -o build\hyperhand-agent.exe .\cmd\hyperhand-agent
    ```
 
-2. From an elevated PowerShell, run:
+2. Run the update wrapper and approve the installer's UAC prompt:
 
    ```
    scripts\restart-tray.ps1
    ```
 
-   The script stops the running tray, moves `build\hyperhand.exe.new` over `build\hyperhand.exe` if it exists, and starts the `HyperHand` scheduled task again. It assumes the task points at `build\hyperhand.exe` in the repository.
+   The script invokes `install` for the built executables. Despite its historical name, it deploys a build; use the tray's restart action when you only need to reconnect MCP without changing files. It does not terminate all processes by executable name.
 
 3. Ask the AI to call `vm_update_agent`. The host sends the `hyperhand-agent.exe` next to `hyperhand.exe` to the running agent, which replaces itself, restarts, and is pinged until it answers (up to 30 seconds). Repeat for each VM.
 
@@ -250,7 +258,9 @@ On the host:
    hyperhand.exe uninstall
    ```
 
-   It relaunches itself elevated if needed (one UAC prompt), stops the tray (ends the scheduled task and the other `hyperhand.exe` processes), deletes the scheduled task `HyperHand`, deletes the Hyper-V socket service registration `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\3ce544e1-2645-4383-b332-fedf8a18736b` and deletes `%LOCALAPPDATA%\HyperHand` (the log). It shows a message box listing what was removed. It does not delete `hyperhand.exe` or its folder.
+   It requests elevation if needed, stops the installed tray and service, removes `HyperHandService` and its Hyper-V Administrators membership, the `HyperHand` logon task and the Hyper-V socket registration. A protected cleanup helper waits for the installed executable to exit and removes the installed host and agent executables only if their hashes still match.
+
+   User logs under `%LOCALAPPDATA%\HyperHand`, files inside guests and nonempty `%ProgramData%\HyperHand\service-data` are preserved. When service data remains, `config.json` is retained as the owner marker for reinstallation. Otherwise it removes the owner configuration and empty installation/data directories. It does not claim to remove directories containing other files.
 2. Delete the folder with `hyperhand.exe` (the extracted release or the build directory).
 3. Remove the server from your MCP client: `claude mcp remove hyperhand` (Claude Code) or `codex mcp remove hyperhand` (Codex).
 
@@ -261,7 +271,7 @@ On the host:
 Tools that need the agent fail, or `vm_install_agent` reports that the agent did not answer within 30 seconds.
 
 - Check that a user is logged on in the guest and that the HyperHand tray icon is present there. The agent runs only in a logged-on desktop session.
-- Check that the host tray is running. It registers the Hyper-V socket service at startup; without the registration the guest cannot accept the host's connections.
+- Check that the host tray and `HyperHandService` are running. Socket registration happens during installation, not normal tray startup; rerun `hyperhand.exe install` to repair an incomplete installation.
 - If the VM was restored to a checkpoint taken before the agent was installed, install it again with `vm_install_agent`.
 - Call `vm_screenshot` to see whether the install command reached the Run dialog intact.
 
@@ -288,6 +298,12 @@ The elevation is waiting for a UAC consent prompt in the guest. Set `ConsentProm
 
 Tools without `vm` fail when more than one VM is running. Pass the VM name from `vm_list`.
 
+### The host service is unavailable
+
+Check `HyperHandService` in Windows Services. Normal tray startup does not repair or elevate the service. Rerun `hyperhand.exe install` with administrator approval to repair the installation. Use the configured owner's account for the tray; another account is not automatically granted broker access. Do not add the human user to Hyper-V Administrators as a workaround.
+
 ### Log file
 
-The host tray writes its log to `%LOCALAPPDATA%\HyperHand\hyperhand.log` for the user it runs as. It records the listening address, port errors, service registration errors and install errors.
+The host tray writes its log to `%LOCALAPPDATA%\HyperHand\hyperhand.log` for the user it runs as. It records the listening address and startup, connection and install errors.
+
+For service startup or broker failures, inspect `%ProgramData%\HyperHand\service-data\broker.log` with administrator access. The service limits it to approximately 1 MiB. Errors may also appear in Event Viewer under **Windows Logs > Application**, with source `HyperHandService`; use the file log if that source is unavailable.

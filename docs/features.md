@@ -6,21 +6,23 @@ This document describes the behaviour of HyperHand as implemented: the host tray
 
 HyperHand consists of two Windows executables.
 
-- `hyperhand.exe` (host) runs on the Hyper-V host as an elevated tray program. It serves an MCP server over Streamable HTTP and controls VMs through WMI (`root\virtualization\v2`) and PowerShell Hyper-V cmdlets.
+- `hyperhand.exe` (host) runs as an ordinary user tray program and serves MCP over Streamable HTTP. The same executable runs separately as `HyperHandService`, under the dedicated virtual account `NT SERVICE\HyperHandService`, to perform WMI (`root\virtualization\v2`) and PowerShell Hyper-V operations.
 - `hyperhand-agent.exe` (guest agent) runs inside the VM in the logged-on user's desktop session, shows a tray icon and answers requests from the host over a Hyper-V socket.
 
 ### 1.1 Host side
 
 - The MCP endpoint is `http://127.0.0.1:<port>/mcp`, default port 8770 (see 9.1). It listens on the loopback interface only.
 - One MCP server instance (name `hyperhand`, version stamped at build time, `dev` for source builds) serves all HTTP sessions.
-- Screen capture, mouse, keyboard, VM state and checkpoints use Hyper-V directly and work without the guest agent (see 3, 4).
+- Screen capture, mouse, keyboard, VM state and checkpoints use Hyper-V through the service and work without the guest agent (see 3, 4).
 - Commands, files, clipboard, window focus and waiting go through the guest agent (see 5, 6, 7).
+- The tray requests specific broker operations over a local named pipe whose ACL permits the configured owner, SYSTEM, administrators and the service account. There is no arbitrary host command execution broker operation. Host file reads and writes stay in the ordinary tray process.
+- The MCP HTTP endpoint remains unauthenticated. Its callers can use all exposed tools through the tray; the pipe ACL is not MCP authentication.
 
 ### 1.2 Hyper-V socket
 
 - The agent listens on the Hyper-V socket service GUID `3ce544e1-2645-4383-b332-fedf8a18736b`, accepting connections from the parent partition.
-- The host registers this GUID at startup under `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\<GUID>` with `ElementName` = `HyperHand`. A registration failure is logged and the host continues.
-- The host dials the VM by its VM ID (`Msvm_ComputerSystem.Name`) and the service GUID. A dial times out after 5 s and fails with `connect to agent: ...`.
+- The installer registers this GUID under `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\<GUID>` with `ElementName` = `HyperHand`. Ordinary tray startup does not write this registration.
+- The service dials the VM by its VM ID (`Msvm_ComputerSystem.Name`) and tunnels the connection to the tray. The guest service GUID is fixed; the broker does not accept an arbitrary guest socket service ID.
 
 ### 1.3 Connections and request ordering
 
@@ -70,7 +72,7 @@ These tools use Hyper-V on the host and do not need the agent. Tools without a s
 - `vm_start` requests state Running (`RequestStateChange` 2).
 - `vm_stop` requests state Off (`RequestStateChange` 3), which turns the VM off rather than shutting the guest down.
 - Both close the VM's agent client afterwards (see 1.3).
-- WMI return values 0 (completed) and 4096 (job started) count as success; any other value fails with `<method> returned <n>`. The tools return when the request is accepted, not when the state change completes.
+- WMI return value 0 means completed. When WMI returns 4096 (job started), the tool waits up to 45 seconds for the asynchronous job and checks its result; a job failure or timeout is reported rather than returning success on acceptance. The operation is not resent automatically.
 
 ### 3.3 vm_checkpoints
 
@@ -296,8 +298,8 @@ An agent without this operation fails with `the guest agent is too old to list w
 
 `vm_install_agent` installs the agent without a guest password. It needs a user logged on to the guest desktop and the guest IME in English mode.
 
-1. The host takes `hyperhand-agent.exe` from the directory of `hyperhand.exe`.
-2. It enables the VM's Guest Service Interface if it is disabled (then waits 3 s) and copies the file with `Copy-VMFile` to `C:\Users\Public\HyperHand\hyperhand-agent.exe`, creating the path and overwriting.
+1. The ordinary tray reads `hyperhand-agent.exe` next to its own executable, normally under `%ProgramFiles%\HyperHand`, and streams it to the service.
+2. The service stages the contents in its working directory, enables the VM's Guest Service Interface if it is disabled (then waits 3 s) and copies the file with `Copy-VMFile` to `C:\Users\Public\HyperHand\hyperhand-agent.exe`, creating the path and overwriting. The service does not open a caller-supplied host source path.
 3. It presses `win+r`, waits 1.5 s, types `C:\Users\Public\HyperHand\hyperhand-agent.exe install` on the synthetic keyboard and presses `enter`.
 4. It pings the agent (see 8.4).
 
@@ -334,7 +336,7 @@ Because step 3 types blindly, a failure there is visible only on screen; the too
 
 ### 8.5 vm_update_agent
 
-`vm_update_agent` replaces the running agent with the `hyperhand-agent.exe` next to `hyperhand.exe`. The agent must already be running.
+`vm_update_agent` replaces the running agent with the installed `hyperhand-agent.exe` next to the host executable. The agent must already be running.
 
 1. The host sends the whole executable as the `update_agent` payload.
 2. The agent writes `<exe>.new`, deletes any `<exe>.old`, renames the running `<exe>` to `<exe>.old` and `<exe>.new` to `<exe>`. If the last rename fails, the old file is renamed back and the update fails. An empty payload fails with `empty payload`.
@@ -349,37 +351,38 @@ The update replaces the file the agent is running from; the HKCU Run entry is un
 
 `hyperhand.exe [-port <n>]` starts the tray and the MCP server; `-port` defaults to 8770.
 
-- If the process is not elevated, it relaunches itself with the `runas` verb (UAC prompt) and the same arguments, and exits.
+- The tray starts without requesting elevation. Hyper-V operations require the separately installed and running `HyperHandService`.
 - A second instance exits immediately (mutex `Local\HyperHandTray`).
-- It registers the Hyper-V socket service (see 1.2) and listens on `127.0.0.1:<port>`.
-- The tray icon's menu shows a disabled status item, `MCP: http://127.0.0.1:<port>/mcp`, or `Error: <message>` when the port cannot be opened, and a `退出` (quit) item. When the listener fails, the tray still runs but no MCP server is available.
+- It listens on `127.0.0.1:<port>`; protected machine configuration is performed only by the installer.
+- The tray menu shows the MCP URL or listener error, restart and quit actions. Restart replaces only this ordinary tray/MCP process, without UAC, preserving the selected port. Active MCP connections and requests are interrupted; the service, guest agent and VMs are not restarted.
 
 ### 9.2 install
 
-`hyperhand.exe install` makes the host start at logon.
+`hyperhand.exe install` installs or updates the host service and ordinary tray.
 
 - If not elevated, it relaunches itself elevated with `install`.
-- It ends any running `HyperHand` task, then creates (or replaces) the scheduled task `HyperHand`: trigger at logon, highest run level, action the current path of `hyperhand.exe` without arguments (so the default port applies).
-- It removes the 72 h execution time limit and allows the task to start and keep running on battery.
-- It runs the task immediately and shows a message box with the executable path and the MCP URL.
+- It installs `hyperhand.exe` and `hyperhand-agent.exe` under `%ProgramFiles%\HyperHand`.
+- It records the installing user's SID in the protected `%ProgramData%\HyperHand\config.json` and provides a service-writable `service-data` directory beneath it.
+- It configures automatic Windows service `HyperHandService` under `NT SERVICE\HyperHandService` and adds that service account to Hyper-V Administrators. It does not add the human user or use LocalSystem.
+- It creates or replaces the `HyperHand` logon task for the installing user with least privilege and the installed executable. Reinstalling migrates the older highest-privilege task.
+- It registers the fixed guest socket service (see 1.2) and starts the host components. Repeating `install` deploys an update; normal tray restart does not update binaries.
 - On error it logs the error and shows it in a message box.
 
 `hyperhand.exe uninstall` reverses the install.
 
 - If not elevated, it relaunches itself elevated with `uninstall` (one UAC prompt).
-- It stops the tray: it ends the `HyperHand` task and kills the other `hyperhand.exe` processes.
-- It deletes the scheduled task `HyperHand` and the Hyper-V socket service registration (see 1.2), the key `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\<service GUID>`.
-- It deletes `%LOCALAPPDATA%\HyperHand` (the log directory).
-- It does not delete `hyperhand.exe` or its folder.
-- It shows a message box listing what was removed.
+- It stops the installed tray and service and removes `HyperHandService`, its Hyper-V Administrators membership, the `HyperHand` logon task and the fixed guest socket registration.
+- A protected cleanup helper waits for the installed executable to exit, then removes the installed host and agent executables only if their hashes still match. Only empty directories are removed.
+- User logs, guest files and nonempty service working data are preserved. If working data remains, the owner configuration is retained for reinstallation; otherwise the configuration and empty data directory are removed.
+- It does not uninstall guest agents or change host UAC policy.
 
 ### 9.3 Log
 
-The host appends its log to `%LOCALAPPDATA%\HyperHand\hyperhand.log` (the directory is created if needed). It records listener start and failure, service registration errors, elevation errors and install errors.
+The tray appends its log to `%LOCALAPPDATA%\HyperHand\hyperhand.log` (the directory is created if needed). The service writes errors to `%ProgramData%\HyperHand\service-data\broker.log`, with an approximately 1 MiB size limit. It also attempts to report errors to the Windows Application event log under `HyperHandService`; the file log remains available if that event source is unavailable.
 
 ## 10. Wire Protocol
 
-The host and agent exchange frames over the Hyper-V socket.
+The host and agent exchange frames over the Hyper-V socket, tunneled through the local broker pipe. This section describes the guest protocol, not the broker's control messages.
 
 ### 10.1 Frame format
 

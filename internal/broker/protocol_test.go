@@ -1,0 +1,82 @@
+package broker
+
+import (
+	"bytes"
+	"encoding/binary"
+	"io"
+	"strings"
+	"testing"
+)
+
+func rawFrame(header string, size uint64) []byte {
+	b := make([]byte, 12)
+	binary.BigEndian.PutUint32(b[:4], uint32(len(header)))
+	binary.BigEndian.PutUint64(b[4:], size)
+	return append(b, header...)
+}
+
+func TestUntrustedHeaderBounds(t *testing.T) {
+	tests := []struct {
+		name  string
+		frame []byte
+	}{
+		{"oversized header", rawFrame(strings.Repeat(" ", maxHeader+1), 0)},
+		{"oversized payload", rawFrame(`{"op":"copy","guest_path":"C:\\test"}`, maxCopy+1)},
+		{"uint64 overflow", rawFrame(`{"op":"copy"}`, ^uint64(0))},
+		{"truncated header", rawFrame(`{"op":"list"}`, 0)[:14]},
+		{"host path injection", rawFrame(`{"op":"copy","guest_path":"C:\\test","host_path":"C:\\secret"}`, 0)},
+		{"arbitrary service injection", rawFrame(`{"op":"dial","vm":"x","service_id":"x"}`, 0)},
+		{"trailing document", rawFrame(`{"op":"list"}{"op":"stop"}`, 0)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var r request
+			if _, err := readHeader(bytes.NewReader(tt.frame), &r, maxCopy); err == nil {
+				t.Fatal("accepted unsafe header")
+			}
+		})
+	}
+}
+
+func TestOperationBoundary(t *testing.T) {
+	tests := []struct {
+		r    request
+		size int64
+	}{
+		{request{Op: "exec", Text: "cmd"}, 0},
+		{request{Op: "list"}, 1},
+		{request{Op: "copy", GuestPath: "C:\\test"}, maxCopy + 1},
+		{request{Op: "copy"}, 0},
+		{request{Op: "checkpoint_restore"}, 0},
+		{request{Op: "click", Button: 4}, 0},
+		{request{Op: "drag", X: -1}, 0},
+	}
+	for _, tt := range tests {
+		if err := validateRequest(tt.r, tt.size); err == nil {
+			t.Fatalf("accepted %#v", tt)
+		}
+	}
+}
+
+func TestPayloadRemainsStreaming(t *testing.T) {
+	var b bytes.Buffer
+	if err := writeFrame(&b, request{Op: "copy", GuestPath: "C:\\guest.bin"}, 7, strings.NewReader("payload")); err != nil {
+		t.Fatal(err)
+	}
+	var r request
+	n, err := readHeader(&b, &r, maxCopy)
+	if err != nil || n != 7 || b.Len() != 7 {
+		t.Fatalf("header consumed payload: size=%d remaining=%d error=%v", n, b.Len(), err)
+	}
+	got, err := io.ReadAll(&b)
+	if err != nil || string(got) != "payload" {
+		t.Fatalf("payload: %q %v", got, err)
+	}
+}
+
+func TestTruncatedCopyDoesNotCompleteFrame(t *testing.T) {
+	var b bytes.Buffer
+	if err := writeFrame(&b, request{Op: "copy", GuestPath: "C:\\guest.bin"}, 10, strings.NewReader("short")); err == nil {
+		t.Fatal("accepted truncated source")
+	}
+}
