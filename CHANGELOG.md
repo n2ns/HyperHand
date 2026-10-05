@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-05
+
+### Fixed
+
+- Command cancellation and timeouts terminate descendants even after the original shell has exited, while successful commands can still launch background applications.
+- Elevated commands include UAC consent in their timeout, cancel without a second elevation prompt, and reject workers that arrive after the request expires.
+- Elevated CMD commands preserve UTF-8 text, Unicode filenames, percent expansion and exit codes.
+- Requests cancelled while waiting for another agent call return promptly without disturbing the active connection.
+- Saved and paused Hyper-V machines display the correct state.
+
 ## [0.1.1] - 2026-10-05
 
 ### Added

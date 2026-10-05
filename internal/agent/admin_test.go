@@ -1,14 +1,22 @@
 package agent
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Microsoft/go-winio"
+	"golang.org/x/sys/windows"
 
 	"hyperhand/internal/proto"
 )
@@ -64,6 +72,63 @@ func TestAdminWorkerRejectsWrongOwner(t *testing.T) {
 		})
 	if err == nil || !strings.Contains(err.Error(), "owner is no longer running") {
 		t.Fatalf("wrong owner accepted: %v", err)
+	}
+}
+
+func TestAdminWorkerRejectsReplacementPipeServer(t *testing.T) {
+	const helperPipeEnv = "HYPERHAND_TEST_REPLACEMENT_PIPE"
+	if pipe := os.Getenv(helperPipeEnv); pipe != "" {
+		listener, err := winio.ListenPipe(pipe, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		fmt.Fprintln(os.Stdout, "ready")
+		conn, err := listener.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		if _, err := io.Copy(io.Discard, conn); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+
+	// The original owner is alive with the right creation time, but a different
+	// process now serves its pipe. This must reach the server-PID check.
+	endpoint := adminEndpoint{Pipe: `\\.\pipe\hyperhand-admin-test-` + rand.Text(), ParentPID: uint32(os.Getpid())}
+	var exited, kernel, userTime windows.Filetime
+	if err := windows.GetProcessTimes(windows.CurrentProcess(), &endpoint.ParentCreated, &exited, &kernel, &userTime); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestAdminWorkerRejectsReplacementPipeServer$")
+	cmd.Env = append(os.Environ(), helperPipeEnv+"="+endpoint.Pipe)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := cmd.Wait(); err != nil {
+			t.Errorf("replacement pipe server: %v, stderr=%s", err, &stderr)
+		}
+	}()
+	if ready, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || strings.TrimSpace(ready) != "ready" {
+		t.Fatalf("replacement pipe server not ready: %q, %v", ready, err)
+	}
+	if err := runAdminWorker(endpoint); err == nil || err.Error() != "admin pipe server is not the request owner" {
+		t.Fatalf("replacement pipe server accepted: %v", err)
 	}
 }
 
