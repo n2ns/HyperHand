@@ -240,7 +240,7 @@ With `force` = `true` no hashes are requested and every file is uploaded.
 
 ### 6.4 Temporary .hhpart files
 
-Both directions write each file to `<destination>.hhpart` and rename it over the destination only after the whole file has been received, replacing an existing file. On any error the `.hhpart` file is deleted and the destination is left unchanged. In the guest, a short or failed transfer is never renamed into place.
+Both directions write each file to a unique `.hyperhand-*.hhpart` temporary file in the destination directory and rename it over the destination only after the whole file has been received, replacing an existing file. On any error only that transfer's temporary file is deleted and the destination is left unchanged. In the guest, a short or failed transfer is never renamed into place.
 
 ## 7. Clipboard, Windows and Waiting
 

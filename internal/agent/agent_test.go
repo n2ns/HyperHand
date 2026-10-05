@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -277,5 +278,70 @@ func TestHashFiles(t *testing.T) {
 	got := res.(proto.HashesResult).Hashes
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// Cancel exactly at the post-completion Err check to exercise the completion/cancellation race.
+type cancelOnErrContext struct {
+	context.Context
+	cancel context.CancelFunc
+}
+
+func (c cancelOnErrContext) Err() error {
+	c.cancel()
+	return c.Context.Err()
+}
+
+func TestExecCompletedThenCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := execOp(cancelOnErrContext{ctx, cancel}, mustJSON(proto.ExecArgs{Shell: "cmd", Command: "exit 0", TimeoutMs: 5000}), nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want cancellation, got %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("completed command blocked after cancellation")
+	}
+}
+
+func TestWriteFileStreamPreservesSibling(t *testing.T) {
+	for _, short := range []bool{false, true} {
+		t.Run(fmt.Sprintf("short=%v", short), func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "target.txt")
+			for p, data := range map[string]string{path: "old", path + ".hhpart": "keep"} {
+				if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			size := int64(3)
+			if short {
+				size++
+			}
+			opErr, connErr := writeFileStream(strings.NewReader("new"), mustJSON(proto.PathArgs{Path: path}), size)
+			want := "new"
+			if short {
+				want = "old"
+				if opErr == nil || connErr == nil {
+					t.Fatalf("short payload accepted: %v, %v", opErr, connErr)
+				}
+			} else if opErr != nil || connErr != nil {
+				t.Fatalf("write: %v, %v", opErr, connErr)
+			}
+			for p, data := range map[string]string{path: want, path + ".hhpart": "keep"} {
+				if got, err := os.ReadFile(p); err != nil || string(got) != data {
+					t.Fatalf("%s = %q, %v; want %q", p, got, err, data)
+				}
+			}
+			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 2 {
+				t.Fatalf("temporary file left behind: %v, %v", entries, err)
+			}
+		})
 	}
 }

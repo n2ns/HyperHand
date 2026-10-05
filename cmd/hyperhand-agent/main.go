@@ -9,6 +9,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"image"
 	"image/color"
@@ -21,6 +22,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf16"
 
 	"fyne.io/systray"
 	"golang.org/x/sys/windows"
@@ -182,8 +184,7 @@ func uninstall() {
 		case err == nil:
 			done = append(done, dir)
 		case inside: // our own exe is locked until we exit
-			c := hidden("cmd")
-			c.SysProcAttr.CmdLine = `cmd /c ping -n 3 127.0.0.1 >nul & rmdir /s /q "` + dir + `"` // raw: cmd ignores Go's \" escaping
+			c := cleanupCommand(dir, os.Getpid())
 			if err := c.Start(); err != nil {
 				failed = append(failed, dir+": "+err.Error())
 			} else {
@@ -201,6 +202,28 @@ func uninstall() {
 		flags = 0x30 // MB_ICONWARNING
 	}
 	windows.MessageBox(0, windows.StringToUTF16Ptr(msg), windows.StringToUTF16Ptr("HyperHand 卸载"), flags)
+}
+
+// cleanupCommand waits for the uninstaller (including its message box) to exit.
+func cleanupCommand(dir string, pid int) *exec.Cmd {
+	script := `$ErrorActionPreference = 'Stop'
+try { $process = [System.Diagnostics.Process]::GetProcessById(` + strconv.Itoa(pid) + `) }
+catch [System.ArgumentException] { $process = $null }
+if ($null -ne $process) { $process.WaitForExit(); $process.Dispose() }
+$target = '` + strings.ReplaceAll(dir, "'", "''") + `'
+for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    try {
+        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+        exit 0
+    } catch { Start-Sleep -Milliseconds 250 }
+}
+exit 1`
+	var encoded bytes.Buffer
+	binary.Write(&encoded, binary.LittleEndian, utf16.Encode([]rune(script)))
+	c := hidden("powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.StdEncoding.EncodeToString(encoded.Bytes()))
+	// Do not inherit a working directory that the helper itself must remove.
+	c.Dir = filepath.Dir(dir)
+	return c
 }
 
 func samePath(a, b string) bool {

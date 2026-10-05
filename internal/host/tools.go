@@ -526,13 +526,13 @@ func pushFile(ctx context.Context, c *Client, hostPath, guestPath string) (int64
 	return fi.Size(), nil
 }
 
-// pullFile streams the guest file guestPath into hostPath + ".hhpart", then renames it over hostPath.
+// pullFile streams the guest file into a unique temporary file beside hostPath, then renames it over hostPath.
 func pullFile(ctx context.Context, c *Client, guestPath, hostPath string) (int64, error) {
-	part := hostPath + ".hhpart"
-	f, err := os.Create(part)
+	f, err := os.CreateTemp(filepath.Dir(hostPath), ".hyperhand-*.hhpart")
 	if err != nil {
 		return 0, err
 	}
+	part := f.Name()
 	w := bufio.NewWriterSize(f, 1<<20)
 	n, err := c.CallIO(ctx, proto.OpReadFile, proto.PathArgs{Path: guestPath}, nil, 0, w, nil)
 	if err == nil {

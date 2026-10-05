@@ -20,13 +20,13 @@ On the host:
 - Log file: `%LOCALAPPDATA%\HyperHand\hyperhand.log` (listening address, errors).
 - Scheduled task `HyperHand`, created by `hyperhand.exe install`.
 - Registry key `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\3ce544e1-2645-4383-b332-fedf8a18736b`, which registers the Hyper-V socket service.
-- Temporary `<path>.hhpart` files while `vm_pull` writes a file; renamed to the target on completion, deleted on failure.
+- Unique `.hyperhand-*.hhpart` files in the destination directory while `vm_pull` writes a file; renamed to the target on completion, deleted on failure.
 
 In the guest:
 
 - The agent at `C:\Users\Public\HyperHand\hyperhand-agent.exe` (copied by `vm_install_agent`) and `%LOCALAPPDATA%\HyperHand\hyperhand-agent.exe` (installed copy).
 - Registry value `HyperHandAgent` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
-- Temporary `<path>.hhpart` files while `vm_push` writes a file; renamed to the target on completion, deleted on failure.
+- Unique `.hyperhand-*.hhpart` files in the destination directory while `vm_push` writes a file; renamed to the target on completion, deleted on failure.
 - Temporary `hh-admin-*` directories under the user's temp directory for `vm_exec` with `admin: true`, holding the script, its output and exit code; deleted when the command finishes.
 
 ## Access control

@@ -65,13 +65,15 @@ func execOp(ctx context.Context, args json.RawMessage, _ []byte) (any, []byte, e
 	var r proto.ExecResult
 	t := time.NewTimer(timeout(a.TimeoutMs))
 	defer t.Stop()
+	completed := false
 	select {
 	case <-done:
+		completed = true
 	case <-t.C:
 		r.TimedOut = true
 	case <-ctx.Done():
 	}
-	if r.TimedOut || ctx.Err() != nil {
+	if !completed && (r.TimedOut || ctx.Err() != nil) {
 		kill := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid))
 		kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 		kill.Run()
@@ -103,11 +105,11 @@ func toUTF8(b []byte) string {
 }
 
 // writeFileStream writes the next size bytes of r (a write_file payload) to the file named in args, via
-// <path>.hhpart. opErr is the request's error; the payload is always consumed, so connErr is set only when reading r
-// fails (the stream is then broken).
+// a unique temporary file beside the destination. opErr is the request's error; the payload is always consumed,
+// so connErr is set only when reading r fails (the stream is then broken).
 func writeFileStream(r io.Reader, args json.RawMessage, size int64) (opErr, connErr error) {
 	er := &errReader{r: r}
-	var n int64
+	payload := &io.LimitedReader{R: er, N: size}
 	opErr = func() error {
 		var a proto.PathArgs
 		if err := decode(args, &a); err != nil {
@@ -116,13 +118,13 @@ func writeFileStream(r io.Reader, args json.RawMessage, size int64) (opErr, conn
 		if err := os.MkdirAll(filepath.Dir(a.Path), 0o755); err != nil {
 			return err
 		}
-		part := a.Path + ".hhpart"
-		f, err := os.Create(part)
+		f, err := os.CreateTemp(filepath.Dir(a.Path), ".hyperhand-*.hhpart")
 		if err != nil {
 			return err
 		}
+		part := f.Name()
 		// struct{io.Writer} hides os.File.ReadFrom so the 1 MB buffer is used.
-		n, err = io.CopyBuffer(struct{ io.Writer }{f}, io.LimitReader(er, size), make([]byte, 1<<20))
+		n, err := io.CopyBuffer(struct{ io.Writer }{f}, payload, make([]byte, 1<<20))
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
@@ -140,8 +142,8 @@ func writeFileStream(r io.Reader, args json.RawMessage, size int64) (opErr, conn
 	if er.err != nil {
 		return opErr, er.err
 	}
-	if n < size {
-		if _, err := io.CopyN(io.Discard, r, size-n); err != nil {
+	if payload.N > 0 {
+		if _, err := io.CopyN(io.Discard, payload, payload.N); err != nil {
 			return opErr, err
 		}
 	}

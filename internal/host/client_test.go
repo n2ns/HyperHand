@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"net"
@@ -314,4 +315,39 @@ func TestPushSkipsUnchanged(t *testing.T) {
 	fakeNoHash = true
 	defer func() { fakeNoHash = false }()
 	check(false, 3, 0, 17)
+}
+
+func TestPullPreservesSibling(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missing=%v", missing), func(t *testing.T) {
+			c := NewClient(func(context.Context) (net.Conn, error) {
+				a, b := net.Pipe()
+				go fakeAgent(t, b, new([]byte))
+				return a, nil
+			})
+			defer c.Close()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "target.txt")
+			for p, data := range map[string]string{path: "old", path + ".hhpart": "keep"} {
+				if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			guest, want := `C:\f.txt`, "f"
+			if missing {
+				guest, want = `C:\missing`, "old"
+			}
+			if _, err := pullFile(context.Background(), c, guest, path); (err != nil) != missing {
+				t.Fatalf("pull: %v, missing=%v", err, missing)
+			}
+			for p, data := range map[string]string{path: want, path + ".hhpart": "keep"} {
+				if got, err := os.ReadFile(p); err != nil || string(got) != data {
+					t.Fatalf("%s = %q, %v; want %q", p, got, err, data)
+				}
+			}
+			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 2 {
+				t.Fatalf("temporary file left behind: %v, %v", entries, err)
+			}
+		})
+	}
 }

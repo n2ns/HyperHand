@@ -6,10 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-05
+
 ### Added
 
 - `hyperhand.exe uninstall`: relaunches itself elevated if needed, stops the tray, deletes the `HyperHand` scheduled task, the Hyper-V socket service registration and `%LOCALAPPDATA%\HyperHand`, and shows what was removed. The exe and its folder are kept.
 - `hyperhand-agent.exe uninstall`: without administrator rights, stops the running agent and deletes the `HyperHandAgent` Run value, `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`, and shows what was removed.
+
+### Fixed
+
+- File transfers use unique temporary files so existing files named `<destination>.hhpart` are preserved, including when a transfer fails.
+- Uploads return an error promptly when the guest disk is full, without blocking subsequent agent requests.
+- Commands no longer block the agent when completion and cancellation occur together.
+- Guest uninstallation waits for the uninstall process to exit before deleting its executable, including when the result dialog stays open.
 
 ## [0.1.0] - 2026-10-05
 
