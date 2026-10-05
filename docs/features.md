@@ -113,6 +113,13 @@ Mouse input goes through the VM's synthetic mouse (`Msvm_SyntheticMouse`) with a
 - `vm_click` moves to (`x`, `y`), waits 100 ms and clicks.
   - `button`: `left` (default), `right` or `middle`; anything else fails with `unknown button "<value>"`.
   - `double` = `true` clicks twice.
+  - `window` (case-insensitive title substring) or `handle` (from `vm_windows`) makes (`x`, `y`) relative to the top-left corner of that window's visible frame. The agent lists the windows first (see 7.3), and the click is refused, with nothing clicked, if:
+    - no window matches, or `window` matches more than one (the error lists their handles);
+    - the window is not the foreground window (the error names the foreground window);
+    - the window is disabled, as an owner window is while its modal dialog runs;
+    - the point is outside the window;
+    - the point is off screen, or another window (for example an always-on-top one) covers it: the agent checks which top-level window is at that screen point.
+  - The check and the click are two steps, so a window that appears in between can still receive the click.
 - `vm_drag` moves to (`x1`, `y1`), waits 100 ms, presses the left button, moves to (`x2`, `y2`) in 8 equal steps 50 ms apart, waits 100 ms and releases the button. The button is released even if a move fails.
 - `vm_scroll` moves to (`x`, `y`), waits 100 ms and scrolls `delta` wheel notches (120 units each). A positive `delta` scrolls up, a negative one down.
 
@@ -253,14 +260,26 @@ These tools need the agent.
 
 ### 7.2 vm_focus_window
 
-`vm_focus_window` brings to the foreground the first visible top-level window, in enumeration order, whose title contains `title` (case-insensitive substring).
+`vm_focus_window` brings to the foreground the first visible top-level window, in enumeration order, whose title contains `title` (case-insensitive substring). With `handle` (from `vm_windows`) it brings that window instead and ignores `title`; a handle that is not a visible top-level window fails with `no visible top-level window has handle <handle>`. Passing neither fails with `pass title or handle`. The host lists the windows before a focus by handle, so an agent too old to know handles is rejected instead of focusing an arbitrary window.
 
 - A minimised window is restored first.
-- If `SetForegroundWindow` alone does not work, the agent attaches to the foreground thread's input, simulates an Alt press and retries.
+- If `SetForegroundWindow` alone does not work, the agent attaches to the foreground thread's input, injects a zero-distance mouse move (so the agent sent the last input) and retries. It injects no key, so the focused window receives no keystroke.
 - No match fails with `no visible window title contains "<title>"`; a window that still does not reach the foreground fails with `could not bring "<title>" to the foreground`.
-- The result is `focused: <full window title>`.
+- The result is `focused: <full window title>` and, on a line of its own, `handle: <handle>`. An older agent returns only the title.
 
-### 7.3 vm_wait
+### 7.3 vm_windows
+
+`vm_windows` lists the visible top-level windows, from the top of the Z order down, as a JSON array. Windows hidden by DWM (cloaked, such as suspended store apps) are left out. Each entry has:
+
+- `handle`, `title`, `class`, `pid` and `process` (executable name; empty if the agent cannot query the process);
+- `rect`: `left`, `top`, `right`, `bottom` of the visible frame (without invisible resize borders), in the pixel coordinates of `vm_screenshot` and `vm_click`;
+- `enabled`, `foreground` and `minimized`;
+- `owner`: the owner window's handle, omitted when there is none;
+- `modal`: the owner window is disabled, as it is while a modal dialog runs.
+
+An agent without this operation fails with `the guest agent is too old to list windows; run vm_update_agent`.
+
+### 7.4 vm_wait
 
 `vm_wait` polls the guest every 300 ms until a condition holds or `timeout_ms` (default 60000) expires, and returns `satisfied: true` or `satisfied: false`. A timeout is not an error.
 
@@ -387,7 +406,9 @@ uint32 header length | uint64 payload length | header JSON | payload bytes
 | `screenshot` | none | payload (PNG) |
 | `clipboard_get` | none | `{text}` |
 | `clipboard_set` | `{text}` | none |
-| `focus_window` | `{title}` | `{text}`, the matched title |
+| `focus_window` | `{title, handle}` | `{text, handle}`, the focused window's title and handle |
+| `window_at` | `{x, y}` | `{handle}`, the top-level window a click at that screen point reaches; 0 off screen |
+| `list_windows` | none | `{windows: [{handle, title, class, pid, process, rect, enabled, foreground, minimized, owner, modal}]}` |
 | `wait` | `{kind, name, path, timeout_ms}` | `{satisfied}` |
 | `update_agent` | payload (new executable) | none; the agent then restarts (see 8.5) |
 

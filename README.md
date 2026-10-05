@@ -79,12 +79,13 @@ Every tool takes an optional `vm` (VM name). Without it, the only running VM is 
 | `vm_list`, `vm_start`, `vm_stop` | List VMs with their state; start; turn off |
 | `vm_checkpoints`, `vm_checkpoint`, `vm_restore` | List, create and restore checkpoints (exact names); restore starts the VM unless `start` is false |
 | `vm_screenshot` | PNG of the VM screen; `source`: `host` (default) or `agent` |
-| `vm_click`, `vm_drag`, `vm_scroll` | Mouse at screenshot pixel coordinates |
+| `vm_click`, `vm_drag`, `vm_scroll` | Mouse at screenshot pixel coordinates; `vm_click` with `window` or `handle` clicks inside that window only if it is the enabled foreground window |
 | `vm_type`, `vm_key` | Type text (pasted through the guest clipboard); press keys such as `enter`, `ctrl+v`, `win+r` |
 | `vm_exec` | Run a command in the guest; `shell`, `cwd`, `timeout_ms`, `admin` |
 | `vm_push`, `vm_pull` | Copy files or directories host to guest and back; `vm_push` skips unchanged files unless `force` is true |
 | `vm_clipboard_get`, `vm_clipboard_set` | Read or write the guest clipboard |
-| `vm_focus_window` | Bring a window to the front by title |
+| `vm_windows` | List visible windows: handle, title, class, process, position, enabled, foreground, owner, modal |
+| `vm_focus_window` | Bring a window to the front by title or handle |
 | `vm_wait` | Wait until a process exits or runs, or a file exists |
 | `vm_install_agent`, `vm_update_agent` | Install or replace the guest agent |
 

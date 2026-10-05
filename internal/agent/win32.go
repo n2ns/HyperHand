@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,7 +33,7 @@ var (
 	pSetForegroundWindow = user32.NewProc("SetForegroundWindow")
 	pAttachThreadInput   = user32.NewProc("AttachThreadInput")
 	pBringWindowToTop    = user32.NewProc("BringWindowToTop")
-	pKeybdEvent          = user32.NewProc("keybd_event")
+	pSendInput           = user32.NewProc("SendInput")
 	pGlobalAlloc         = kernel32.NewProc("GlobalAlloc")
 	pGlobalFree          = kernel32.NewProc("GlobalFree")
 	pGlobalLock          = kernel32.NewProc("GlobalLock")
@@ -40,11 +41,11 @@ var (
 )
 
 const (
-	cfUnicodeText = 13
-	gmemMoveable  = 0x0002
-	swRestore     = 9
-	vkMenu        = 0x12
-	keyEventfUp   = 0x0002
+	cfUnicodeText   = 13
+	gmemMoveable    = 0x0002
+	swRestore       = 9
+	inputMouse      = 0
+	mouseeventfMove = 0x0001
 )
 
 func openClipboard() error {
@@ -148,8 +149,15 @@ func focusWindow(_ context.Context, args json.RawMessage, _ []byte) (any, []byte
 	if err := decode(args, &a); err != nil {
 		return nil, nil, err
 	}
-	found, title := findWindow(a.Title)
-	if found == 0 {
+	var found windows.HWND
+	var title string
+	if a.Handle != 0 {
+		found = windows.HWND(a.Handle)
+		if !slices.Contains(topWindows(), found) {
+			return nil, nil, fmt.Errorf("no visible top-level window has handle %d", a.Handle)
+		}
+		title = windowText(found)
+	} else if found, title = findWindow(a.Title); found == 0 {
 		return nil, nil, fmt.Errorf("no visible window title contains %q", a.Title)
 	}
 	runtime.LockOSThread() // AttachThreadInput is per thread
@@ -158,22 +166,35 @@ func focusWindow(_ context.Context, args json.RawMessage, _ []byte) (any, []byte
 		pShowWindow.Call(uintptr(found), swRestore)
 	}
 	if r, _, _ := pSetForegroundWindow.Call(uintptr(found)); r == 0 || windows.GetForegroundWindow() != found {
-		// Usual workaround: attach to the foreground thread's input and simulate an Alt press.
+		// Usual workaround: attach to the foreground thread's input and make this process the source of the last
+		// input event. That input is a zero mouse move: an injected Alt press is delivered after the switch, to the
+		// window being focused, and puts ribbon programs such as AutoCAD into key-tip mode.
 		fgTid, _ := windows.GetWindowThreadProcessId(windows.GetForegroundWindow(), nil)
 		me := windows.GetCurrentThreadId()
 		if fgTid != 0 && fgTid != me {
 			pAttachThreadInput.Call(uintptr(me), uintptr(fgTid), 1)
 			defer pAttachThreadInput.Call(uintptr(me), uintptr(fgTid), 0)
 		}
-		pKeybdEvent.Call(vkMenu, 0, 0, 0)
-		pKeybdEvent.Call(vkMenu, 0, keyEventfUp, 0)
+		in := mouseInput{typ: inputMouse, flags: mouseeventfMove}
+		pSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in))
 		pBringWindowToTop.Call(uintptr(found))
 		pSetForegroundWindow.Call(uintptr(found))
 	}
 	if windows.GetForegroundWindow() != found {
 		return nil, nil, fmt.Errorf("could not bring %q to the foreground", title)
 	}
-	return proto.TextResult{Text: title}, nil, nil
+	return proto.FocusResult{Text: title, Handle: uint64(found)}, nil, nil
+}
+
+// mouseInput is a Win32 INPUT holding a MOUSEINPUT (40 bytes on 64-bit Windows).
+type mouseInput struct {
+	typ       uint32
+	_         uint32
+	dx, dy    int32
+	mouseData uint32
+	flags     uint32
+	time      uint32
+	extra     uintptr
 }
 
 var errBusy = errors.New("clipboard busy")

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -40,6 +41,8 @@ type clickIn struct {
 	Y      int    `json:"y"`
 	Button string `json:"button,omitempty" jsonschema:"left (default), right or middle"`
 	Double bool   `json:"double,omitempty" jsonschema:"double click"`
+	Window string `json:"window,omitempty" jsonschema:"click inside this window: case-insensitive title substring that must match exactly one window (see vm_windows); x and y are then relative to its top-left corner, and the click is refused unless it is the enabled foreground window and the point is inside it; needs the agent"`
+	Handle uint64 `json:"handle,omitempty" jsonschema:"like window, but selects the window by its handle from vm_windows"`
 }
 type dragIn struct {
 	VM string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
@@ -91,8 +94,9 @@ type restoreIn struct {
 	Start *bool  `json:"start,omitempty" jsonschema:"start the VM after restoring if it is not running; default true"`
 }
 type titleIn struct {
-	VM    string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
-	Title string `json:"title" jsonschema:"case-insensitive substring of the window title"`
+	VM     string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
+	Title  string `json:"title,omitempty" jsonschema:"case-insensitive substring of the window title"`
+	Handle uint64 `json:"handle,omitempty" jsonschema:"window handle from vm_windows; when set, title is ignored"`
 }
 type waitIn struct {
 	VM        string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
@@ -223,12 +227,28 @@ func NewServer(m *Manager) *mcp.Server {
 				&mcp.TextContent{Text: fmt.Sprintf("%dx%d", w, h)},
 			}}, nil
 		})
-	add(s, "vm_click", "Click at screen pixel (x, y).", func(ctx context.Context, in clickIn) (*mcp.CallToolResult, error) {
+	add(s, "vm_windows", "List the guest's visible top-level windows, from the top of the Z order down, as JSON: handle, title, class, pid, process, rect (visible frame in screenshot pixels), enabled, foreground, minimized, owner (owner window handle) and modal (its owner is disabled, as while a modal dialog runs).",
+		func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
+			ws, err := listWindows(ctx, call, in.VM)
+			if err != nil {
+				return nil, err
+			}
+			b, err := json.MarshalIndent(ws, "", "  ")
+			if err != nil {
+				return nil, err
+			}
+			return text("%s", b), nil
+		})
+	add(s, "vm_click", "Click at screen pixel (x, y), or with window or handle at (x, y) inside that window after checking it is the enabled foreground window.", func(ctx context.Context, in clickIn) (*mcp.CallToolResult, error) {
 		b := map[string]int{"": 1, "left": 1, "right": 2, "middle": 3}[in.Button]
 		if b == 0 {
 			return nil, fmt.Errorf("unknown button %q", in.Button)
 		}
-		return done(hyperv.Click(in.VM, in.X, in.Y, b, in.Double))
+		x, y, err := clickPoint(ctx, call, in)
+		if err != nil {
+			return nil, err
+		}
+		return done(hyperv.Click(in.VM, x, y, b, in.Double))
 	})
 	add(s, "vm_drag", "Drag with the left button from (x1, y1) to (x2, y2).", func(ctx context.Context, in dragIn) (*mcp.CallToolResult, error) {
 		return done(hyperv.Drag(in.VM, in.X1, in.Y1, in.X2, in.Y2))
@@ -296,12 +316,8 @@ func NewServer(m *Manager) *mcp.Server {
 		_, err := call(ctx, in.VM, proto.OpClipboardSet, proto.TextArgs{Text: in.Text}, nil, nil)
 		return done(err)
 	})
-	add(s, "vm_focus_window", "Bring the first window whose title contains the text to the foreground.", func(ctx context.Context, in titleIn) (*mcp.CallToolResult, error) {
-		var r proto.TextResult
-		if _, err := call(ctx, in.VM, proto.OpFocusWindow, proto.TitleArgs{Title: in.Title}, nil, &r); err != nil {
-			return nil, err
-		}
-		return text("focused: %s", r.Text), nil
+	add(s, "vm_focus_window", "Bring a window to the foreground: the window with handle (from vm_windows), or else the first window whose title contains title. Returns its title and handle.", func(ctx context.Context, in titleIn) (*mcp.CallToolResult, error) {
+		return focusWindow(ctx, call, in)
 	})
 	add(s, "vm_wait", "Wait in the guest until a process exits, a process is running, or a file exists.", func(ctx context.Context, in waitIn) (*mcp.CallToolResult, error) {
 		var r proto.WaitResult

@@ -105,7 +105,7 @@ The agent installer, running as the logged-on user:
 
 If the install fails, call `vm_screenshot` to see what the guest shows, fix the cause (for example the IME mode or a dialog in the way) and run `vm_install_agent` again.
 
-Tools that need the agent: `vm_exec`, `vm_push`, `vm_pull`, `vm_clipboard_get`, `vm_clipboard_set`, `vm_focus_window`, `vm_wait`, `vm_update_agent`, and `vm_screenshot` with `source: agent`. `vm_type` uses the agent when it is available.
+Tools that need the agent: `vm_exec`, `vm_push`, `vm_pull`, `vm_clipboard_get`, `vm_clipboard_set`, `vm_windows`, `vm_focus_window`, `vm_wait`, `vm_update_agent`, `vm_screenshot` with `source: agent`, and `vm_click` with `window` or `handle`. `vm_type` uses the agent when it is available.
 
 ### Install the guest agent manually
 
@@ -178,6 +178,8 @@ Host-side screenshots and input work on the guest's secure desktop, so a guest U
 - `vm_key` takes a key or a combination such as `enter`, `ctrl+v`, `win+r`, `alt+f4`. Use `plus` for the `+`/`=` key, for example `ctrl+plus`.
 - `vm_exec` runs as the logged-on user with `powershell` (default) or `cmd`. The default timeout is 60 seconds (`timeout_ms`). The result has the exit code, stdout, stderr and whether it timed out.
 - `vm_push` and `vm_pull` copy a file or a directory recursively. A single file pushed to a guest path ending in `\` goes into that directory under its own name; a single file pulled to an existing host directory, or to a path ending in `\`, goes into it under the guest file's name. `vm_push` skips files whose SHA-256 already matches the guest copy unless `force` is true. Files are written to unique `.hyperhand-*.hhpart` temporary files in the destination directory and renamed when complete.
+- `vm_windows` lists the visible windows with their handles and positions. Use a handle with `vm_focus_window` or `vm_click` when several windows share a title.
+- `vm_click` with `window` or `handle` takes coordinates relative to that window and clicks only if the window is the enabled foreground window and the point is inside it, on screen and not covered by another window. Otherwise it fails and names the foreground window, so a click never lands on whatever happens to be in front.
 - `vm_wait` waits for `process_exit` or `process_running` (with `name`, for example `notepad`) or `file_exists` (with `path`, for example `C:\temp\app\done.txt`). The default timeout is 60 seconds.
 - `vm_restore` takes the exact checkpoint name (case-sensitive, no wildcards). If the VM is not running after the restore, it is started unless `start` is false.
 

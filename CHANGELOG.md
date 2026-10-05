@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `vm_windows` lists the guest's visible top-level windows with handle, title, class, process, position, enabled, foreground, owner and modal state.
+- `vm_focus_window` accepts a window `handle` and returns the focused window's handle.
+- `vm_click` accepts `window` or `handle`: coordinates are then relative to that window, and the click is refused unless it is the enabled foreground window and the point is inside it, on screen and not covered by another window.
+
+### Fixed
+
+- `vm_focus_window` no longer puts ribbon programs such as AutoCAD into key-tip mode. When the window did not come to the front at once, the agent simulated an Alt press, which arrived after the switch in the focused window; it now injects a zero-distance mouse move instead.
+
 ## [0.1.2] - 2026-10-05
 
 ### Fixed

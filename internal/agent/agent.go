@@ -28,6 +28,8 @@ var handlers = map[string]Handler{
 	proto.OpClipboardGet: clipboardGet,
 	proto.OpClipboardSet: clipboardSet,
 	proto.OpFocusWindow:  focusWindow,
+	proto.OpListWindows:  listWindows,
+	proto.OpWindowAt:     windowAt,
 	proto.OpWait:         waitOp,
 	proto.OpUpdateAgent:  updateAgent,
 }

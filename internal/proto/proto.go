@@ -29,7 +29,9 @@ const (
 	OpScreenshot   = "screenshot"    // -> payload PNG
 	OpClipboardGet = "clipboard_get" // -> TextResult
 	OpClipboardSet = "clipboard_set" // TextArgs
-	OpFocusWindow  = "focus_window"  // TitleArgs -> TextResult (the matched title)
+	OpFocusWindow  = "focus_window"  // TitleArgs -> FocusResult (the matched title and handle)
+	OpListWindows  = "list_windows"  // -> WindowsResult
+	OpWindowAt     = "window_at"     // PointArgs -> HandleResult
 	OpWait         = "wait"          // WaitArgs -> WaitResult
 	OpUpdateAgent  = "update_agent"  // payload = new exe; the agent answers, replaces itself and restarts
 )
@@ -93,8 +95,56 @@ type TextArgs struct {
 	Text string `json:"text"`
 }
 
+// TitleArgs: a non-zero Handle selects that window and Title is ignored.
 type TitleArgs struct {
-	Title string `json:"title"` // case-insensitive substring of the window title
+	Title  string `json:"title"` // case-insensitive substring of the window title
+	Handle uint64 `json:"handle,omitempty"`
+}
+
+// FocusResult: Text is the focused window's title (an older host reads only it).
+type FocusResult struct {
+	Text   string `json:"text"`
+	Handle uint64 `json:"handle"`
+}
+
+// Rect is a window's visible frame in guest screen pixels (the coordinates of vm_screenshot and vm_click).
+type Rect struct {
+	Left   int32 `json:"left"`
+	Top    int32 `json:"top"`
+	Right  int32 `json:"right"`
+	Bottom int32 `json:"bottom"`
+}
+
+// WindowInfo describes a visible top-level window. Owner is the owner window's handle (0 if none); Modal means the
+// owner is disabled, as it is while a modal dialog runs.
+type WindowInfo struct {
+	Handle     uint64 `json:"handle"`
+	Title      string `json:"title"`
+	Class      string `json:"class"`
+	PID        uint32 `json:"pid"`
+	Process    string `json:"process"`
+	Rect       Rect   `json:"rect"`
+	Enabled    bool   `json:"enabled"`
+	Foreground bool   `json:"foreground"`
+	Minimized  bool   `json:"minimized"`
+	Owner      uint64 `json:"owner,omitempty"`
+	Modal      bool   `json:"modal"`
+}
+
+type PointArgs struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+}
+
+// HandleResult: the top-level window that receives a click at the point; 0 when the point is off screen or no
+// window is there.
+type HandleResult struct {
+	Handle uint64 `json:"handle"`
+}
+
+// WindowsResult lists the windows from the top of the Z order down.
+type WindowsResult struct {
+	Windows []WindowInfo `json:"windows"`
 }
 
 type TextResult struct {
