@@ -16,10 +16,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 
-	"fyne.io/systray"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -81,18 +79,20 @@ func main() {
 	defer windows.CloseHandle(mutex)
 
 	settings := loadHostSettings(filepath.Join(dir, "settings.json"))
-	var restart atomic.Bool
+	tr := &tray{tip: "HyperHand"}
 	info := &trayInfo{
 		port:     mcpPort(*portFlag, explicitPort, settings.port()),
 		explicit: explicitPort,
 		settings: settings,
-		restart:  func() { restart.Store(true); systray.Quit() },
+		restart:  func() { tr.quit(true) },
 	}
+	tr.info = info
 	url := info.url()
 	var httpServer *http.Server
 	if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", info.port)); err != nil {
 		log.Print(err)
 		info.listenErr = err.Error()
+		tr.setTip("HyperHand: MCP server not running, see Settings")
 	} else {
 		srv := host.NewServer(&host.Manager{AfterStart: func(vm string) {
 			if settings.onStart(vm) {
@@ -108,43 +108,18 @@ func main() {
 		httpServer = &http.Server{Handler: mux}
 		go func() { log.Print(httpServer.Serve(ln)) }()
 		log.Print("listening on ", url)
+		go func() {
+			if _, err := (&broker.Client{}).ListVMs(); err != nil {
+				log.Print("Hyper-V service unavailable: ", err)
+				tr.setTip("HyperHand: background service unavailable, see Settings")
+			}
+		}()
 	}
-	systray.Run(func() {
-		systray.SetIcon(icon())
-		if info.listenErr != "" {
-			systray.SetTooltip("HyperHand: MCP server not running, see Settings")
-		} else {
-			systray.SetTooltip("HyperHand")
-			go func() {
-				if _, err := (&broker.Client{}).ListVMs(); err != nil {
-					log.Print("Hyper-V service unavailable: ", err)
-					systray.SetTooltip("HyperHand: background service unavailable, see Settings")
-				}
-			}()
-		}
-		open := systray.AddMenuItem("Settings...", "Open the HyperHand settings window (also a left click on the tray icon)")
-		systray.SetOnTapped(func() { showSettings(info) })
-		go func() {
-			for range open.ClickedCh {
-				showSettings(info)
-			}
-		}()
-		systray.AddSeparator()
-		reload := systray.AddMenuItem("Restart", "Restart the HyperHand tray and MCP server; VMs keep running")
-		quit := systray.AddMenuItem("Quit", "")
-		go func() {
-			select {
-			case <-reload.ClickedCh:
-				restart.Store(true)
-			case <-quit.ClickedCh:
-			}
-			systray.Quit()
-		}()
-	}, nil)
+	restart := tr.run()
 	if httpServer != nil {
 		httpServer.Close()
 	}
-	if restart.Load() {
+	if restart {
 		if err := startReplacement(*portFlag, explicitPort); err != nil {
 			log.Print("restart: ", err)
 			msgBox("HyperHand restart failed:\n"+err.Error(), windows.MB_ICONERROR)
