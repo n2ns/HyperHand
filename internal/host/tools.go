@@ -21,6 +21,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"hyperhand/internal/credential"
 	"hyperhand/internal/proto"
 )
 
@@ -125,7 +126,9 @@ func done(err error) (*mcp.CallToolResult, error) {
 
 // NewServer builds the MCP server with all HyperHand tools.
 func NewServer(m *Manager) *mcp.Server {
-	backend := m.backend()
+	raw := m.backend()
+	input := &sync.Mutex{}
+	backend := lockedInput{raw, input}
 	s := mcp.NewServer(&mcp.Implementation{Name: "hyperhand", Version: proto.Version}, nil)
 	call := func(ctx context.Context, vm, op string, args any, payload []byte, result any) ([]byte, error) {
 		c, err := m.Client(vm)
@@ -149,14 +152,81 @@ func NewServer(m *Manager) *mcp.Server {
 		}
 		return text("%s", b.String()), nil
 	})
-	add(s, "vm_start", "Start a VM.", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
+	u := newUnlocker(call, raw, input)
+	add(s, "vm_start", "Start a VM (if it is not running) and wait until its desktop is usable: the guest agent answers and the session is unlocked, typing the unlock password stored in the HyperHand tray if the session is locked. An error says why the desktop is not usable; the VM may still be running.", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
 		v, err := backend.Find(in.VM)
 		if err != nil {
 			return nil, err
 		}
-		err = backend.Start(v.Name)
-		m.Drop(v.ID)
-		return done(err)
+		if v.State != "Running" {
+			err = backend.Start(v.Name)
+			m.Drop(v.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		r, err := u.ready(ctx, v.Name, agentStartTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("VM %s is running, but its desktop is not usable: %w", v.Name, err)
+		}
+		return text("VM %s is running; %s", v.Name, r), nil
+	})
+	add(s, "vm_status", "Report a VM's power state and, when it runs, whether the guest agent answers, whether the session is locked, and whether an unlock password is stored. Does not wait or change anything.", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
+		v, err := backend.Find(in.VM)
+		if err != nil {
+			return nil, err
+		}
+		_, _, stored, credErr := credential.Read(v.Name)
+		pw := map[bool]string{true: "stored", false: "not stored"}[stored]
+		if credErr != nil {
+			pw = "unknown: " + credErr.Error()
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "VM: %s\npower: %s\nunlock password: %s\n", v.Name, v.State, pw)
+		if v.State != "Running" {
+			return text("%s", b.String()), nil
+		}
+		var p proto.PingResult
+		pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_, err = call(pctx, v.Name, proto.OpPing, nil, nil, &p)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(&b, "agent: not answering (not signed in, not installed, or busy with another request): %v\n", err)
+			return text("%s", b.String()), nil
+		}
+		fmt.Fprintf(&b, "agent: %s on %s as %s\n", p.Version, p.Hostname, p.User)
+		sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		st, err := u.state(sctx, v.Name)
+		cancel()
+		switch {
+		case err != nil:
+			fmt.Fprintf(&b, "session: unknown: %v\n", err)
+		case st.Locked:
+			b.WriteString("session: locked\n")
+		default:
+			b.WriteString("session: unlocked\n")
+		}
+		if err == nil && !st.Console {
+			b.WriteString("console: no (an enhanced session, remote desktop or another user's session: host screenshots and input do not reach it)\n")
+		}
+		if err == nil && st.Consent {
+			b.WriteString("UAC prompt: open\n")
+		}
+		return text("%s", b.String()), nil
+	})
+	add(s, "vm_unlock", "Unlock a running VM's locked session by typing the unlock password stored in the HyperHand tray on the Hyper-V keyboard. Types it once and only while the agent reports the session locked and no UAC prompt open; the password is never returned.", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
+		v, err := backend.Find(in.VM)
+		if err != nil {
+			return nil, err
+		}
+		if v.State != "Running" {
+			return nil, fmt.Errorf("VM %s is %s; start it with vm_start", v.Name, v.State)
+		}
+		r, err := u.unlock(ctx, v.Name)
+		if err != nil {
+			return nil, err
+		}
+		return text("%s", r), nil
 	})
 	add(s, "vm_stop", "Turn off a VM.", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
 		v, err := backend.Find(in.VM)
@@ -246,7 +316,7 @@ func NewServer(m *Manager) *mcp.Server {
 		}
 		x, y, err := clickPoint(ctx, call, in)
 		if err != nil {
-			return nil, err
+			return nil, u.lockedHint(ctx, in.VM, err)
 		}
 		return done(backend.Click(in.VM, x, y, b, in.Double))
 	})
@@ -317,7 +387,11 @@ func NewServer(m *Manager) *mcp.Server {
 		return done(err)
 	})
 	add(s, "vm_focus_window", "Bring a window to the foreground: the window with handle (from vm_windows), or else the first window whose title contains title. Returns its title and handle.", func(ctx context.Context, in titleIn) (*mcp.CallToolResult, error) {
-		return focusWindow(ctx, call, in)
+		r, err := focusWindow(ctx, call, in)
+		if err != nil {
+			return nil, u.lockedHint(ctx, in.VM, err)
+		}
+		return r, nil
 	})
 	add(s, "vm_wait", "Wait in the guest until a process exits, a process is running, or a file exists.", func(ctx context.Context, in waitIn) (*mcp.CallToolResult, error) {
 		var r proto.WaitResult

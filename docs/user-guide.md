@@ -113,7 +113,7 @@ The agent installer, running as the logged-on user:
 
 If the install fails, call `vm_screenshot` to see what the guest shows, fix the cause (for example the IME mode or a dialog in the way) and run `vm_install_agent` again.
 
-Tools that need the agent: `vm_exec`, `vm_push`, `vm_pull`, `vm_clipboard_get`, `vm_clipboard_set`, `vm_windows`, `vm_focus_window`, `vm_wait`, `vm_update_agent`, `vm_screenshot` with `source: agent`, and `vm_click` with `window` or `handle`. `vm_type` uses the agent when it is available.
+Tools that need the agent: `vm_exec`, `vm_push`, `vm_pull`, `vm_clipboard_get`, `vm_clipboard_set`, `vm_windows`, `vm_focus_window`, `vm_wait`, `vm_unlock`, `vm_update_agent`, `vm_screenshot` with `source: agent`, and `vm_click` with `window` or `handle`. `vm_type` uses the agent when it is available. `vm_start` starts the VM without the agent but reports that the desktop is not usable until the agent answers.
 
 ### Install the guest agent manually
 
@@ -125,6 +125,15 @@ Instead of `vm_install_agent`, you can install the agent yourself. This does not
 The installer does the same as above: it copies itself to `%LOCALAPPDATA%\HyperHand\`, adds the `HyperHandAgent` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` and starts the agent. Running `hyperhand-agent.exe` without `install` starts the agent for this session only, without autostart.
 
 ## 5. Optional guest setup
+
+### Get a usable desktop after `vm_start`
+
+`vm_start` waits until the agent answers and the session is unlocked. The agent starts when the user signs in, so the guest must reach a signed-in session on its own:
+
+- **Automatic sign-in** (recommended): configure the guest to sign the user in at boot, for example with [Sysinternals Autologon](https://learn.microsoft.com/en-us/sysinternals/downloads/autologon). HyperHand cannot sign a user in at the sign-in screen.
+- **Unlock password**: Windows can sign the user in and then lock the session, for example after an update. To let `vm_start` and `vm_unlock` unlock it, right-click the HyperHand tray icon and choose **Virtual machines > *VM name* > Set unlock password...**, then enter the password or PIN the guest lock screen asks for (ASCII only). It is stored in Windows Credential Manager for your user as `HyperHand:<VM name>`; **Clear unlock password** removes it. HyperHand types it on the VM's keyboard only after the agent confirms that the sign-in screen's password box has the input, and types it once per call.
+
+Use `vm_status` to see whether the agent answers, whether the session is locked and whether a password is stored.
 
 ### Allow `admin` exec without a prompt
 
@@ -187,6 +196,7 @@ Host-side screenshots and input work on the guest's secure desktop, so a guest U
 - `vm_key` takes a key or a combination such as `enter`, `ctrl+v`, `win+r`, `alt+f4`. Use `plus` for the `+`/`=` key, for example `ctrl+plus`.
 - `vm_exec` runs as the logged-on user with `powershell` (default) or `cmd`. The default timeout is 60 seconds (`timeout_ms`). The result has the exit code, stdout, stderr and whether it timed out.
 - `vm_push` and `vm_pull` copy a file or a directory recursively. A single file pushed to a guest path ending in `\` goes into that directory under its own name; a single file pulled to an existing host directory, or to a path ending in `\`, goes into it under the guest file's name. `vm_push` skips files whose SHA-256 already matches the guest copy unless `force` is true. Files are written to unique `.hyperhand-*.hhpart` temporary files in the destination directory and renamed when complete.
+- `vm_start` returns once the desktop is usable; if it fails, the VM may still be running, and the error says why (no agent answer, locked without a stored password, wrong password). `vm_status` reports the state without changing anything; `vm_unlock` unlocks a session that was locked later.
 - `vm_windows` lists the visible windows with their handles and positions. Use a handle with `vm_focus_window` or `vm_click` when several windows share a title.
 - `vm_click` with `window` or `handle` takes coordinates relative to that window and clicks only if the window is the enabled foreground window and the point is inside it, on screen and not covered by another window. Otherwise it fails and names the foreground window, so a click never lands on whatever happens to be in front.
 - `vm_wait` waits for `process_exit` or `process_running` (with `name`, for example `notepad`) or `file_exists` (with `path`, for example `C:\temp\app\done.txt`). The default timeout is 60 seconds.
@@ -283,7 +293,7 @@ The host keyboard sends key strokes, and a non-English IME in the guest can swal
 
 - The VM must be running. A stopped or saved VM has no video output.
 - VMConnect must be in basic session mode. In an enhanced session, the host-side screenshot and input go to the console session, which is locked.
-- If the guest screen is locked or the display is off, unlock it or wake it with `vm_click` or `vm_key`.
+- If the guest screen is locked, run `vm_unlock` with an unlock password stored in the tray (see [Get a usable desktop after `vm_start`](#get-a-usable-desktop-after-vm_start)), or unlock it in VMConnect. If the display is off, wake it with `vm_click` or `vm_key`.
 - `vm_screenshot` with `source: agent` captures inside the guest user's session.
 
 ### Port 8770 is already in use

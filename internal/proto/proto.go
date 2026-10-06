@@ -33,6 +33,7 @@ const (
 	OpListWindows  = "list_windows"  // -> WindowsResult
 	OpWindowAt     = "window_at"     // PointArgs -> HandleResult
 	OpWait         = "wait"          // WaitArgs -> WaitResult
+	OpSessionState = "session_state" // -> SessionStateResult
 	OpUpdateAgent  = "update_agent"  // payload = new exe; the agent answers, replaces itself and restarts
 )
 
@@ -44,6 +45,18 @@ type Request struct {
 type Response struct {
 	Error  string          `json:"error,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
+}
+
+// SessionStateResult describes the agent's own logon session: Locked is its lock state as Windows reports it; Console
+// means it is the session on the VM console, which the Hyper-V keyboard types into; SecureDesktop means keyboard input
+// goes to a desktop the user cannot open (the sign-in screen's password box or a UAC prompt), not to the user's
+// programs; LogonUI means the sign-in screen runs in the session; Consent means a UAC prompt (consent.exe) is open.
+type SessionStateResult struct {
+	Locked        bool `json:"locked"`
+	Console       bool `json:"console"`
+	SecureDesktop bool `json:"secure_desktop"`
+	LogonUI       bool `json:"logonui"`
+	Consent       bool `json:"consent"`
 }
 
 type PingResult struct {

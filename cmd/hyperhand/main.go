@@ -102,13 +102,15 @@ func main() {
 			go func() {
 				if _, err := (&broker.Client{}).ListVMs(); err != nil {
 					log.Print("Hyper-V service unavailable: ", err)
-					st.SetTitle("后台服务不可用，请运行 hyperhand.exe install")
+					st.SetTitle("Background service unavailable: run hyperhand.exe install")
 				}
 			}()
 		}
 		systray.AddSeparator()
-		reload := systray.AddMenuItem("重启", "重启 HyperHand 托盘和 MCP，不重启虚拟机")
-		quit := systray.AddMenuItem("退出", "")
+		newVMMenu()
+		systray.AddSeparator()
+		reload := systray.AddMenuItem("Restart", "Restart the HyperHand tray and MCP server; VMs keep running")
+		quit := systray.AddMenuItem("Quit", "")
 		go func() {
 			select {
 			case <-reload.ClickedCh:

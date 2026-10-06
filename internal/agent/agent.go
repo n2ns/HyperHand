@@ -31,6 +31,7 @@ var handlers = map[string]Handler{
 	proto.OpListWindows:  listWindows,
 	proto.OpWindowAt:     windowAt,
 	proto.OpWait:         waitOp,
+	proto.OpSessionState: sessionState,
 	proto.OpUpdateAgent:  updateAgent,
 }
 

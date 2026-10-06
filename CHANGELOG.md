@@ -10,12 +10,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Dedicated `HyperHandService` Windows service under `NT SERVICE\HyperHandService`, with Hyper-V rights assigned to the service account and an access-controlled local named pipe for specific VM operations and the guest socket tunnel.
 - Host tray restart action: restarts the ordinary tray/MCP process without restarting the service or any VM; in-progress requests are interrupted.
+- `vm_start` waits until the desktop is usable: the guest agent answers (up to 90 seconds) and the session is unlocked. A session Windows locked after signing in is unlocked with the password stored for the VM; otherwise the error says why the desktop is not usable.
+- `vm_status` reports a VM's power state, the agent, the session lock state, a non-console session, an open UAC prompt and whether an unlock password is stored.
+- `vm_unlock` unlocks a locked session with the stored password. The password is typed once, only after the agent confirms the session is locked, is the console session, shows the sign-in screen with keyboard input on its secure desktop and has no UAC prompt open.
+- Host tray **Virtual machines** submenu listing the Hyper-V VMs and their state, with **Set unlock password...** and **Clear unlock password** per VM (stored in Windows Credential Manager for the current user).
+- Agent op `session_state`.
+- `vm_focus_window` and `vm_click` with a window name the locked session as the reason when they fail on a locked guest.
 - `vm_windows` lists the guest's visible top-level windows with handle, title, class, process, position, enabled, foreground, owner and modal state.
 - `vm_focus_window` accepts a window `handle` and returns the focused window's handle.
 - `vm_click` accepts `window` or `handle`: coordinates are then relative to that window, and the click is refused unless it is the enabled foreground window and the point is inside it, on screen and not covered by another window.
 
 ### Changed
 
+- Host tray menu text is in English.
 - Normal host tray startup no longer requests elevation. Installation, updates and uninstallation still require administrator approval.
 - `hyperhand.exe install` installs both executables under `%ProgramFiles%\HyperHand`, records the owner under `%ProgramData%\HyperHand`, and migrates the `HyperHand` logon task from highest privileges to least privilege. Repeating `install` updates the installation.
 - Host file transfers use the ordinary tray user's permissions. The local MCP endpoint remains unauthenticated; the broker pipe ACL is not MCP authentication.

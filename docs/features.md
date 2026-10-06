@@ -61,7 +61,7 @@ Every tool except `vm_list` takes an optional `vm` argument.
 
 ## 3. VM and Checkpoint Tools
 
-These tools use Hyper-V on the host and do not need the agent. Tools without a specific result return `ok`.
+These tools use Hyper-V on the host and do not need the agent, except for the readiness and unlock steps in 3.7. Tools without a specific result return `ok`.
 
 ### 3.1 vm_list
 
@@ -69,7 +69,7 @@ These tools use Hyper-V on the host and do not need the agent. Tools without a s
 
 ### 3.2 vm_start and vm_stop
 
-- `vm_start` requests state Running (`RequestStateChange` 2).
+- `vm_start` requests state Running (`RequestStateChange` 2) unless the VM is already Running, then waits until the desktop is usable (see 3.7).
 - `vm_stop` requests state Off (`RequestStateChange` 3), which turns the VM off rather than shutting the guest down.
 - Both close the VM's agent client afterwards (see 1.3).
 - WMI return value 0 means completed. When WMI returns 4096 (job started), the tool waits up to 45 seconds for the asynchronous job and checks its result; a job failure or timeout is reported rather than returning success on acceptance. The operation is not resent automatically.
@@ -94,6 +94,17 @@ These tools use Hyper-V on the host and do not need the agent. Tools without a s
 ### 3.6 PowerShell-based operations
 
 `vm_checkpoints`, `vm_checkpoint`, `vm_restore` and the file copy of `vm_install_agent` (see 8.1) run a hidden, non-interactive Windows PowerShell on the host with `$ErrorActionPreference = 'Stop'`, the VM looked up by ID and UTF-8 output. A failure is reported as `powershell: <error>: <stderr and stdout>`.
+
+### 3.7 Session readiness and unlock: vm_start, vm_status, vm_unlock
+
+These use the agent's `session_state` (see 10.2), which reports for the agent's own session: the lock state from `WTSQuerySessionInformation` (`WTSSessionInfoEx` SessionFlags), whether it is the console session (`WTSGetActiveConsoleSessionId`), whether keyboard input goes to a secure desktop the user cannot open (`OpenInputDesktop` fails with access denied: the sign-in screen's password box or a UAC prompt), and whether `LogonUI.exe` and `consent.exe` run in it (`WTSEnumerateProcesses`).
+
+- After the VM runs, `vm_start` pings the agent every 2 seconds for up to 90 seconds. If the session is not locked it checks again 3 seconds later, because Windows can lock a session right after an automatic sign-in. A locked session is unlocked as below. The result names the agent and the session state; an error says why the desktop is not usable (no agent answer, locked without a stored password, unlock failed, agent too old). The VM keeps running in every case.
+- `vm_status` reports the power state, whether an unlock password is stored and, for a running VM, the agent's version and user (5-second ping), the session lock state, a non-console session and an open UAC prompt. It waits for nothing and changes nothing.
+- `vm_unlock` unlocks a running VM's locked session; an unlocked session returns `the session is not locked`.
+- Unlocking reads the VM's unlock password from Windows Credential Manager (generic credential `HyperHand:<VM name>`, stored from the tray, see 9.1). It refuses before any input when no password is stored, the password is not ASCII, or the session is not the console session. It presses `ctrl` to dismiss the lock screen curtain and waits 1.5 seconds. Then, holding the input lock (see 4.5), it presses `ctrl+a`, checks once more that the session is locked, is the console session, runs `LogonUI.exe`, has keyboard input on the secure desktop and shows no UAC prompt, and only then types the password and `enter`. It waits up to 15 seconds for the session to report unlocked. The password is typed once per call: a wrong password is reported, not retried, so that the account is not locked out. The password never appears in results, errors or logs.
+- An agent too old to know `session_state` is reported with a request to run `vm_update_agent`, and nothing is typed.
+- When `vm_focus_window` or `vm_click` with `window` or `handle` fails and the agent reports the session locked, the error ends with `(the guest session is locked: run vm_unlock)`.
 
 ## 4. Screen and Input
 
@@ -150,7 +161,7 @@ Mouse input goes through the VM's synthetic mouse (`Msvm_SyntheticMouse`) with a
 
 ### 4.5 Input serialisation
 
-All mouse and keyboard operations in the host process are serialised by one lock, so concurrent tool calls never interleave their input events. This includes the keyboard steps of `vm_type` and `vm_install_agent`.
+All mouse and keyboard operations in the host process are serialised by one lock, so concurrent tool calls never interleave their input events. This includes the keyboard steps of `vm_type` and `vm_install_agent`. The MCP process holds a second input lock around each input tool call and around the final check and password typing of an unlock (see 3.7), so no other HyperHand tool sends input in between.
 
 ## 5. Commands
 
@@ -354,7 +365,7 @@ The update replaces the file the agent is running from; the HKCU Run entry is un
 - The tray starts without requesting elevation. Hyper-V operations require the separately installed and running `HyperHandService`.
 - A second instance exits immediately (mutex `Local\HyperHandTray`).
 - It listens on `127.0.0.1:<port>`; protected machine configuration is performed only by the installer.
-- The tray menu shows the MCP URL or listener error, restart and quit actions. Restart replaces only this ordinary tray/MCP process, without UAC, preserving the selected port. Active MCP connections and requests are interrupted; the service, guest agent and VMs are not restarted.
+- The tray menu shows the MCP URL or listener error, a **Virtual machines** submenu, restart and quit actions. The submenu lists the Hyper-V VMs with their state (running, off, saved, paused), refreshed every 5 seconds, and marks VMs with a stored unlock password. Each VM's submenu has **Set unlock password...**, which asks in the Windows credential dialog for the password or PIN the guest lock screen asks for and stores it in Windows Credential Manager for the current user (non-ASCII passwords are refused), and **Clear unlock password**. The user name in the dialog is only a note. Restart replaces only this ordinary tray/MCP process, without UAC, preserving the selected port. Active MCP connections and requests are interrupted; the service, guest agent and VMs are not restarted.
 
 ### 9.2 install
 
@@ -413,6 +424,7 @@ uint32 header length | uint64 payload length | header JSON | payload bytes
 | `window_at` | `{x, y}` | `{handle}`, the top-level window a click at that screen point reaches; 0 off screen |
 | `list_windows` | none | `{windows: [{handle, title, class, pid, process, rect, enabled, foreground, minimized, owner, modal}]}` |
 | `wait` | `{kind, name, path, timeout_ms}` | `{satisfied}` |
+| `session_state` | none | `{locked, console, secure_desktop, logonui, consent}` for the agent's session (see 3.7) |
 | `update_agent` | payload (new executable) | none; the agent then restarts (see 8.5) |
 
 ### 10.3 Error behaviour

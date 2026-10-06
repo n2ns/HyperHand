@@ -11,7 +11,7 @@ HyperHand runs entirely on your machine and its Hyper-V VMs.
 
 ## Data handled
 
-Screenshots, typed text, clipboard contents, command output and file contents pass between the guest, the host service, the host tray and the MCP client that requested them. Host file reads and writes for `vm_push` and `vm_pull` run under the tray user's permissions. The service has its own temporary working directory; see below for local storage.
+Screenshots, typed text, clipboard contents, command output and file contents pass between the guest, the host service, the host tray and the MCP client that requested them. A stored unlock password passes only from Windows Credential Manager through the tray and the service to the VM's keyboard; it is not returned to MCP clients or written to logs. Host file reads and writes for `vm_push` and `vm_pull` run under the tray user's permissions. The service has its own temporary working directory; see below for local storage.
 
 ## Data stored locally
 
@@ -23,6 +23,7 @@ On the host:
 - `%ProgramData%\HyperHand\config.json`, including the installing user's SID used for local broker access control. This configuration is protected from ordinary user changes.
 - `%ProgramData%\HyperHand\service-data`, the service's writable working directory, including temporary staging for guest agent installation.
 - Service error log: `%ProgramData%\HyperHand\service-data\broker.log`, with an approximately 1 MiB size limit. Service errors may also appear in the Windows Application event log under `HyperHandService`; use the file log if the event source is unavailable.
+- Unlock passwords set from the tray menu: generic credentials `HyperHand:<VM name>` in Windows Credential Manager, for the current user on this machine (protected by Windows for that user). Remove them with **Clear unlock password** in the tray or in Credential Manager; uninstallation does not remove them.
 - Scheduled task `HyperHand`, created by `hyperhand.exe install` to start the ordinary tray for the installing user at logon, with least privilege.
 - Registry key `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\3ce544e1-2645-4383-b332-fedf8a18736b`, which registers the Hyper-V socket service.
 - Unique `.hyperhand-*.hhpart` files in the destination directory while `vm_pull` writes a file; renamed to the target on completion, deleted on failure.
@@ -38,7 +39,7 @@ Host uninstallation preserves user logs, guest files and nonempty service workin
 
 ## Access control
 
-The MCP server has no authentication. Any local process that can reach `127.0.0.1:8770` can control the VMs through all HyperHand tools, including running commands in the guest and copying files between host and guest.
+The MCP server has no authentication. Any local process that can reach `127.0.0.1:8770` can control the VMs through all HyperHand tools, including running commands in the guest, copying files between host and guest, and unlocking a locked session with a stored unlock password (without being able to read the password).
 
 The service's named pipe permits the configured owner, SYSTEM, administrators and the service account. This restricts direct broker access; it does **not** authenticate MCP callers or prevent another local process from using the tray's HTTP endpoint. The service exposes specific Hyper-V operations and the fixed guest socket tunnel, not an arbitrary host command execution endpoint. Guest `vm_exec` still runs in the guest.
 

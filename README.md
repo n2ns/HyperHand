@@ -20,14 +20,15 @@ HyperHand has two executables and three roles:
 - **File transfer**: copy files or whole directories in either direction, streamed at hundreds of MB/s. Uploads skip files whose SHA-256 already matches the guest copy.
 - **Checkpoints**: list, create and restore; a restored VM is started again automatically.
 - **Clipboard, windows and waiting**: read and write the guest clipboard, bring a window to the front, wait until a process exits or a file appears.
-- **No guest network, no guest password**: host and agent talk over a Hyper-V socket; the agent is copied in with Hyper-V's guest file copy and installed from the keyboard.
+- **Start to a usable desktop**: `vm_start` waits until the agent answers and the session is unlocked. If Windows locked the session after signing in, it types the unlock password you stored in the tray; `vm_status` reports power, agent and lock state.
+- **No guest network; guest password optional**: host and agent talk over a Hyper-V socket; the agent is copied in with Hyper-V's guest file copy and installed from the keyboard. A guest password is needed only if you want HyperHand to unlock a locked session; it stays in Windows Credential Manager on the host.
 - **Cancellation**: when the MCP client cancels a long command, the agent kills it and is ready for the next request immediately.
 - **No UAC during normal host use**: install or update the service once with administrator approval, then start or restart the tray as an ordinary user. Restarting the tray reconnects MCP without restarting the service or any VM; in-progress requests are interrupted.
 
 ## Requirements
 
 - Windows 10/11 Pro or Enterprise host with Hyper-V, and administrator approval for installation, updates and uninstallation. Normal tray use does not require elevation.
-- A Windows guest with a logged-on user.
+- A Windows guest with a logged-on user. Sign the user in automatically, or store an unlock password in the tray so that `vm_start` can unlock a session Windows locked after signing in.
 - VMConnect in basic session mode. Enhanced session moves the user's session to remote desktop, so host-side screenshots and input would reach the console lock screen instead.
 - Go 1.27 or later, only to build from source.
 - An MCP client that supports Streamable HTTP: Claude Code, Codex, Cursor and others.
@@ -78,7 +79,8 @@ Every tool takes an optional `vm` (VM name). Without it, the only running VM is 
 
 | Tool | What it does |
 |---|---|
-| `vm_list`, `vm_start`, `vm_stop` | List VMs with their state; start; turn off |
+| `vm_list`, `vm_start`, `vm_stop` | List VMs with their state; start and wait until the desktop is usable (unlocking it with the stored password); turn off |
+| `vm_status`, `vm_unlock` | Report power state, agent, session lock state and whether an unlock password is stored; unlock a locked session with the stored password |
 | `vm_checkpoints`, `vm_checkpoint`, `vm_restore` | List, create and restore checkpoints (exact names); restore starts the VM unless `start` is false |
 | `vm_screenshot` | PNG of the VM screen; `source`: `host` (default) or `agent` |
 | `vm_click`, `vm_drag`, `vm_scroll` | Mouse at screenshot pixel coordinates; `vm_click` with `window` or `handle` clicks inside that window only if it is the enabled foreground window |
@@ -91,7 +93,7 @@ Every tool takes an optional `vm` (VM name). Without it, the only running VM is 
 | `vm_wait` | Wait until a process exits or runs, or a file exists |
 | `vm_install_agent`, `vm_update_agent` | Install or replace the guest agent |
 
-Screen, mouse, keyboard, VM and checkpoint tools work without the agent; the others need it.
+Screen, mouse, keyboard, VM and checkpoint tools work without the agent; the others need it. Without the agent, `vm_start` still starts the VM but reports that the desktop is not usable.
 
 ## Known limitations
 
@@ -100,10 +102,11 @@ Screen, mouse, keyboard, VM and checkpoint tools work without the agent; the oth
 - `admin` commands elevate without a prompt only if the guest's UAC is set to elevate administrators without prompting; otherwise the UAC wait counts toward the command timeout. A late approval cannot execute a cancelled or expired request.
 - Host-side screenshots and input act on the VM console; they do not reach a remote desktop or enhanced session.
 - Checkpoints cannot be deleted from HyperHand.
+- HyperHand unlocks only a session that is signed in and locked, with its agent running: it cannot sign a user in at the sign-in screen after a cold boot. Use automatic sign-in for that. The unlock password must be ASCII (the Hyper-V keyboard types ASCII only); store the PIN instead if the lock screen asks for one.
 
 ## Privacy
 
-HyperHand sends no telemetry and makes no network connections beyond the local MCP endpoint on `127.0.0.1`. Host and guest talk over Hyper-V sockets. The MCP endpoint has no authentication: any local process that can reach `127.0.0.1:8770` can control the VMs. See [docs/privacy.md](docs/privacy.md).
+HyperHand sends no telemetry and makes no network connections beyond the local MCP endpoint on `127.0.0.1`. Host and guest talk over Hyper-V sockets. The MCP endpoint has no authentication: any local process that can reach `127.0.0.1:8770` can control the VMs, including unlocking a VM with a stored unlock password (the password itself is never returned). Unlock passwords are stored in Windows Credential Manager for your user. See [docs/privacy.md](docs/privacy.md).
 
 ## Uninstall
 
