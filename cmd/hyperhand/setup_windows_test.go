@@ -369,3 +369,38 @@ func TestStopProcessAlreadyExited(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A process that has exited while another process still holds a handle to it can still be opened, but its image
+// name cannot be read (ERROR_GEN_FAILURE); it counts as gone, not as a process setup cannot check.
+func TestOpenProcessWithPathExited(t *testing.T) {
+	if os.Getenv("HYPERHAND_TEST_SLEEP") == "1" {
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(self, "-test.run=^TestOpenProcessWithPathExited$")
+	cmd.Env = append(os.Environ(), "HYPERHAND_TEST_SLEEP=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := uint32(cmd.Process.Pid)
+	held, err := windows.OpenProcess(windows.SYNCHRONIZE, false, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(held) // keeps the exited process object, as the task scheduler's handle may
+	if h, err := openProcessWithPath(pid, windows.PROCESS_TERMINATE, self); err != nil || h == 0 {
+		t.Fatalf("running child: %v %v", h, err)
+	} else {
+		windows.CloseHandle(h)
+	}
+	cmd.Process.Kill()
+	cmd.Wait()
+	h, err := openProcessWithPath(pid, windows.PROCESS_TERMINATE, self)
+	if err != nil || h != 0 {
+		t.Fatalf("exited child: %v %v", h, err)
+	}
+}

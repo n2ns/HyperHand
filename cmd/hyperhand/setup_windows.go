@@ -591,9 +591,12 @@ func removeStaleCleanup(p setupPaths) error {
 	if assertOwned(p.data) != nil {
 		return nil // the ownership checks that follow report it
 	}
-	running, err := processesWithPath(p.cleanup)
+	running, err := openProcessesWithPath(0, p.cleanup)
 	if err != nil {
 		return err
+	}
+	for _, h := range running {
+		windows.CloseHandle(h)
 	}
 	if len(running) != 0 {
 		return errors.New("an earlier uninstall is still finishing; try again shortly")
@@ -749,9 +752,11 @@ func fileHash(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// processesWithPath returns the IDs of processes, other than this one, whose executable is one of paths. A process
-// with the same file name that cannot be opened to check its path is an error.
-func processesWithPath(paths ...string) ([]uint32, error) {
+// openProcessesWithPath opens, with access, the processes other than this one whose executable is one of paths. Each
+// path is checked on the returned handle itself, so a reused process ID cannot stand in for an exited process; a
+// process that exits meanwhile is left out. A process with the same file name that cannot be checked is an error. The
+// caller closes the handles.
+func openProcessesWithPath(access uint32, paths ...string) ([]windows.Handle, error) {
 	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
 		return nil, err
@@ -763,65 +768,79 @@ func processesWithPath(paths ...string) ([]uint32, error) {
 			names[strings.ToLower(filepath.Base(p))] = true
 		}
 	}
-	var ids []uint32
+	var hs []windows.Handle
 	e := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
 	for err = windows.Process32First(snap, &e); err == nil; err = windows.Process32Next(snap, &e) {
 		if e.ProcessID == uint32(os.Getpid()) || !names[strings.ToLower(windows.UTF16ToString(e.ExeFile[:]))] {
 			continue
 		}
-		image, err := processImage(e.ProcessID)
-		if err == windows.ERROR_INVALID_PARAMETER {
-			continue // exited since the snapshot
-		}
+		h, err := openProcessWithPath(e.ProcessID, access, paths...)
 		if err != nil {
+			for _, h := range hs {
+				windows.CloseHandle(h)
+			}
 			return nil, fmt.Errorf("cannot verify HyperHand process %d: %w", e.ProcessID, err)
 		}
-		for _, p := range paths {
-			if p != "" && strings.EqualFold(image, p) {
-				ids = append(ids, e.ProcessID)
-				break
-			}
+		if h != 0 {
+			hs = append(hs, h)
 		}
 	}
 	if !errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+		for _, h := range hs {
+			windows.CloseHandle(h)
+		}
 		return nil, err
 	}
-	return ids, nil
+	return hs, nil
 }
 
-func processImage(pid uint32) (string, error) {
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-	if err != nil {
-		return "", err
+// openProcessWithPath opens process pid with access if its executable is one of paths; it returns 0 when it is not,
+// or has exited. An exited process can still be opened while another process holds a handle to it, but its image name
+// can then no longer be read.
+func openProcessWithPath(pid, access uint32, paths ...string) (windows.Handle, error) {
+	h, err := windows.OpenProcess(access|windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, pid)
+	if err == windows.ERROR_INVALID_PARAMETER {
+		return 0, nil // no such process any more
 	}
-	defer windows.CloseHandle(h)
+	if err != nil {
+		return 0, err
+	}
 	buf := make([]uint16, windows.MAX_LONG_PATH)
 	n := uint32(len(buf))
 	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &n); err != nil {
-		return "", err
+		ev, werr := windows.WaitForSingleObject(h, 0)
+		windows.CloseHandle(h)
+		if werr == nil && ev == windows.WAIT_OBJECT_0 {
+			return 0, nil
+		}
+		return 0, err
 	}
-	return windows.UTF16ToString(buf[:n]), nil
+	image := windows.UTF16ToString(buf[:n])
+	for _, p := range paths {
+		if p != "" && strings.EqualFold(image, p) {
+			return h, nil
+		}
+	}
+	windows.CloseHandle(h)
+	return 0, nil
 }
 
 // stopProcesses ends the HyperHand processes started from paths (the trays; the service process has already exited)
 // and waits for them to exit.
 func stopProcesses(paths ...string) error {
-	ids, err := processesWithPath(paths...)
+	hs, err := openProcessesWithPath(windows.PROCESS_TERMINATE, paths...)
 	if err != nil {
 		return err
 	}
-	for _, id := range ids {
-		h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, id)
-		if err == windows.ERROR_INVALID_PARAMETER {
-			continue // exited meanwhile
+	defer func() {
+		for _, h := range hs {
+			windows.CloseHandle(h)
 		}
-		if err != nil {
-			return fmt.Errorf("cannot stop HyperHand process %d: %w", id, err)
-		}
-		err = stopProcess(h)
-		windows.CloseHandle(h)
-		if err != nil {
-			return fmt.Errorf("HyperHand process %d: %w", id, err)
+	}()
+	for _, h := range hs {
+		if err := stopProcess(h); err != nil {
+			pid, _ := windows.GetProcessId(h)
+			return fmt.Errorf("HyperHand process %d: %w", pid, err)
 		}
 	}
 	return nil
