@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `vm_status` reports a VM's power state, the agent, the session lock state, a non-console session, an open UAC prompt and whether an unlock password is stored.
 - `vm_unlock` unlocks a locked session with the stored password. The password is typed once, only after the agent confirms the session is locked, is the console session, shows the sign-in screen with keyboard input on its secure desktop and has no UAC prompt open.
 - Host tray **Virtual machines** submenu listing the Hyper-V VMs and their state, with **Set unlock password...** and **Clear unlock password** per VM (stored in Windows Credential Manager for the current user).
+- Tray **Open console** per VM opens Virtual Machine Connection without a UAC prompt, or brings an already open one to the front; **Open console when started** opens it whenever `vm_start` starts that VM. `install` registers the on-demand `HyperHand Console` task for this, which runs `vmconnect.exe` with the installing user's highest privileges; `uninstall` removes it.
 - Agent op `session_state`.
 - `vm_focus_window` and `vm_click` with a window name the locked session as the reason when they fail on a locked guest.
 - `vm_windows` lists the guest's visible top-level windows with handle, title, class, process, position, enabled, foreground, owner and modal state.
@@ -22,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** `vm_stop` is replaced by `vm_shutdown`, which shuts the guest down normally through the Hyper-V shutdown integration service and waits up to 3 minutes until the VM is off (failing, without turning it off, when a program blocks shutdown), and `vm_turn_off`, which turns the VM off immediately as `vm_stop` did.
 - Host tray menu text is in English.
 - Normal host tray startup no longer requests elevation. Installation, updates and uninstallation still require administrator approval.
 - `hyperhand.exe install` installs both executables under `%ProgramFiles%\HyperHand`, records the owner under `%ProgramData%\HyperHand`, and migrates the `HyperHand` logon task from highest privileges to least privilege. Repeating `install` updates the installation.

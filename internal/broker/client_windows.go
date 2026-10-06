@@ -117,6 +117,9 @@ func (Client) Find(vm string) (hyperv.VM, error) {
 }
 func (Client) Start(vm string) error { return call(request{Op: "start", VM: vm}) }
 func (Client) Stop(vm string) error  { return call(request{Op: "stop", VM: vm}) }
+func (Client) Shutdown(vm string) error {
+	return call(request{Op: "shutdown", VM: vm})
+}
 func (Client) ListCheckpoints(vm string) ([]hyperv.Checkpoint, error) {
 	var v []hyperv.Checkpoint
 	err := decode(request{Op: "checkpoints", VM: vm}, &v)

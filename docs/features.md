@@ -31,7 +31,7 @@ HyperHand consists of two Windows executables.
 - A queued call can be cancelled or reach its context deadline without waiting for the active request to finish. It is not sent and does not interrupt the active request.
 - Before reusing an idle connection the client probes it with a 1 ms read. A timeout means the connection is alive; EOF, any other error, or unexpected data marks it dead, and the client redials.
 - If a request could not be sent, the client reconnects and sends it once more. The resend happens only if the request payload can be rewound (no payload, or a seekable source). A request that was sent is never resent, so a command cannot run twice.
-- The client for a VM is closed and discarded after `vm_start`, `vm_stop` and `vm_restore` (see 3).
+- The client for a VM is closed and discarded after `vm_start`, `vm_shutdown`, `vm_turn_off` and `vm_restore` (see 3).
 
 ### 1.4 Cancellation
 
@@ -67,12 +67,13 @@ These tools use Hyper-V on the host and do not need the agent, except for the re
 
 `vm_list` lists all VMs, one per line, as `name<TAB>state<TAB>id`. With no VMs it returns `no VMs`. The `vm` argument is ignored.
 
-### 3.2 vm_start and vm_stop
+### 3.2 vm_start, vm_shutdown and vm_turn_off
 
 - `vm_start` requests state Running (`RequestStateChange` 2) unless the VM is already Running, then waits until the desktop is usable (see 3.7).
-- `vm_stop` requests state Off (`RequestStateChange` 3), which turns the VM off rather than shutting the guest down.
-- Both close the VM's agent client afterwards (see 1.3).
-- WMI return value 0 means completed. When WMI returns 4096 (job started), the tool waits up to 45 seconds for the asynchronous job and checks its result; a job failure or timeout is reported rather than returning success on acceptance. The operation is not resent automatically.
+- `vm_shutdown` asks the guest to shut down through the Hyper-V shutdown integration service (`Msvm_ShutdownComponent.InitiateShutdown` with `Force` false), then checks the VM state every 2 seconds for up to 3 minutes until it is Off. Because shutdown is not forced, a program with unsaved work can keep Windows from shutting down; the tool then fails and the VM keeps running. A VM that is already off returns `VM <name> is already off`. If the integration service refuses the request (not running, guest not booted, disabled in the VM settings), the tool fails. It never turns the VM off itself. MCP clients and scripts must allow calls of more than 3 minutes for the wait to finish.
+- `vm_turn_off` requests state Off (`RequestStateChange` 3), which turns the VM off at once like pulling the plug; unsaved guest work is lost.
+- All three close the VM's agent client afterwards (see 1.3).
+- For `vm_start` and `vm_turn_off`, WMI return value 0 means completed. When WMI returns 4096 (job started), the tool waits up to 45 seconds for the asynchronous job and checks its result; a job failure or timeout is reported rather than returning success on acceptance. The operation is not resent automatically.
 
 ### 3.3 vm_checkpoints
 
@@ -99,6 +100,7 @@ These tools use Hyper-V on the host and do not need the agent, except for the re
 
 These use the agent's `session_state` (see 10.2), which reports for the agent's own session: the lock state from `WTSQuerySessionInformation` (`WTSSessionInfoEx` SessionFlags), whether it is the console session (`WTSGetActiveConsoleSessionId`), whether keyboard input goes to a secure desktop the user cannot open (`OpenInputDesktop` fails with access denied: the sign-in screen's password box or a UAC prompt), and whether `LogonUI.exe` and `consent.exe` run in it (`WTSEnumerateProcesses`).
 
+- When `vm_start` started a VM that was not running and **Open console when started** is checked for it in the tray (see 9.1), the tray opens its console in the background; `vm_start` does not wait for it.
 - After the VM runs, `vm_start` pings the agent every 2 seconds for up to 90 seconds. If the session is not locked it checks again 3 seconds later, because Windows can lock a session right after an automatic sign-in. A locked session is unlocked as below. The result names the agent and the session state; an error says why the desktop is not usable (no agent answer, locked without a stored password, unlock failed, agent too old). The VM keeps running in every case.
 - `vm_status` reports the power state, whether an unlock password is stored and, for a running VM, the agent's version and user (5-second ping), the session lock state, a non-console session and an open UAC prompt. It waits for nothing and changes nothing.
 - `vm_unlock` unlocks a running VM's locked session; an unlocked session returns `the session is not locked`.
@@ -365,7 +367,7 @@ The update replaces the file the agent is running from; the HKCU Run entry is un
 - The tray starts without requesting elevation. Hyper-V operations require the separately installed and running `HyperHandService`.
 - A second instance exits immediately (mutex `Local\HyperHandTray`).
 - It listens on `127.0.0.1:<port>`; protected machine configuration is performed only by the installer.
-- The tray menu shows the MCP URL or listener error, a **Virtual machines** submenu, restart and quit actions. The submenu lists the Hyper-V VMs with their state (running, off, saved, paused), refreshed every 5 seconds, and marks VMs with a stored unlock password. Each VM's submenu has **Set unlock password...**, which asks in the Windows credential dialog for the password or PIN the guest lock screen asks for and stores it in Windows Credential Manager for the current user (non-ASCII passwords are refused), and **Clear unlock password**. The user name in the dialog is only a note. Restart replaces only this ordinary tray/MCP process, without UAC, preserving the selected port. Active MCP connections and requests are interrupted; the service, guest agent and VMs are not restarted.
+- The tray menu shows the MCP URL or listener error, a **Virtual machines** submenu, restart and quit actions. The submenu lists the Hyper-V VMs with their state (running, off, saved, paused), refreshed every 5 seconds, and marks VMs with a stored unlock password. Each VM's submenu has **Open console**, which brings an open Virtual Machine Connection window for that VM to the front (a visible window of `<system directory>\vmconnect.exe` whose title, such as `Win10 on localhost - Virtual Machine Connection` or a localized `localhost 上的 Win10 - 虚拟机连接`, names exactly that VM; a title in another layout is not matched, and a new console is opened) or else runs the `HyperHand Console` task with the VM name (see 9.2), after checking that the name is an existing VM's exact name without quotes, line breaks or a trailing backslash; **Open console when started**, a per-VM check box saved in `%LOCALAPPDATA%\HyperHand\settings.json` (see 3.7); a warning appears for both when the host allows enhanced session mode (`EnhancedMode` under `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization`); **Set unlock password...**, which asks in the Windows credential dialog for the password or PIN the guest lock screen asks for and stores it in Windows Credential Manager for the current user (non-ASCII passwords are refused), and **Clear unlock password**. The user name in the dialog is only a note. Restart replaces only this ordinary tray/MCP process, without UAC, preserving the selected port. Active MCP connections and requests are interrupted; the service, guest agent and VMs are not restarted.
 
 ### 9.2 install
 
@@ -376,13 +378,14 @@ The update replaces the file the agent is running from; the HKCU Run entry is un
 - It records the installing user's SID in the protected `%ProgramData%\HyperHand\config.json` and provides a service-writable `service-data` directory beneath it.
 - It configures automatic Windows service `HyperHandService` under `NT SERVICE\HyperHandService` and adds that service account to Hyper-V Administrators. It does not add the human user or use LocalSystem.
 - It creates or replaces the `HyperHand` logon task for the installing user with least privilege and the installed executable. Reinstalling migrates the older highest-privilege task.
+- It creates or replaces the `HyperHand Console` task for the installing user: no trigger, highest privileges, one action `<system directory>\vmconnect.exe localhost "$(Arg0)"` (the system directory from `GetSystemDirectory`, not an environment variable). An existing task of that name must belong to the installing user and run `vmconnect.exe`, or installation stops.
 - It registers the fixed guest socket service (see 1.2) and starts the host components. Repeating `install` deploys an update; normal tray restart does not update binaries.
 - On error it logs the error and shows it in a message box.
 
 `hyperhand.exe uninstall` reverses the install.
 
 - If not elevated, it relaunches itself elevated with `uninstall` (one UAC prompt).
-- It stops the installed tray and service and removes `HyperHandService`, its Hyper-V Administrators membership, the `HyperHand` logon task and the fixed guest socket registration.
+- It stops the installed tray and service and removes `HyperHandService`, its Hyper-V Administrators membership, the `HyperHand` logon task, the `HyperHand Console` task and the fixed guest socket registration.
 - A protected cleanup helper waits for the installed executable to exit, then removes the installed host and agent executables only if their hashes still match. Only empty directories are removed.
 - User logs, guest files and nonempty service working data are preserved. If working data remains, the owner configuration is retained for reinstallation; otherwise the configuration and empty data directory are removed.
 - It does not uninstall guest agents or change host UAC policy.

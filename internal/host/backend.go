@@ -14,6 +14,7 @@ type Backend interface {
 	Find(string) (hyperv.VM, error)
 	Start(string) error
 	Stop(string) error
+	Shutdown(string) error
 	ListCheckpoints(string) ([]hyperv.Checkpoint, error)
 	CreateCheckpoint(string, string) error
 	RestoreCheckpoint(string, string) error

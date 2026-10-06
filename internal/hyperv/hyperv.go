@@ -234,6 +234,19 @@ func Start(vm string) error { return requestState(vm, 2) }
 
 func Stop(vm string) error { return requestState(vm, 3) }
 
+// Shutdown asks the guest to shut down through the Hyper-V shutdown integration service and returns once the request
+// is accepted, not when the VM is off. It is not forced: a program with unsaved work can keep Windows from shutting
+// down. https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/initiateshutdown-msvm-shutdowncomponent
+func Shutdown(vm string) error {
+	return withDevice(vm, "Msvm_ShutdownComponent", func(s *session, c *ole.IDispatch) error {
+		// call fails on any ReturnValue other than 0 (done) and 4096 (accepted).
+		if _, err := s.call(c, "InitiateShutdown", "Force", false, "Reason", "HyperHand vm_shutdown"); err != nil {
+			return fmt.Errorf("the guest shutdown integration service did not accept the request; is the guest running Windows with the Shutdown integration service enabled? %w", err)
+		}
+		return nil
+	})
+}
+
 // CopyToGuest copies a host file into the guest (enables the Guest Service Interface if needed; no guest password).
 func CopyToGuest(vm, hostPath, guestPath string) error {
 	_, err := vmScript(vm, `$gs=Get-VMIntegrationService -VM $vm | Where-Object { $_.Id -like '*6C09BB55-D683-4DA0-8931-C9BF705F6480' }

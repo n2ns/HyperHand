@@ -158,8 +158,10 @@ func (c *Client) Close() {
 // Manager keeps one Client per VM.
 type Manager struct {
 	Backend Backend
-	mu      sync.Mutex
-	clients map[string]*Client
+	// AfterStart, if set, is called with the VM name after vm_start has started a VM that was not running.
+	AfterStart func(vm string)
+	mu         sync.Mutex
+	clients    map[string]*Client
 }
 
 // Client returns the agent client for a VM name ("" = the only running VM).

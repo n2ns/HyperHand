@@ -78,6 +78,7 @@ func main() {
 	}
 	defer windows.CloseHandle(mutex)
 
+	settings := loadConsoleSettings(filepath.Join(dir, "settings.json"))
 	url := fmt.Sprintf("http://127.0.0.1:%d/mcp", *port)
 	status := "MCP: " + url
 	var httpServer *http.Server
@@ -85,7 +86,15 @@ func main() {
 		log.Print(err)
 		status = "Error: " + err.Error()
 	} else {
-		srv := host.NewServer(&host.Manager{})
+		srv := host.NewServer(&host.Manager{AfterStart: func(vm string) {
+			if settings.onStart(vm) {
+				go func() {
+					if err := openConsole(vm); err != nil {
+						log.Print("open console: ", err)
+					}
+				}()
+			}
+		}})
 		mux := http.NewServeMux()
 		mux.Handle("/mcp", mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil))
 		httpServer = &http.Server{Handler: mux}
@@ -107,7 +116,7 @@ func main() {
 			}()
 		}
 		systray.AddSeparator()
-		newVMMenu()
+		newVMMenu(settings)
 		systray.AddSeparator()
 		reload := systray.AddMenuItem("Restart", "Restart the HyperHand tray and MCP server; VMs keep running")
 		quit := systray.AddMenuItem("Quit", "")

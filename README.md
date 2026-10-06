@@ -41,7 +41,7 @@ Download `hyperhand-X.Y.Z-windows-amd64.zip` from [Releases](https://github.com/
 hyperhand.exe install
 ```
 
-`install` asks for UAC once, copies both executables to `%ProgramFiles%\HyperHand`, installs the automatic `HyperHandService` service and starts the ordinary tray. Only the dedicated service account is added to Hyper-V Administrators; your user account is not. The `HyperHand` logon task runs the installed tray with least privilege, replacing an older highest-privilege task. Run `install` again from a new release to update the installation.
+`install` asks for UAC once, copies both executables to `%ProgramFiles%\HyperHand`, installs the automatic `HyperHandService` service and starts the ordinary tray. Only the dedicated service account is added to Hyper-V Administrators; your user account is not. The `HyperHand` logon task runs the installed tray with least privilege, replacing an older highest-privilege task. The on-demand `HyperHand Console` task lets the tray open Virtual Machine Connection for a VM without a UAC prompt (see [Watch a VM](docs/user-guide.md#watch-a-vm)). Run `install` again from a new release to update the installation.
 
 To build from source instead (the version then reads `dev`):
 
@@ -79,7 +79,8 @@ Every tool takes an optional `vm` (VM name). Without it, the only running VM is 
 
 | Tool | What it does |
 |---|---|
-| `vm_list`, `vm_start`, `vm_stop` | List VMs with their state; start and wait until the desktop is usable (unlocking it with the stored password); turn off |
+| `vm_list`, `vm_start` | List VMs with their state; start and wait until the desktop is usable (unlocking it with the stored password) |
+| `vm_shutdown`, `vm_turn_off` | Shut the guest down normally and wait until the VM is off (fails, without turning it off, if a program blocks shutdown); turn the VM off immediately, like pulling the plug |
 | `vm_status`, `vm_unlock` | Report power state, agent, session lock state and whether an unlock password is stored; unlock a locked session with the stored password |
 | `vm_checkpoints`, `vm_checkpoint`, `vm_restore` | List, create and restore checkpoints (exact names); restore starts the VM unless `start` is false |
 | `vm_screenshot` | PNG of the VM screen; `source`: `host` (default) or `agent` |
@@ -113,7 +114,7 @@ HyperHand sends no telemetry and makes no network connections beyond the local M
 Guest first, then host:
 
 1. Guest: run `%LOCALAPPDATA%\HyperHand\hyperhand-agent.exe uninstall` in the guest itself, by hand or from the host with `vm_key` `win+r` and `vm_type`. Not through `vm_exec`: the uninstall stops the agent that would be running it. It deletes the `HyperHandAgent` Run value and the folders `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`.
-2. Host: run `hyperhand.exe uninstall` (one UAC prompt). It removes the installed service, its Hyper-V group membership, the `HyperHand` logon task and the Hyper-V socket registration, then removes the installed executables if their hashes still match. User logs, guest files and nonempty service working data are preserved.
+2. Host: run `hyperhand.exe uninstall` (one UAC prompt). It removes the installed service, its Hyper-V group membership, the `HyperHand` logon task, the `HyperHand Console` task and the Hyper-V socket registration, then removes the installed executables if their hashes still match. User logs, guest files and nonempty service working data are preserved.
 3. Remove the server from your MCP client. See the user guide for installed files and logs.
 
 Details in the [user guide](docs/user-guide.md#uninstalling).

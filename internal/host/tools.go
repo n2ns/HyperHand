@@ -22,6 +22,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"hyperhand/internal/credential"
+	"hyperhand/internal/hyperv"
 	"hyperhand/internal/proto"
 )
 
@@ -164,6 +165,9 @@ func NewServer(m *Manager) *mcp.Server {
 			if err != nil {
 				return nil, err
 			}
+			if m.AfterStart != nil {
+				m.AfterStart(v.Name)
+			}
 		}
 		r, err := u.ready(ctx, v.Name, agentStartTimeout)
 		if err != nil {
@@ -228,7 +232,25 @@ func NewServer(m *Manager) *mcp.Server {
 		}
 		return text("%s", r), nil
 	})
-	add(s, "vm_stop", "Turn off a VM.", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
+	add(s, "vm_shutdown", "Shut a VM down normally: ask Windows in the guest to shut down (through the Hyper-V shutdown integration service) and wait up to 3 minutes until the VM is off. Not forced: a program with unsaved work can keep Windows from shutting down, and the tool then fails with the VM still running. Never turns the power off; use vm_turn_off only when the guest cannot shut down.", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
+		v, err := backend.Find(in.VM)
+		if err != nil {
+			return nil, err
+		}
+		if v.State == "Off" {
+			return text("VM %s is already off", v.Name), nil
+		}
+		if err := backend.Shutdown(v.Name); err != nil {
+			return nil, err
+		}
+		err = waitOff(ctx, func() (hyperv.VM, error) { return backend.Find(v.Name) }, time.Sleep, shutdownTimeout)
+		m.Drop(v.ID)
+		if err != nil {
+			return nil, err
+		}
+		return text("VM %s is off", v.Name), nil
+	})
+	add(s, "vm_turn_off", "Turn a VM off immediately, like pulling the power plug: unsaved work in the guest is lost and its file system may be damaged. Use vm_shutdown instead unless the guest is stuck.", func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
 		v, err := backend.Find(in.VM)
 		if err != nil {
 			return nil, err

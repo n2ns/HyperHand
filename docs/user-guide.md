@@ -44,6 +44,7 @@ This shows one UAC prompt, then:
 2. Installs the automatic Windows service `HyperHandService`, running as `NT SERVICE\HyperHandService`. Only this dedicated account is added to Hyper-V Administrators. It does not add your user account or run the service as LocalSystem.
 3. Registers the HyperHand Hyper-V socket service under `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\3ce544e1-2645-4383-b332-fedf8a18736b`.
 4. Creates or replaces the `HyperHand` logon task for the installing user, using the installed executable with least privilege. This replaces the old highest-privilege task.
+5. Creates or replaces the `HyperHand Console` task for the installing user: it has no trigger, runs `vmconnect.exe localhost "<VM>"` with that user's highest privileges, and is run by the tray to open a VM's console (see [Watch a VM](#watch-a-vm)).
 5. Starts the service and ordinary tray.
 
 Run `install` again from a new release or build to update the installed copies. Keep the service installation separate from normal tray startup: launching the installed executable without `install` does not request UAC or change machine configuration.
@@ -134,6 +135,14 @@ The installer does the same as above: it copies itself to `%LOCALAPPDATA%\HyperH
 - **Unlock password**: Windows can sign the user in and then lock the session, for example after an update. To let `vm_start` and `vm_unlock` unlock it, right-click the HyperHand tray icon and choose **Virtual machines > *VM name* > Set unlock password...**, then enter the password or PIN the guest lock screen asks for (ASCII only). It is stored in Windows Credential Manager for your user as `HyperHand:<VM name>`; **Clear unlock password** removes it. HyperHand types it on the VM's keyboard only after the agent confirms that the sign-in screen's password box has the input, and types it once per call.
 
 Use `vm_status` to see whether the agent answers, whether the session is locked and whether a password is stored.
+
+### Watch a VM
+
+HyperHand works on the VM console without any window open, so `vm_start` starts VMs in the background. To watch what the AI does, right-click the HyperHand tray icon and choose **Virtual machines > *VM name* > Open console**. Check **Open console when started** to have Virtual Machine Connection open whenever `vm_start` starts that VM; the setting is per VM and per user (`%LOCALAPPDATA%\HyperHand\settings.json`). If a console for the VM is already open, it is brought to the front instead of opening a second one, which would ask to take over the connection.
+
+- Virtual Machine Connection needs Hyper-V rights that your everyday (non-elevated) account does not have. The tray opens it through the `HyperHand Console` task, which `install` registered with your highest privileges, so there is no UAC prompt. Your account, its groups and the VM's permissions are not changed.
+- Use a basic session. If the host allows enhanced session mode, the tray warns you: an enhanced session moves the guest session away from the console, and HyperHand's screenshots and input reach the lock screen instead. Turn it off with **View > Enhanced Session** in Virtual Machine Connection, or turn off **Allow enhanced session mode** in the Hyper-V host settings.
+- Typing or clicking in the console window while the AI works mixes your input with the AI's.
 
 ### Allow `admin` exec without a prompt
 
@@ -268,7 +277,7 @@ On the host:
    hyperhand.exe uninstall
    ```
 
-   It requests elevation if needed, stops the installed tray and service, removes `HyperHandService` and its Hyper-V Administrators membership, the `HyperHand` logon task and the Hyper-V socket registration. A protected cleanup helper waits for the installed executable to exit and removes the installed host and agent executables only if their hashes still match.
+   It requests elevation if needed, stops the installed tray and service, removes `HyperHandService` and its Hyper-V Administrators membership, the `HyperHand` logon task, the `HyperHand Console` task and the Hyper-V socket registration. A protected cleanup helper waits for the installed executable to exit and removes the installed host and agent executables only if their hashes still match.
 
    User logs under `%LOCALAPPDATA%\HyperHand`, files inside guests and nonempty `%ProgramData%\HyperHand\service-data` are preserved. When service data remains, `config.json` is retained as the owner marker for reinstallation. Otherwise it removes the owner configuration and empty installation/data directories. It does not claim to remove directories containing other files.
 2. Delete the folder with `hyperhand.exe` (the extracted release or the build directory).

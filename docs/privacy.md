@@ -25,6 +25,8 @@ On the host:
 - Service error log: `%ProgramData%\HyperHand\service-data\broker.log`, with an approximately 1 MiB size limit. Service errors may also appear in the Windows Application event log under `HyperHandService`; use the file log if the event source is unavailable.
 - Unlock passwords set from the tray menu: generic credentials `HyperHand:<VM name>` in Windows Credential Manager, for the current user on this machine (protected by Windows for that user). Remove them with **Clear unlock password** in the tray or in Credential Manager; uninstallation does not remove them.
 - Scheduled task `HyperHand`, created by `hyperhand.exe install` to start the ordinary tray for the installing user at logon, with least privilege.
+- Scheduled task `HyperHand Console`, created by `hyperhand.exe install` for the installing user: no trigger; when run, it starts `vmconnect.exe localhost "<VM>"` with that user's highest privileges (see Access control).
+- `%LOCALAPPDATA%\HyperHand\settings.json`: the VMs whose console opens when `vm_start` starts them.
 - Registry key `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\3ce544e1-2645-4383-b332-fedf8a18736b`, which registers the Hyper-V socket service.
 - Unique `.hyperhand-*.hhpart` files in the destination directory while `vm_pull` writes a file; renamed to the target on completion, deleted on failure.
 
@@ -44,3 +46,5 @@ The MCP server has no authentication. Any local process that can reach `127.0.0.
 The service's named pipe permits the configured owner, SYSTEM, administrators and the service account. This restricts direct broker access; it does **not** authenticate MCP callers or prevent another local process from using the tray's HTTP endpoint. The service exposes specific Hyper-V operations and the fixed guest socket tunnel, not an arbitrary host command execution endpoint. Guest `vm_exec` still runs in the guest.
 
 The tray runs without elevation. The service uses a dedicated virtual account, not LocalSystem, and installation does not add the human user to Hyper-V Administrators. That service account nevertheless has broad Hyper-V management rights, including VM and checkpoint operations. Host UAC settings are not changed.
+
+The `HyperHand Console` task runs Virtual Machine Connection with the installing user's full administrator token, without a UAC prompt. Any process running as that user can run the task, with any text as the VM name: the tray checks the names it passes, but the task itself does not, and quotes in the text can add further `vmconnect.exe` arguments. The task can only start `vmconnect.exe`; within its window, the Hyper-V features it offers (for example inserting media or changing settings) then run with administrator rights, as they would after approving UAC for Virtual Machine Connection yourself. Uninstallation removes the task.

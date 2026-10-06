@@ -266,6 +266,8 @@ func (s *server) handle(c net.Conn) {
 		err = hyperv.Start(r.VM)
 	case "stop":
 		err = hyperv.Stop(r.VM)
+	case "shutdown":
+		err = hyperv.Shutdown(r.VM)
 	case "checkpoints":
 		value, err = hyperv.ListCheckpoints(r.VM)
 	case "checkpoint_create":

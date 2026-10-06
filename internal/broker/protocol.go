@@ -119,7 +119,7 @@ func validateRequest(r request, size int64) error {
 		return errors.New("unexpected broker payload")
 	}
 	switch r.Op {
-	case "list", "find", "start", "stop", "checkpoints", "checkpoint_create", "checkpoint_restore", "screenshot", "keys", "text", "dial":
+	case "list", "find", "start", "stop", "shutdown", "checkpoints", "checkpoint_create", "checkpoint_restore", "screenshot", "keys", "text", "dial":
 	case "click":
 		if r.Button < 1 || r.Button > 3 {
 			return errors.New("invalid mouse button")

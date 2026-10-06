@@ -327,6 +327,15 @@ if ($task) {
  if ([IO.Path]::GetFileName($oldExe) -ine 'hyperhand.exe' -or $task.Actions[0].Arguments) { throw 'Existing task is not a recognized HyperHand tray task' }
  Assert-Path $oldExe
 }
+# GetSystemDirectory, not $env:SystemRoot: the path is kept in a highest-privilege task, and environment variables
+# of the elevated process can come from the user's registry.
+$vmconnect=Join-Path ([Environment]::SystemDirectory) 'vmconnect.exe'
+$consoleTask=Get-ScheduledTask -TaskName 'HyperHand Console' -TaskPath '\' -ErrorAction SilentlyContinue
+if ($consoleTask) {
+ $consoleUser=$consoleTask.Principal.UserId
+ if (-not $consoleUser.StartsWith('S-1-')) { $consoleUser=([Security.Principal.NTAccount]$consoleUser).Translate([Security.Principal.SecurityIdentifier]).Value }
+ if ($consoleUser -ne $OwnerSID -or @($consoleTask.Actions).Count -ne 1 -or $consoleTask.Actions[0].Execute.Trim('"') -ine $vmconnect) { throw 'Existing HyperHand Console task belongs to another user or has unexpected actions' }
+}
 $service=Get-CimInstance Win32_Service -Filter "Name='HyperHandService'"
 $serviceCommand='"'+$hostExe+'" service'
 if ($service -and ($service.PathName -ine $serviceCommand -or $service.StartName -ine $serviceAccount)) { throw 'Existing service has unexpected binary or account' }
@@ -383,6 +392,14 @@ if ($Operation -eq 'install') {
  Register-ScheduledTask -TaskName 'HyperHand' -TaskPath '\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
  $installedTask=Get-ScheduledTask -TaskName 'HyperHand' -TaskPath '\'
  if ($installedTask.Principal.RunLevel -ne 'Limited') { throw 'Logon task is not limited' }
+ # On demand only (no trigger): the tray runs it with a VM name to open VMConnect with the owner's full token,
+ # since VMConnect needs Hyper-V rights that the owner's filtered token lacks. Its only action is vmconnect.exe.
+ $consoleAction=New-ScheduledTaskAction -Execute $vmconnect -Argument 'localhost "$(Arg0)"'
+ $consolePrincipal=New-ScheduledTaskPrincipal -UserId $OwnerSID -LogonType Interactive -RunLevel Highest
+ $consoleSettings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances Parallel
+ Register-ScheduledTask -TaskName 'HyperHand Console' -TaskPath '\' -Action $consoleAction -Principal $consolePrincipal -Settings $consoleSettings -Force | Out-Null
+ $installedConsole=Get-ScheduledTask -TaskName 'HyperHand Console' -TaskPath '\'
+ if (@($installedConsole.Actions).Count -ne 1 -or $installedConsole.Actions[0].Execute -ine $vmconnect -or ($installedConsole.Triggers | Measure-Object).Count -ne 0) { throw 'Console task verification failed' }
  Start-ScheduledTask -TaskName 'HyperHand' -TaskPath '\'
 } else {
  $hostHash='missing'
@@ -391,6 +408,7 @@ if ($Operation -eq 'install') {
  if (Test-Path -LiteralPath $agentExe) { $agentHash=(Get-FileHash -LiteralPath $agentExe -Algorithm SHA256).Hash }
  Stop-Broker
  if ($task) { Stop-ScheduledTask -TaskName 'HyperHand' -TaskPath '\'; Unregister-ScheduledTask -TaskName 'HyperHand' -TaskPath '\' -Confirm:$false }
+ if ($consoleTask) { Unregister-ScheduledTask -TaskName 'HyperHand Console' -TaskPath '\' -Confirm:$false }
  Stop-ExactProcesses @($hostExe,$oldExe)
  if ($service) {
   $serviceSID=([Security.Principal.NTAccount]$serviceAccount).Translate([Security.Principal.SecurityIdentifier]).Value
