@@ -8,13 +8,7 @@
 package main
 
 import (
-	"bytes"
-	"encoding/base64"
-	"encoding/binary"
 	"fmt"
-	"image"
-	"image/color"
-	"image/png"
 	"io"
 	"os"
 	"os/exec"
@@ -23,14 +17,15 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode/utf16"
 
-	"fyne.io/systray"
+	"github.com/rodrigocfd/windigo/co"
+	"github.com/rodrigocfd/windigo/win"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
 	"hyperhand/internal/agent"
 	"hyperhand/internal/hvsock"
+	"hyperhand/internal/tray"
 )
 
 var mutex windows.Handle
@@ -71,19 +66,42 @@ func main() {
 		}()
 	}
 	agent.AfterUpdate = restart
-	systray.Run(onReady, nil)
+	const cmdQuit = 1
+	items := func(status string) []tray.Item {
+		return []tray.Item{{ID: 2, Text: status, Disabled: true}, {ID: cmdQuit, Text: "退出"}}
+	}
+	tr := tray.New("HyperHand", items("等待宿主机连接"))
+	tr.OnCommand = func(id int) {
+		if id == cmdQuit {
+			tr.Quit()
+		}
+	}
+	serve(func(status string) { tr.SetItems(items(status)) })
+	icon, err := smallIcon()
+	if err == nil {
+		tr.Icon = icon
+		err = tr.Run() // returns nil after 退出
+		icon.DestroyIcon()
+	}
+	if err != nil {
+		select {} // without a tray icon, keep serving the host
+	}
 }
 
-func onReady() {
-	systray.SetIcon(makeIcon())
-	systray.SetTooltip("HyperHand")
-	status := systray.AddMenuItem("等待宿主机连接", "")
-	status.Disable()
-	quit := systray.AddMenuItem("退出", "")
-	go func() {
-		<-quit.ClickedCh
-		systray.Quit()
-	}()
+// smallIcon loads the icon in the executable's resources (winres/winres.json) at the small icon size. The agent has
+// no manifest selecting Common Controls 6, which LoadIconMetric needs, so it uses LoadImage.
+func smallIcon() (win.HICON, error) {
+	inst, err := win.GetModuleHandle("")
+	if err != nil {
+		return 0, err
+	}
+	h, err := inst.LoadImage(win.ResIdInt(1), co.IMAGE_ICON,
+		int(win.GetSystemMetrics(co.SM_CXSMICON)), int(win.GetSystemMetrics(co.SM_CYSMICON)), co.LR_DEFAULTCOLOR)
+	return win.HICON(h), err
+}
+
+// serve answers the host on the Hyper-V socket in the background and reports the connection state.
+func serve(status func(string)) {
 	go func() {
 		for {
 			l, err := hvsock.Listen()
@@ -96,10 +114,10 @@ func onReady() {
 				if err != nil {
 					break
 				}
-				status.SetTitle("宿主机已连接")
+				status("宿主机已连接")
 				agent.Serve(c)
 				c.Close()
-				status.SetTitle("等待宿主机连接")
+				status("等待宿主机连接")
 			}
 			l.Close()
 			time.Sleep(time.Second)
@@ -186,20 +204,19 @@ func uninstall() {
 
 	self, _ := os.Executable()
 	for _, dir := range []string{filepath.Join(os.Getenv("LOCALAPPDATA"), "HyperHand"), `C:\Users\Public\HyperHand`} {
-		inside := self != "" && strings.HasPrefix(strings.ToLower(self), strings.ToLower(dir)+`\`)
-		err := os.RemoveAll(dir) // removes what it can even when some entries fail
-		switch {
-		case err == nil:
-			done = append(done, dir)
-		case inside: // our own exe is locked until we exit
-			c := cleanupCommand(dir, os.Getpid())
-			if err := c.Start(); err != nil {
+		if self != "" && strings.HasPrefix(strings.ToLower(self), strings.ToLower(dir)+`\`) {
+			moved, err := moveOut(self, os.TempDir())
+			if err != nil {
 				failed = append(failed, dir+": "+err.Error())
-			} else {
-				done = append(done, dir+"（本程序退出后删除）")
+				continue
 			}
-		default:
+			self = moved
+			done = append(done, "本程序已移到 "+moved+"（之后可直接删除）")
+		}
+		if err := os.RemoveAll(dir); err != nil { // removes what it can even when some entries fail
 			failed = append(failed, dir+": "+err.Error())
+		} else {
+			done = append(done, dir)
 		}
 	}
 
@@ -212,26 +229,14 @@ func uninstall() {
 	windows.MessageBox(0, windows.StringToUTF16Ptr(msg), windows.StringToUTF16Ptr("HyperHand 卸载"), flags)
 }
 
-// cleanupCommand waits for the uninstaller (including its message box) to exit.
-func cleanupCommand(dir string, pid int) *exec.Cmd {
-	script := `$ErrorActionPreference = 'Stop'
-try { $process = [System.Diagnostics.Process]::GetProcessById(` + strconv.Itoa(pid) + `) }
-catch [System.ArgumentException] { $process = $null }
-if ($null -ne $process) { $process.WaitForExit(); $process.Dispose() }
-$target = '` + strings.ReplaceAll(dir, "'", "''") + `'
-for ($attempt = 0; $attempt -lt 20; $attempt++) {
-    try {
-        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
-        exit 0
-    } catch { Start-Sleep -Milliseconds 250 }
-}
-exit 1`
-	var encoded bytes.Buffer
-	binary.Write(&encoded, binary.LittleEndian, utf16.Encode([]rune(script)))
-	c := hidden("powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.StdEncoding.EncodeToString(encoded.Bytes()))
-	// Do not inherit a working directory that the helper itself must remove.
-	c.Dir = filepath.Dir(dir)
-	return c
+// moveOut moves the running executable exe into dir, so that the folder it was in can be deleted now. Windows does
+// not delete the file of a running program, but renames it on the same volume, as update_agent does.
+func moveOut(exe, dir string) (string, error) {
+	dst := filepath.Join(dir, fmt.Sprintf("hyperhand-agent-uninstalled-%d.exe", os.Getpid()))
+	if err := os.Rename(exe, dst); err != nil {
+		return "", err
+	}
+	return dst, nil
 }
 
 func samePath(a, b string) bool {
@@ -255,29 +260,4 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return out.Close()
-}
-
-// makeIcon returns a 32x32 .ico (PNG-compressed entry): a blue rounded square with a white dot.
-func makeIcon() []byte {
-	img := image.NewNRGBA(image.Rect(0, 0, 32, 32))
-	for y := 0; y < 32; y++ {
-		for x := 0; x < 32; x++ {
-			dx, dy := float64(x)-15.5, float64(y)-15.5
-			switch {
-			case dx*dx+dy*dy < 36:
-				img.Set(x, y, color.White)
-			case (x > 1 && x < 30 && y > 1 && y < 30):
-				img.Set(x, y, color.NRGBA{0x1e, 0x6f, 0xd9, 0xff})
-			}
-		}
-	}
-	var p bytes.Buffer
-	png.Encode(&p, img)
-	var b bytes.Buffer
-	binary.Write(&b, binary.LittleEndian, []uint16{0, 1, 1}) // reserved, type=icon, count
-	b.Write([]byte{32, 32, 0, 0})                            // width, height, colors, reserved
-	binary.Write(&b, binary.LittleEndian, []uint16{1, 32})   // planes, bpp
-	binary.Write(&b, binary.LittleEndian, []uint32{uint32(p.Len()), 22})
-	b.Write(p.Bytes())
-	return b.Bytes()
 }

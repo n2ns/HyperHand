@@ -43,7 +43,7 @@ HyperHand consists of two Windows executables.
 
 - The agent serves one host connection at a time. When it ends, the agent waits for the next one.
 - If the Hyper-V socket listener cannot be created, or accepting fails, the agent retries after 1 s.
-- The agent tray menu shows `等待宿主机连接` (waiting for the host) or `宿主机已连接` (host connected), and a `退出` (quit) item.
+- The agent tray icon (the gripper icon, also the executable's icon) opens a menu on a left or right click: `等待宿主机连接` (waiting for the host) or `宿主机已连接` (host connected), and a `退出` (quit) item. Like the host tray (see 9.1), it is added at once at logon and retried every 5 seconds and whenever the taskbar is created; the agent serves the host whether or not the icon could be shown.
 
 ## 2. VM Selection
 
@@ -332,7 +332,7 @@ Because step 3 types blindly, a failure there is visible only on screen; the too
 
 - It stops every other running `hyperhand-agent.exe`.
 - It deletes the `HyperHandAgent` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
-- It deletes `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`; a folder it is running from is removed right after it exits.
+- It deletes `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`. The file of a running program cannot be deleted but can be renamed on its volume, so before deleting the folder it is running from it moves its own executable to `%TEMP%\hyperhand-agent-uninstalled-<pid>.exe`, where it remains. No script or helper process is started.
 - It shows a message box listing what was removed.
 
 ### 8.3 Single instance and startup

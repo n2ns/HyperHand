@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,74 +9,59 @@ import (
 	"time"
 )
 
-func TestCleanupWaitingProcess(t *testing.T) {
-	if os.Getenv("HYPERHAND_CLEANUP_TEST_PROCESS") == "1" {
+func TestUninstallRunningProcess(t *testing.T) {
+	if os.Getenv("HYPERHAND_UNINSTALL_TEST_PROCESS") == "1" {
 		time.Sleep(time.Minute)
 		os.Exit(0)
 	}
 }
 
-func TestCleanupWaitsForExit(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "HyperHand ' & [测试]")
+// The folder of a running agent can be deleted at once after its executable has been moved out.
+func TestMoveOutLetsFolderBeDeleted(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "HyperHand ' & [测试]")
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	file := filepath.Join(dir, "agent.exe")
-	if err := os.WriteFile(file, []byte("keep until exit"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	child := exec.Command(os.Args[0], "-test.run=^TestCleanupWaitingProcess$")
-	child.Env = append(os.Environ(), "HYPERHAND_CLEANUP_TEST_PROCESS=1")
+	exe := filepath.Join(dir, "hyperhand-agent.exe")
+	copyTestBinary(t, exe)
+	child := exec.Command(exe, "-test.run=^TestUninstallRunningProcess$")
+	child.Env = append(os.Environ(), "HYPERHAND_UNINSTALL_TEST_PROCESS=1")
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { child.Process.Kill(); child.Wait() })
-	cleanup := cleanupCommand(dir, child.Process.Pid)
-	if err := cleanup.Start(); err != nil {
+	time.Sleep(200 * time.Millisecond)
+	if err := os.RemoveAll(dir); err == nil {
+		t.Fatal("deleted the executable of a running process")
+	}
+	moved, err := moveOut(exe, base)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { cleanup.Process.Kill() })
-	finished := make(chan error, 1)
-	go func() { finished <- cleanup.Wait() }()
-	select {
-	case err := <-finished:
-		t.Fatalf("cleanup exited before the process: %v", err)
-	case <-time.After(3 * time.Second):
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("folder not deleted after moving the executable out: %v", err)
 	}
-	if _, err := os.Stat(file); err != nil {
-		t.Fatalf("file removed while process was alive: %v", err)
-	}
-	if err := child.Process.Kill(); err != nil {
+	if _, err := os.Stat(moved); err != nil {
 		t.Fatal(err)
-	}
-	child.Wait()
-	select {
-	case err := <-finished:
-		if err != nil {
-			t.Fatalf("cleanup failed after process exit: %v", err)
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("cleanup did not finish after process exit")
-	}
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("directory remains after process exit: %v", err)
 	}
 }
 
-func TestCleanupAlreadyExitedProcess(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "HyperHand")
-	if err := os.Mkdir(dir, 0o755); err != nil {
+func copyTestBinary(t *testing.T, dst string) {
+	t.Helper()
+	in, err := os.Open(os.Args[0])
+	if err != nil {
 		t.Fatal(err)
 	}
-	child := exec.Command(os.Args[0], "-test.run=^TestCleanupWaitingProcess$")
-	if err := child.Run(); err != nil {
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
 		t.Fatal(err)
 	}
-	cleanup := cleanupCommand(dir, child.Process.Pid)
-	if out, err := cleanup.CombinedOutput(); err != nil {
-		t.Fatalf("cleanup after process exit failed: %v\n%s", err, out)
+	if _, err := io.Copy(out, in); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("directory remains: %v", err)
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -25,6 +26,7 @@ import (
 	"hyperhand/internal/broker"
 	"hyperhand/internal/host"
 	"hyperhand/internal/proto"
+	"hyperhand/internal/tray"
 )
 
 func main() {
@@ -83,20 +85,32 @@ func main() {
 	defer windows.CloseHandle(mutex)
 
 	settings := loadHostSettings(filepath.Join(dir, "settings.json"))
-	tr := &tray{tip: "HyperHand"}
+	const cmdSettings, cmdRestart, cmdQuit = 1, 2, 3
+	tr := tray.New("HyperHand", []tray.Item{{ID: cmdSettings, Text: "Settings..."}, {}, {ID: cmdRestart, Text: "Restart"}, {ID: cmdQuit, Text: "Quit"}})
+	var restart atomic.Bool
 	info := &trayInfo{
 		port:     mcpPort(*portFlag, explicitPort, settings.port()),
 		explicit: explicitPort,
 		settings: settings,
-		restart:  func() { tr.quit(true) },
+		restart:  func() { restart.Store(true); tr.Quit() },
 	}
-	tr.info = info
+	tr.OnSelect = func() { showSettings(info) }
+	tr.OnCommand = func(id int) {
+		switch id {
+		case cmdSettings:
+			showSettings(info)
+		case cmdRestart:
+			info.restart()
+		case cmdQuit:
+			tr.Quit()
+		}
+	}
 	url := info.url()
 	var httpServer *http.Server
 	if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", info.port)); err != nil {
 		log.Print(err)
 		info.listenErr = err.Error()
-		tr.setTip("HyperHand: MCP server not running, see Settings")
+		tr.SetTip("HyperHand: MCP server not running, see Settings")
 	} else {
 		srv := host.NewServer(&host.Manager{AfterStart: func(vm string) {
 			if settings.onStart(vm) {
@@ -115,15 +129,24 @@ func main() {
 		go func() {
 			if _, err := (&broker.Client{}).ListVMs(); err != nil {
 				log.Print("Hyper-V service unavailable: ", err)
-				tr.setTip("HyperHand: background service unavailable, see Settings")
+				tr.SetTip("HyperHand: background service unavailable, see Settings")
 			}
 		}()
 	}
-	restart := tr.run()
+	icon, err := appIcon(limSmall) // the notification area shows small icons
+	if err != nil {
+		log.Print("tray: ", err)
+	} else {
+		tr.Icon = icon
+		if err := tr.Run(); err != nil {
+			log.Print("tray: ", err)
+		}
+		icon.DestroyIcon()
+	}
 	if httpServer != nil {
 		httpServer.Close()
 	}
-	if restart {
+	if restart.Load() {
 		if err := startReplacement(*portFlag, explicitPort); err != nil {
 			log.Print("restart: ", err)
 			msgBox("HyperHand restart failed:\n"+err.Error(), windows.MB_ICONERROR)

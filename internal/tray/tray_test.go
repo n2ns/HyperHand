@@ -1,4 +1,4 @@
-package main
+package tray
 
 import (
 	"bytes"
@@ -246,17 +246,6 @@ func TestNotifyIconRemove(t *testing.T) {
 	n.remove()
 	if !equal(msgs(f.take()), []uint32{nimDelete}) {
 		t.Error("remove did not send NIM_DELETE")
-	}
-}
-
-// The application icon is in the executable's resources at both sizes the tray and settings window load.
-func TestAppIcon(t *testing.T) {
-	for _, lims := range []int{limSmall, limLarge} {
-		h, err := appIcon(lims)
-		if err != nil {
-			t.Fatal(err)
-		}
-		h.DestroyIcon()
 	}
 }
 

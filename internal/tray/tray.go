@@ -1,4 +1,10 @@
-package main
+// Package tray shows a notification area icon with a menu, for the host tray and the guest agent.
+//
+// It follows "The Taskbar - Taskbar Creation Notification" and the Shell_NotifyIcon documentation: it adds the icon
+// at once without waiting for the taskbar, retries a failed NIM_ADD, adds the icon again whenever the taskbar
+// broadcasts TaskbarCreated (explorer restart, or a DPI change on Windows 10), and selects NOTIFYICON_VERSION_4 after
+// every NIM_ADD. The icon is identified by hWnd + uID, not a GUID, because GUID icons are bound to the executable path.
+package tray
 
 import (
 	"fmt"
@@ -13,11 +19,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// The tray follows "The Taskbar - Taskbar Creation Notification" and the Shell_NotifyIcon documentation: it adds the
-// icon at once without waiting for the taskbar, retries a failed NIM_ADD, adds the icon again whenever the taskbar
-// broadcasts TaskbarCreated (explorer restart, or a DPI change on Windows 10), and selects NOTIFYICON_VERSION_4 after
-// every NIM_ADD. The icon is identified by hWnd + uID, not a GUID, because GUID icons are bound to the executable path.
-
 // Shell_NotifyIcon messages and NOTIFYICONDATA values from shellapi.h.
 const (
 	nimAdd, nimModify, nimDelete, nimSetVersion = 0, 1, 2, 4
@@ -29,16 +30,10 @@ const (
 
 const (
 	trayCallback   = co.WM_APP + 1 // the icon's uCallbackMessage
-	trayTip        = co.WM_APP + 2 // posted by setTip from other goroutines
+	trayTip        = co.WM_APP + 2 // posted by SetTip from other goroutines
 	trayRetryTimer = 1
 	trayRetryMs    = 5000
 	trayClass      = "HyperHandTray"
-)
-
-const (
-	cmdSettings = iota + 1
-	cmdRestart
-	cmdQuit
 )
 
 // notifyIconData is NOTIFYICONDATAW. windigo's winsh.NOTIFYICONDATA cannot set uVersion, which NIM_SETVERSION needs.
@@ -62,6 +57,7 @@ type notifyIconData struct {
 
 var (
 	shell32            = windows.NewLazySystemDLL("shell32.dll")
+	user32             = windows.NewLazySystemDLL("user32.dll")
 	pShellNotifyIconW  = shell32.NewProc("Shell_NotifyIconW")
 	pAppendMenuW       = user32.NewProc("AppendMenuW")
 	trayWndProcPointer = syscall.NewCallback(trayWndProc)
@@ -157,28 +153,39 @@ func (n *notifyIcon) remove() {
 	}
 }
 
-// tray is the notification area icon, its menu and the hidden top-level window that owns them (a message-only
-// window would not receive the TaskbarCreated broadcast). run runs on one locked OS thread; setTip and quit may be
-// called from any goroutine.
-type tray struct {
-	info *trayInfo
+// Item is a menu item; ID 0 is a separator.
+type Item struct {
+	ID       int
+	Text     string
+	Disabled bool
+}
 
-	mu      sync.Mutex
-	hwnd    win.HWND // the window while it exists
-	tip     string
-	stop    bool // quit was called
-	restart bool
+// Tray is the notification area icon and the hidden top-level window that owns it (a message-only window would not
+// receive the TaskbarCreated broadcast). Run runs on one locked OS thread, which also calls OnSelect and OnCommand;
+// SetTip, SetItems and Quit may be called from any goroutine. There is one per process.
+type Tray struct {
+	Icon      win.HICON    // the small icon to show; the caller destroys it after Run
+	OnSelect  func()       // left click, or Space / Enter on the icon; nil shows the menu
+	OnCommand func(id int) // a menu item was chosen
+
+	mu    sync.Mutex
+	hwnd  win.HWND // the window while it exists
+	tip   string
+	items []Item
+	stop  bool // Quit was called
 
 	// Tray thread only.
 	icon           *notifyIcon
-	menu           win.HMENU
 	taskbarCreated co.WM
 }
 
-var theTray *tray // the tray of trayWndProc; there is one per process
+var theTray *Tray // the tray of trayWndProc
 
-// setTip sets the tooltip; before the window exists it becomes the initial tooltip.
-func (t *tray) setTip(tip string) {
+// New makes a tray with an initial tooltip and right-click menu.
+func New(tip string, items []Item) *Tray { return &Tray{tip: tip, items: items} }
+
+// SetTip sets the tooltip; before the window exists it becomes the initial tooltip.
+func (t *Tray) SetTip(tip string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.tip = tip
@@ -187,109 +194,80 @@ func (t *tray) setTip(tip string) {
 	}
 }
 
-// quit ends run; with restart, run reports that a replacement should start.
-func (t *tray) quit(restart bool) {
+// SetItems replaces the menu items; the menu shows them the next time it opens.
+func (t *Tray) SetItems(items []Item) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.items = items
+}
+
+// Quit removes the icon and ends Run.
+func (t *Tray) Quit() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.stop = true
-	t.restart = t.restart || restart
 	if t.hwnd != 0 {
 		t.hwnd.PostMessage(co.WM_CLOSE, 0, 0)
 	}
 }
 
-// run shows the icon until quit and reports whether to restart. If the window cannot be created it logs why and
-// returns at once.
-func (t *tray) run() (restart bool) {
+// Run shows the icon until Quit. If the window cannot be created it returns the error at once.
+func (t *Tray) Run() error {
 	runtime.LockOSThread() // the window and its message loop belong to this thread
 	defer runtime.UnlockOSThread()
-	hIcon, err := t.create()
-	if hIcon != 0 {
-		defer hIcon.DestroyIcon()
+	if err := t.create(); err != nil {
+		return err
 	}
-	if t.menu != 0 {
-		defer t.menu.DestroyMenu()
-	}
-	if err != nil {
-		log.Print("tray: ", err)
-	} else {
-		var msg win.MSG
-		for {
-			r, err := win.GetMessage(&msg, 0, 0, 0)
-			if err != nil {
-				log.Print("tray: GetMessage: ", err)
-				break
-			}
-			if r == 0 { // WM_QUIT
-				break
-			}
-			win.TranslateMessage(&msg)
-			win.DispatchMessage(&msg)
+	var msg win.MSG
+	for {
+		r, err := win.GetMessage(&msg, 0, 0, 0)
+		if err != nil {
+			return fmt.Errorf("GetMessage: %w", err)
 		}
+		if r == 0 { // WM_QUIT
+			return nil
+		}
+		win.TranslateMessage(&msg)
+		win.DispatchMessage(&msg)
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.restart
 }
 
-// create makes the menu and the hidden window and adds the icon.
-func (t *tray) create() (win.HICON, error) {
+// create makes the hidden window and adds the icon.
+func (t *Tray) create() error {
 	var err error
 	if t.taskbarCreated, err = win.RegisterWindowMessage("TaskbarCreated"); err != nil {
-		return 0, fmt.Errorf("RegisterWindowMessage: %w", err)
-	}
-	hIcon, err := appIcon(limSmall) // the notification area shows small icons
-	if err != nil {
-		return 0, err
-	}
-	if t.menu, err = win.CreatePopupMenu(); err != nil {
-		return hIcon, fmt.Errorf("CreatePopupMenu: %w", err)
-	}
-	for _, item := range []struct {
-		id   int
-		text string
-	}{{cmdSettings, "Settings..."}, {0, ""}, {cmdRestart, "Restart"}, {cmdQuit, "Quit"}} {
-		const mfString, mfSeparator = 0x0000, 0x0800
-		flags, text := uintptr(mfString), (*uint16)(nil)
-		if item.id == 0 {
-			flags = mfSeparator
-		} else {
-			text, _ = windows.UTF16PtrFromString(item.text)
-		}
-		if r, _, e := pAppendMenuW.Call(uintptr(t.menu), flags, uintptr(item.id), uintptr(unsafe.Pointer(text))); r == 0 {
-			return hIcon, fmt.Errorf("AppendMenu: %w", e)
-		}
+		return fmt.Errorf("RegisterWindowMessage: %w", err)
 	}
 	inst, err := win.GetModuleHandle("")
 	if err != nil {
-		return hIcon, fmt.Errorf("GetModuleHandle: %w", err)
+		return fmt.Errorf("GetModuleHandle: %w", err)
 	}
 	class, _ := windows.UTF16PtrFromString(trayClass)
 	wc := win.WNDCLASSEX{LpfnWndProc: trayWndProcPointer, HInstance: inst, LpszClassName: class}
 	if _, err := win.RegisterClassEx(&wc); err != nil {
-		return hIcon, fmt.Errorf("RegisterClassEx: %w", err)
+		return fmt.Errorf("RegisterClassEx: %w", err)
 	}
 	theTray = t
 	// A top-level window without WS_VISIBLE: hidden, but it receives broadcasts.
 	hwnd, err := win.CreateWindowEx(0, win.ClassNameStr(trayClass), "HyperHand", co.WS_OVERLAPPED,
 		win.POINT{}, win.SIZE{}, 0, 0, inst, 0)
 	if err != nil {
-		return hIcon, fmt.Errorf("CreateWindowEx: %w", err)
+		return fmt.Errorf("CreateWindowEx: %w", err)
 	}
 	t.mu.Lock()
 	t.hwnd = hwnd
 	tip, stop := t.tip, t.stop
 	t.mu.Unlock()
-	t.icon = newNotifyIcon(hwnd, hIcon, tip, shellNotifyIcon)
-	if stop { // quit came before the window existed
+	t.icon = newNotifyIcon(hwnd, t.Icon, tip, shellNotifyIcon)
+	if stop { // Quit came before the window existed
 		hwnd.DestroyWindow()
-		return hIcon, nil
+		return nil
 	}
 	t.retryTimer(hwnd, t.icon.add())
-	return hIcon, nil
+	return nil
 }
 
-func (t *tray) retryTimer(hwnd win.HWND, retry bool) {
+func (t *Tray) retryTimer(hwnd win.HWND, retry bool) {
 	if retry {
 		hwnd.SetTimer(trayRetryTimer, trayRetryMs) // replaces a running one
 	} else {
@@ -304,7 +282,7 @@ func trayWndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	return hwnd.DefWindowProc(co.WM(msg), win.WPARAM(wParam), win.LPARAM(lParam))
 }
 
-func (t *tray) handle(hwnd win.HWND, msg co.WM, wParam, lParam uintptr) bool {
+func (t *Tray) handle(hwnd win.HWND, msg co.WM, wParam, lParam uintptr) bool {
 	switch msg {
 	case t.taskbarCreated:
 		t.retryTimer(hwnd, t.icon.taskbarCreated())
@@ -312,7 +290,11 @@ func (t *tray) handle(hwnd win.HWND, msg co.WM, wParam, lParam uintptr) bool {
 		// Version 4: LOWORD(lParam) is the event; wParam holds the anchor point as GET_X_LPARAM / GET_Y_LPARAM.
 		switch uint16(lParam) {
 		case ninSelect, ninKeySelect: // left click, or Space / Enter on the selected icon
-			showSettings(t.info)
+			if t.OnSelect != nil {
+				t.OnSelect()
+			} else { // the anchor point is in wParam for these events too
+				t.showMenu(hwnd, int(int16(wParam)), int(int16(wParam>>16)))
+			}
 		case uint16(co.WM_CONTEXTMENU): // right click, Shift+F10 or the menu key
 			t.showMenu(hwnd, int(int16(wParam)), int(int16(wParam>>16)))
 		}
@@ -339,22 +321,43 @@ func (t *tray) handle(hwnd win.HWND, msg co.WM, wParam, lParam uintptr) bool {
 	return true
 }
 
-// showMenu shows the tray menu at (x, y) as TrackPopupMenu documents for notification icons: the window comes to
-// the foreground first, so the menu closes when the user clicks elsewhere, and WM_NULL is posted afterwards.
-func (t *tray) showMenu(hwnd win.HWND, x, y int) {
+// showMenu shows the current menu items at (x, y) as TrackPopupMenu documents for notification icons: the window
+// comes to the foreground first, so the menu closes when the user clicks elsewhere, and WM_NULL is posted afterwards.
+func (t *Tray) showMenu(hwnd win.HWND, x, y int) {
+	t.mu.Lock()
+	items := t.items
+	t.mu.Unlock()
+	menu, err := win.CreatePopupMenu()
+	if err != nil {
+		log.Print("tray: CreatePopupMenu: ", err)
+		return
+	}
+	defer menu.DestroyMenu()
+	for _, item := range items {
+		const mfString, mfGrayed, mfSeparator = 0x0000, 0x0001, 0x0800
+		flags, text := uintptr(mfString), (*uint16)(nil)
+		switch {
+		case item.ID == 0:
+			flags = mfSeparator
+		case item.Disabled:
+			flags = mfString | mfGrayed
+		}
+		if item.ID != 0 {
+			text, _ = windows.UTF16PtrFromString(item.Text)
+		}
+		if r, _, e := pAppendMenuW.Call(uintptr(menu), flags, uintptr(item.ID), uintptr(unsafe.Pointer(text))); r == 0 {
+			log.Print("tray: AppendMenu: ", e)
+			return
+		}
+	}
 	hwnd.SetForegroundWindow()
 	flags := co.TPM_RIGHTBUTTON | co.TPM_RETURNCMD | co.TPM_NONOTIFY
 	if win.GetSystemMetrics(co.SM_MENUDROPALIGNMENT) != 0 {
 		flags |= co.TPM_RIGHTALIGN
 	}
-	cmd, _ := t.menu.TrackPopupMenu(flags, x, y, hwnd) // 0 when cancelled
+	cmd, _ := menu.TrackPopupMenu(flags, x, y, hwnd) // 0 when cancelled
 	hwnd.PostMessage(co.WM_NULL, 0, 0)
-	switch cmd {
-	case cmdSettings:
-		showSettings(t.info)
-	case cmdRestart:
-		t.quit(true)
-	case cmdQuit:
-		t.quit(false)
+	if cmd != 0 && t.OnCommand != nil {
+		t.OnCommand(cmd)
 	}
 }
