@@ -21,8 +21,9 @@ type shellCall struct {
 
 // fakeShell stands in for Shell_NotifyIconW: NIM_ADD returns the queued results (then true), everything else true.
 type fakeShell struct {
-	calls []shellCall
-	adds  []bool
+	calls    []shellCall
+	adds     []bool
+	versions []bool // queued NIM_SETVERSION results, then true
 }
 
 func (f *fakeShell) call(msg uint32, d *notifyIconData) bool {
@@ -30,6 +31,11 @@ func (f *fakeShell) call(msg uint32, d *notifyIconData) bool {
 	if msg == nimAdd && len(f.adds) > 0 {
 		ok := f.adds[0]
 		f.adds = f.adds[1:]
+		return ok
+	}
+	if msg == nimSetVersion && len(f.versions) > 0 {
+		ok := f.versions[0]
+		f.versions = f.versions[1:]
 		return ok
 	}
 	return true
@@ -254,4 +260,23 @@ func TestTrayIconResource(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.DestroyIcon()
+}
+
+// Without NIM_SETVERSION 4 the icon reports clicks in the old format, which the tray does not handle; it counts as
+// not added, so the timer deletes and adds it again.
+func TestNotifyIconSetVersionFailureRetries(t *testing.T) {
+	n, f, _ := newTestIcon(t)
+	f.versions = []bool{false}
+	if !n.add() {
+		t.Fatal("no retry after NIM_SETVERSION failed")
+	}
+	f.take()
+	if n.retry() {
+		t.Fatal("still retrying after a full add")
+	}
+	calls := f.take()
+	if got := msgs(calls); !equal(got, []uint32{nimDelete, nimAdd, nimSetVersion}) {
+		t.Fatalf("retry calls %v", got)
+	}
+	checkFullAdd(t, calls, "HyperHand")
 }

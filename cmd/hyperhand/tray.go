@@ -111,7 +111,9 @@ func (n *notifyIcon) add() (retry bool) {
 		n.shell(nimDelete, &n.data)
 	}
 	n.tried = true
-	if !n.shell(nimAdd, &n.data) {
+	// Without version 4 the icon reports clicks in a format the tray does not handle, so that counts as a failure
+	// too: the next retry deletes the icon and adds it again.
+	if !n.shell(nimAdd, &n.data) || !n.shell(nimSetVersion, &n.data) {
 		n.added = false
 		n.failures++
 		if n.failures == 1 {
@@ -124,9 +126,6 @@ func (n *notifyIcon) add() (retry bool) {
 		n.failures = 0
 	}
 	n.added = true
-	if !n.shell(nimSetVersion, &n.data) {
-		log.Print("tray: NIM_SETVERSION 4 failed")
-	}
 	return false
 }
 
