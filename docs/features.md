@@ -90,7 +90,8 @@ These tools use Hyper-V on the host and do not need the agent, except for the re
 - An unknown name fails with `checkpoint not found: <name>`.
 - The VM is resolved before the restore, so an empty `vm` still refers to the same VM after it stops running.
 - After the restore the agent client is discarded.
-- `start` (default `true`): if the VM is not `Running` after the restore, it is started. A production checkpoint restores to Off and a standard one to Saved; both are started. With `start` = `false` the VM is left as restored.
+- `start` (default `true`): if the VM is not `Running` after the restore, HyperHand starts it. With `start` = `false`, HyperHand skips this additional start operation and leaves the state produced by Hyper-V; it does not force Off or Saved. A running standard checkpoint can restore directly to Running. Standard checkpoints preserve memory state, whereas production checkpoints do not; see [Microsoft's checkpoint guide](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/checkpoints).
+- Restore does not wait for an unlocked desktop or invoke the automatic console-opening hook. Check `vm_status` and call `vm_start` if desktop readiness is required.
 
 ### 3.6 PowerShell-based operations
 

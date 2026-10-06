@@ -18,7 +18,7 @@ HyperHand has two executables and three roles:
 - **Screen, mouse and keyboard from the host**: screenshots at the guest's resolution, clicks, drag, wheel, typing and key combinations. Works on the login screen and UAC prompts too, since it does not depend on anything running in the guest.
 - **Commands in the guest**: run PowerShell or cmd in the user's desktop session and get the exit code, stdout and stderr back; optionally elevated.
 - **File transfer**: copy files or whole directories in either direction, streamed at hundreds of MB/s. Uploads skip files whose SHA-256 already matches the guest copy.
-- **Checkpoints**: list, create and restore; a restored VM is started again automatically.
+- **Checkpoints**: list, create and restore; optionally start the VM if it is not running after restoration.
 - **Clipboard, windows and waiting**: read and write the guest clipboard, select a unique window by title, handle or PID, bring it to the front, and wait for process, file or window conditions.
 - **Start to a usable desktop**: `vm_start` waits until the agent answers and the session is unlocked. If Windows locked the session after signing in, it types the unlock password you stored in the tray; `vm_status` reports power, agent and lock state.
 - **No guest network; guest password optional**: host and agent talk over a Hyper-V socket; the agent is copied in with Hyper-V's guest file copy and installed from the keyboard. A guest password is needed only if you want HyperHand to unlock a locked session; it stays in Windows Credential Manager on the host.
@@ -82,7 +82,7 @@ Every tool takes an optional `vm` (VM name). Without it, the only running VM is 
 | `vm_list`, `vm_start` | List VMs with their state; start and wait until the desktop is usable (unlocking it with the stored password) |
 | `vm_shutdown`, `vm_turn_off` | Shut the guest down normally and wait until the VM is off (fails, without turning it off, if a program blocks shutdown); turn the VM off immediately, like pulling the plug |
 | `vm_status`, `vm_unlock` | Report power state, agent, session lock state and whether an unlock password is stored; unlock a locked session with the stored password |
-| `vm_checkpoints`, `vm_checkpoint`, `vm_restore` | List, create and restore checkpoints (exact names); restore starts the VM unless `start` is false |
+| `vm_checkpoints`, `vm_checkpoint`, `vm_restore` | List, create and restore checkpoints (exact names); restore starts a VM that is not running unless `start` is false |
 | `vm_screenshot` | PNG plus coordinate metadata; optional `region` crop and `max_size`; `source`: `host` (default) or `agent` |
 | `vm_click`, `vm_drag`, `vm_scroll` | Mouse at screenshot pixel coordinates; `vm_click` with `window`, `handle` or `pid` clicks inside the unique matching window only if it is the enabled foreground window |
 | `vm_type`, `vm_key` | Paste text or inject Unicode with `mode: keys`; press one key combination or a `sequence`; optional window targeting |
@@ -127,6 +127,7 @@ Details in the [user guide](docs/user-guide.md#uninstalling).
 - [User guide](docs/user-guide.md): setup step by step, updating, releasing, troubleshooting.
 - [Features](docs/features.md): detailed behaviour of every tool.
 - [Privacy](docs/privacy.md): what is stored and what goes over the wire.
+- [v0.2.0 acceptance](docs/acceptance-v0.2.0.md): tested environments, results and remaining coverage.
 - [Changelog](CHANGELOG.md)
 
 ## Disclaimer

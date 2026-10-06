@@ -280,8 +280,8 @@ func CreateCheckpoint(vm, name string) error {
 	return err
 }
 
-// RestoreCheckpoint applies a checkpoint (exact, case-sensitive name; no wildcards). A production checkpoint leaves the
-// VM off, a standard one leaves it saved.
+// RestoreCheckpoint applies a checkpoint (exact, case-sensitive name; no wildcards).
+// Hyper-V determines the restored power state; a running standard checkpoint can resume directly.
 func RestoreCheckpoint(vm, name string) error {
 	_, err := vmScript(vm, `$c=Get-VMSnapshot -VM $vm | Where-Object { $_.Name -ceq `+psq(name)+` } | Select-Object -First 1
 if (-not $c) { throw ('checkpoint not found: ' + `+psq(name)+`) }

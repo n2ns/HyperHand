@@ -328,7 +328,7 @@ func NewServer(m *Manager) *mcp.Server {
 		if in.Start == nil || *in.Start {
 			if v, err = backend.Find(v.Name); err != nil {
 				return nil, err
-			} else if v.State != "Running" { // a production checkpoint restores to Off, a standard one to Saved
+			} else if v.State != "Running" { // Hyper-V may already have resumed the restored VM.
 				return done(backend.Start(v.Name))
 			}
 		}
