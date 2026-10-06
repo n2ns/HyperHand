@@ -34,6 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Reinstalling could stop with "Access is denied" after stopping the service, leaving the service stopped and no tray: setup tried to end the service's process, which runs as the service account. It now waits for that process to exit.
+- The host tray icon no longer stays an empty placeholder without menu when the tray starts at logon before the taskbar is ready. The tray now uses its own notification icon code instead of `fyne.io/systray`: a failed add is retried every 5 seconds and whenever the taskbar is created, and every add carries the icon, tooltip and callback message and selects version 4 behaviour.
 - VM start and stop wait up to 45 seconds for asynchronous Hyper-V jobs and report failures or timeouts without automatically resending the operation.
 - `vm_focus_window` no longer puts ribbon programs such as AutoCAD into key-tip mode. When the window did not come to the front at once, the agent simulated an Alt press, which arrived after the switch in the focused window; it now injects a zero-distance mouse move instead.
 
