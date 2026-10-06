@@ -28,6 +28,24 @@ func NewClient(dial func(context.Context) (net.Conn, error)) *Client {
 	return &Client{dial: dial, gate: make(chan struct{}, 1)}
 }
 
+// ErrAgentBusy means this host already has a request or connection cleanup in progress.
+var ErrAgentBusy = errors.New("agent connection is busy with another request")
+
+// TryCall probes without queueing behind another call or disturbing its connection.
+func (c *Client) TryCall(ctx context.Context, op string, result any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case c.gate <- struct{}{}:
+		defer func() { <-c.gate }()
+	default:
+		return ErrAgentBusy
+	}
+	_, err := c.callIO(ctx, op, nil, nil, 0, nil, result)
+	return err
+}
+
 // Call sends op with args (JSON) and payload, decodes the result into result (if not nil) and returns the response payload.
 func (c *Client) Call(ctx context.Context, op string, args any, payload []byte, result any) ([]byte, error) {
 	var out bytes.Buffer
@@ -47,6 +65,10 @@ func (c *Client) CallIO(ctx context.Context, op string, args any, src io.Reader,
 	case c.gate <- struct{}{}:
 	}
 	defer func() { <-c.gate }()
+	return c.callIO(ctx, op, args, src, srcSize, dst, result)
+}
+
+func (c *Client) callIO(ctx context.Context, op string, args any, src io.Reader, srcSize int64, dst io.Writer, result any) (int64, error) {
 	// Cancellation and the gate may become ready together; do not touch the
 	// connection for a request that was canceled while it was waiting.
 	if err := ctx.Err(); err != nil {

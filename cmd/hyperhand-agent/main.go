@@ -31,6 +31,13 @@ import (
 var mutex windows.Handle
 
 func main() {
+	if handled, err := agent.RunControlsHelper(os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if handled, err := agent.RunAdminHelper(os.Args[1:]); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)

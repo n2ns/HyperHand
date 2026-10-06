@@ -27,6 +27,8 @@ var handlers = map[string]Handler{
 	proto.OpScreenshot:   screenshotOp,
 	proto.OpClipboardGet: clipboardGet,
 	proto.OpClipboardSet: clipboardSet,
+	proto.OpTypeKeys:     typeKeys,
+	proto.OpListControls: listControls,
 	proto.OpFocusWindow:  focusWindow,
 	proto.OpListWindows:  listWindows,
 	proto.OpWindowAt:     windowAt,

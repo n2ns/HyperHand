@@ -118,7 +118,7 @@ The agent installer, running as the logged-on user:
 
 If the install fails, call `vm_screenshot` to see what the guest shows, fix the cause (for example the IME mode or a dialog in the way) and run `vm_install_agent` again.
 
-Tools that need the agent: `vm_exec`, `vm_push`, `vm_pull`, `vm_clipboard_get`, `vm_clipboard_set`, `vm_windows`, `vm_focus_window`, `vm_wait`, `vm_unlock`, `vm_update_agent`, `vm_screenshot` with `source: agent`, and `vm_click` with `window`, `handle` or `pid`. `vm_type` uses the agent when it is available. `vm_start` starts the VM without the agent but reports that the desktop is not usable until the agent answers.
+Tools that need the agent: `vm_exec`, `vm_push`, `vm_pull`, `vm_clipboard_get`, `vm_clipboard_set`, `vm_windows`, `vm_controls`, `vm_focus_window`, `vm_wait`, `vm_unlock`, `vm_update_agent`, `vm_screenshot` with `source: agent`, and window-targeted `vm_click`, `vm_type` and `vm_key`. `vm_type` with `mode: keys` always needs an updated agent; untargeted paste uses the agent when available. `vm_start` starts the VM without the agent but reports that the desktop is not usable until the agent answers.
 
 ### Install the guest agent manually
 
@@ -204,17 +204,31 @@ Host-side screenshots and input work on the guest's secure desktop, so a guest U
 
 ## Using the tools
 
-- `vm_screenshot` returns a PNG and its size. Its pixel coordinates are the coordinates for `vm_click`, `vm_drag` and `vm_scroll`. The default `source: host` reads the Hyper-V console and works without the agent; `source: agent` captures inside the guest.
-- `vm_type` pastes text through the guest clipboard (`clipboard_set` followed by `ctrl+v`), so an IME cannot alter it. Without the agent, it falls back to typing ASCII text on the keyboard; non-ASCII text then fails.
-- `vm_key` takes a key or a combination such as `enter`, `ctrl+v`, `win+r`, `alt+f4`. Use `plus` for the `+`/`=` key, for example `ctrl+plus`.
+- `vm_screenshot` returns a PNG and JSON metadata. The default `source: host` reads the Hyper-V console without the agent; `source: agent` captures inside the guest. Optional `region: {x, y, width, height}` crops in original image pixels; `max_size` only shrinks the result. Use the coordinate conversion below before clicking a transformed image.
+- `vm_type` defaults to `mode: paste`, using the guest clipboard and `ctrl+v`. Untargeted paste falls back to ASCII keyboard input if the agent call fails. `mode: keys` requires an updated agent, preserves the clipboard and accepts at most 16384 UTF-8 bytes. It uses Unicode `VK_PACKET` events, not physical scan codes; Windows UIPI can block it and applications may not support it. CRLF or a lone newline sends Enter; Tab sends Tab, which can change focus or submit input.
+- `vm_type` optionally accepts `window`, `handle`, `pid` and `exact`. The unique target must already be enabled, restored and foreground; the tool does not focus it. Without a selector, `mode: keys` records the current foreground window. It rechecks that target between characters. A failed or cancelled operation may have typed part of the text: inspect the application before continuing and never retry automatically.
+- `vm_key` takes either `keys`, such as `ctrl+v`, or `sequence`, such as `["ctrl+a", "backspace"]` (up to 256 combinations). Optional window selectors require the same target to remain foreground before each combination and need the agent. Use `plus` for the `+`/`=` key, for example `ctrl+plus`. A partial sequence is not undone or retried.
 - `vm_exec` runs as the logged-on user with `powershell` (default) or `cmd`. The default timeout is 60 seconds (`timeout_ms`). The result has the exit code, stdout, stderr and whether it timed out.
 - `vm_push` and `vm_pull` copy a file or a directory recursively. A single file pushed to a guest path ending in `\` goes into that directory under its own name; a single file pulled to an existing host directory, or to a path ending in `\`, goes into it under the guest file's name. `vm_push` skips files whose SHA-256 already matches the guest copy unless `force` is true. Files are written to unique `.hyperhand-*.hhpart` temporary files in the destination directory and renamed when complete.
 - `vm_start` returns once the desktop is usable; if it fails, the VM may still be running, and the error says why (no agent answer, locked without a stored password, wrong password). `vm_status` reports the state without changing anything; `vm_unlock` unlocks a session that was locked later.
+- `vm_status` returns `agent: busy` when another request holds this host's agent connection gate, without waiting for that request. It skips the session query in that case. `not answering` means the connection or response failed; it does not prove the guest agent is offline.
 - `vm_windows` lists the visible windows with their handles, PIDs and positions. Use a handle with `vm_focus_window`, `vm_click` or a window wait when several windows share a title.
 - `vm_focus_window` selects a unique window by `title`, `handle` or `pid`. Titles match a case-insensitive substring by default; `exact: true` matches the full title, still case-insensitively. A handle overrides the title and `exact`; a PID restricts either match and can be used alone when it has only one visible window. All window selectors reject multiple matches. Focus no longer picks the first matching title and requires an agent supporting `list_windows`.
 - `vm_click` uses the same selection rules, with `window` instead of `title`. With `window`, `handle` or `pid`, coordinates are relative to that window and the click proceeds only if it is the enabled foreground window and the point is inside it, on screen and not covered by another window. Without a selector, coordinates are absolute screenshot pixels. A window can still appear between the check and click.
 - `vm_wait` waits for `process_exit` or `process_running` (with `name`, for example `notepad`), `file_exists` (with `path`, for example `C:\temp\app\done.txt`), or `window_exists`, `window_gone` or `window_foreground` (with `title`, `handle` or `pid`, and optional `exact`). The default timeout is 60 seconds; expiration returns `satisfied: false`, while cancellation returns an error.
 - `vm_restore` takes the exact checkpoint name (case-sensitive, no wildcards). If the VM is not running after the restore, it is started unless `start` is false.
+
+### Screenshot coordinates
+
+The JSON text includes original dimensions, crop `x`, `y`, `width`, `height`, output dimensions, `origin_x`, `origin_y`, `scale_x`, `scale_y`, VM identity and `console_coordinates`. For a returned image pixel `(u, v)`, the sampled screen X coordinate is `origin_x + x + min(width - 1, floor((u + 0.5) / scale_x))`; use the corresponding Y fields for Y. Use each axis's actual scale because integer output dimensions can round differently. For a window-relative click, subtract the window's visible-frame origin from the resulting screen point.
+
+Uncropped, unscaled host screenshots retain the original coordinate mapping. Use agent captures for console input only when `console_coordinates` is true. Older agents lack capture metadata and are marked false; an enhanced or remote session is also incompatible. Recapture after a desktop resolution or session change. Metadata describes the capture and does not stop windows moving later.
+
+### Inspecting controls
+
+Use `vm_controls` with a window `title`, `handle` or `pid` (and optional `exact`) to read its UI Automation control-view tree. `max_depth` defaults to 4 (maximum 10, root depth 0); `max_nodes` defaults to 200 (maximum 1000). It returns node names, types, IDs, hierarchy, enabled/offscreen state and physical screen bounds, plus truncation information. This requires an updated agent and does not activate or modify controls.
+
+Password nodes omit name reads and descendant traversal. A helper timeout of 10 seconds bounds a stalled provider; failures are errors, not evidence that the window has no controls. Custom CAD drawing may not expose controls, and snapshot indices and bounds can become stale. Use the screenshot to verify the intended control before input; a tree entry does not establish keyboard focus.
 
 ### Waiting for a window
 

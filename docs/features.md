@@ -102,7 +102,7 @@ These use the agent's `session_state` (see 10.2), which reports for the agent's 
 
 - When `vm_start` started a VM that was not running and **Open console when started** is checked for it in the tray (see 9.1), the tray opens its console in the background; `vm_start` does not wait for it.
 - After the VM runs, `vm_start` pings the agent every 2 seconds for up to 90 seconds. If the session is not locked it checks again 3 seconds later, because Windows can lock a session right after an automatic sign-in. A locked session is unlocked as below. The result names the agent and the session state; an error says why the desktop is not usable (no agent answer, locked without a stored password, unlock failed, agent too old). The VM keeps running in every case.
-- `vm_status` reports the power state, whether an unlock password is stored and, for a running VM, the agent's version and user (5-second ping), the session lock state, a non-console session and an open UAC prompt. It waits for nothing and changes nothing.
+- `vm_status` reports the power state, whether an unlock password is stored and, for a running VM, the agent's version and user (5-second ping), the session lock state, a non-console session and an open UAC prompt. It does not queue behind an agent request already running through this host: that case returns `agent: busy` and skips the session query. This detects contention in this host's request gate, not all activity in the guest. A failed connection or response reports `not answering` with the guest state unknown; it does not prove the agent is offline. Status changes nothing.
 - `vm_unlock` unlocks a running VM's locked session; an unlocked session returns `the session is not locked`.
 - Unlocking reads the VM's unlock password from Windows Credential Manager (generic credential `HyperHand:<VM name>`, stored from the tray, see 9.1). It refuses before any input when no password is stored, the password is not ASCII, or the session is not the console session. It presses `ctrl` to dismiss the lock screen curtain and waits 1.5 seconds. Then, holding the input lock (see 4.5), it presses `ctrl+a`, checks once more that the session is locked, is the console session, runs `LogonUI.exe`, has keyboard input on the secure desktop and shows no UAC prompt, and only then types the password and `enter`. It waits up to 15 seconds for the session to report unlocked. The password is typed once per call: a wrong password is reported, not retried, so that the account is not locked out. The password never appears in results, errors or logs.
 - An agent too old to know `session_state` is reported with a request to run `vm_update_agent`, and nothing is typed.
@@ -112,14 +112,21 @@ These use the agent's `session_state` (see 10.2), which reports for the agent's 
 
 ### 4.1 vm_screenshot
 
-`vm_screenshot` returns a PNG image and a text item `<width>x<height>`.
+`vm_screenshot` returns a PNG image and JSON coordinate metadata in a text item.
 
 - `source` = `host` (default): the image is taken from the Hyper-V console via WMI `GetVirtualSystemThumbnailImage`, at the current resolution of the VM's first video head. It works without the agent. Hyper-V delivers RGB565, which is converted to 8-bit RGBA, so colours are quantised.
   - A VM without a video head fails with `no video head (VM not running?)`.
 - `source` = `agent`: the agent captures display 0 inside the guest. The agent process is DPI-aware, so the image is in physical pixels.
 - Any other `source` fails with `unknown source "<value>"`.
 
-Pixel coordinates of the host screenshot are the coordinates used by `vm_click`, `vm_drag` and `vm_scroll` (see 4.2).
+- `region: {x, y, width, height}` crops in original image pixels. Dimensions must be positive, origins nonnegative, and the entire region inside the captured image.
+- `max_size` is the maximum output width or height. Zero keeps the crop's size; a positive value only shrinks, preserving aspect ratio subject to integer rounding and a minimum of one pixel per axis. Negative values fail. Scaling uses nearest-neighbour sampling; no transformation keeps the original PNG bytes.
+- Metadata includes `original_width`, `original_height`, crop `x`, `y`, `width`, `height`, `output_width`, `output_height`, `scale_x`, `scale_y`, screen `origin_x`, `origin_y`, `vm`, `vm_id`, `source`, `captured_at` and `console_coordinates`. Scales are output size divided by crop size, separately for each axis because rounding can make them differ.
+- Updated agents supply `agent_session` with captured dimensions, display origin, session ID and console membership. Old agents can still return an image, but without this metadata `console_coordinates` is false. Non-console agent screenshots also report false: do not use those images for Hyper-V console input. A true value describes capture-time compatibility, not a guarantee that the desktop has remained unchanged.
+
+For untransformed host screenshots, image pixels already match `vm_click`, `vm_drag` and `vm_scroll`. Otherwise, map an output pixel `(u, v)` back to the sampled screen pixel as `origin_x + x + min(width - 1, floor((u + 0.5) / scale_x))` and the corresponding Y expression. Use actual returned scales and integer pixel indices inside the output bounds. Window-relative clicks need the window's visible-frame origin subtracted from that screen point. Recheck the target after screen or window changes.
+
+Microsoft describes [physical pixels and DPI awareness](https://learn.microsoft.com/en-us/windows/win32/hidpi/high-dpi-desktop-application-development-on-windows); coordinate metadata does not make different Windows sessions interchangeable.
 
 ### 4.2 Mouse: vm_click, vm_drag, vm_scroll
 
@@ -142,6 +149,9 @@ Mouse input goes through the VM's synthetic mouse (`Msvm_SyntheticMouse`) with a
 
 `vm_key` presses a key or a `+`-separated combination through the VM's synthetic keyboard (`Msvm_Keyboard`).
 
+- Pass either `keys` or `sequence`, an ordered array of up to 256 combinations, such as `["ctrl+a", "backspace"]`. All combinations are validated before input starts.
+- Optional `window`, `handle`, `pid` and `exact` use the shared selector rules. The unique target must already be enabled, restored and foreground; it is never focused automatically. Its handle and PID are retained and checked before each combination. Targeted input needs the agent; untargeted input retains the console keyboard path.
+- Cancellation or a failed combination stops the remaining sequence. Earlier input is not undone and partial sequences must not be retried automatically.
 - Names are case-insensitive and surrounding spaces are ignored.
 - Supported names:
   - Modifiers: `ctrl` / `control`, `shift`, `alt`, `win`.
@@ -153,13 +163,20 @@ Mouse input goes through the VM's synthetic mouse (`Msvm_SyntheticMouse`) with a
 
 ### 4.4 Text: vm_type
 
-`vm_type` enters `text` into the focused guest window.
+`vm_type` enters `text` into the focused guest window. `mode` is `paste` (default) or `keys`.
 
-- With the agent: the text is placed on the guest clipboard (`clipboard_set`) and pasted with `ctrl+v`. This bypasses the guest IME and supports any Unicode text. The previous clipboard content is replaced.
-- Without the agent (the clipboard call fails for any reason):
+- In `paste` mode with the agent: the text is placed on the guest clipboard (`clipboard_set`) and pasted with `ctrl+v`. This bypasses the guest IME and supports Unicode text. The previous clipboard content is replaced.
+- In untargeted `paste` mode without the agent (the clipboard call fails for any reason):
   - ASCII text is typed through the synthetic keyboard (`TypeText`). An IME in Chinese mode may swallow it.
   - Text containing any non-ASCII character fails with `non-ASCII text needs the agent: <agent error>`.
 - The clipboard step and the paste of one `vm_type` call are kept together; concurrent `vm_type` calls do not interleave.
+- Optional `window`, `handle`, `pid` and `exact` select the unique target with the shared rules. It must already be enabled, restored and foreground; no mode activates a window automatically. Targeted paste rechecks the selected handle and PID before `ctrl+v` and does not fall back to blind keyboard input on an agent error.
+- `keys` requires an updated agent and leaves the clipboard unchanged. Without a selector it captures the current foreground window; the agent checks the handle, PID, foreground and desktop state before each character. The input must be valid UTF-8 and at most 16384 UTF-8 bytes.
+- Ordinary text uses UTF-16 `KEYEVENTF_UNICODE` / `VK_PACKET`, including surrogate pairs. CRLF becomes one Enter; lone CR or LF becomes Enter; Tab uses the Tab key. Enter and Tab can submit a command or move focus. This mode is Unicode text injection, not physical scan-code simulation.
+- Held modifiers or a held Enter/Tab key needed by the next character cause rejection. Partial `SendInput` failures stop the operation; a matching key-up is attempted if its preceding key-down was inserted. The error reports partial input; do not retry automatically. Cancellation and a changed target stop later characters, but already injected input is not undone.
+- Windows UIPI can block injection into higher-integrity applications. Successful injection does not prove the application consumed the text, and top-level foreground checks do not establish a particular child control's focus. Application compatibility, including AutoCAD command input, requires runtime verification.
+
+See Microsoft's [SendInput restrictions](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput) and [KEYBDINPUT Unicode semantics](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-keybdinput).
 
 ### 4.5 Input serialisation
 
@@ -296,7 +313,7 @@ Microsoft documents the process lookup used for selection in [GetWindowThreadPro
 `vm_windows` lists the visible top-level windows, from the top of the Z order down, as a JSON array. Windows hidden by DWM (cloaked, such as suspended store apps) are left out. Each entry has:
 
 - `handle`, `title`, `class`, `pid` and `process` (executable name; empty if the agent cannot query the process);
-- `rect`: `left`, `top`, `right`, `bottom` of the visible frame (without invisible resize borders), in the pixel coordinates of `vm_screenshot` and `vm_click`;
+- `rect`: `left`, `top`, `right`, `bottom` of the visible frame (without invisible resize borders), in physical screen pixels; cropped or scaled screenshots must be mapped back as described in 4.1;
 - `enabled`, `foreground` and `minimized`;
 - `owner`: the owner window's handle, omitted when there is none;
 - `modal`: the owner window is disabled, as it is while a modal dialog runs.
@@ -319,6 +336,18 @@ An agent without this operation fails with `the guest agent is too old to list w
 - Window conditions poll the existing agent `list_windows` operation from the host, releasing the agent connection between checks so other tools can run. The selected VM stays fixed throughout the wait. An agent already supporting `list_windows` needs no update for these conditions.
 - An empty `name` or `path` for its kind, or an unknown `kind`, is an error.
 - Cancellation returns an error. If the host disconnects, the wait stops (see 1.4).
+
+### 7.5 vm_controls
+
+`vm_controls` reads the UI Automation control-view tree of the unique visible window selected by `title`, `handle` or `pid`, with optional `exact`. It needs an updated agent and does not focus, click, invoke controls or change their values.
+
+- `max_depth` defaults to 4 and accepts 1 to 10; the root is depth 0. `max_nodes` defaults to 200 and accepts 1 to 1000, including the root.
+- The result contains `nodes`, `truncated` and optional `truncation` reasons. Each node includes snapshot-local `index`, `parent` (root: -1), `depth`, `name`, Microsoft `control_type` ID, `automation_id`, `class_name`, `pid`, `enabled`, `offscreen` and a `rect` in physical screen pixels.
+- Password nodes do not have their names read and their descendants are not traversed. This is not a general secret detector: other labels and accessibility metadata can contain sensitive text.
+- A disposable helper performs UIA calls with a 10-second timeout so a stalled provider can be terminated. Timeout, cancellation and provider errors are reported as errors, not an empty successful tree.
+- Tree coverage depends on the application's provider; custom drawing and inaccessible elevated controls may be absent. The snapshot can become stale and its indices are not persistent control identifiers. Bounds alone do not establish clickability or console-session compatibility.
+
+See Microsoft's [UI Automation tree views](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-treeoverview) and [UI Automation security boundaries](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-securityoverview). HyperHand's depth, node and timeout limits are product choices.
 
 ## 8. Guest Agent Installation and Update
 
@@ -438,7 +467,9 @@ uint32 header length | uint64 payload length | header JSON | payload bytes
 | `read_file` | `{path}` | payload (file contents) |
 | `list_dir` | `{path}` | `{entries: [{name, is_dir}]}`, links skipped |
 | `hash_files` | `{paths}` | `{hashes}`, lowercase hex SHA-256 in order, `""` when unavailable |
-| `screenshot` | none | payload (PNG) |
+| `screenshot` | none | `{width, height, origin_x, origin_y, session_id, console}` plus payload (PNG); older agents return only the payload |
+| `type_keys` | `{text, handle, pid}` | `{events}`, the number of injected input events |
+| `list_controls` | `{handle, pid, max_depth, max_nodes}` | `{nodes, truncated, truncation}`, a bounded UIA control-view snapshot |
 | `clipboard_get` | none | `{text}` |
 | `clipboard_set` | `{text}` | none |
 | `focus_window` | `{title, handle}` | `{text, handle}`, the focused window's title and handle |

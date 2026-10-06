@@ -2,15 +2,12 @@ package host
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"image"
-	_ "image/png"
 	"io"
 	"io/fs"
 	"os"
@@ -33,8 +30,10 @@ type vmIn struct {
 	VM string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
 }
 type screenshotIn struct {
-	VM     string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
-	Source string `json:"source,omitempty" jsonschema:"host (default: Hyper-V console, works without the agent) or agent (taken inside the guest)"`
+	VM      string            `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
+	Source  string            `json:"source,omitempty" jsonschema:"host (default: Hyper-V console, works without the agent) or agent (taken inside the guest)"`
+	Region  *screenshotRegion `json:"region,omitempty" jsonschema:"crop in original image pixels: x, y, width, height; must fit inside the captured image"`
+	MaxSize int               `json:"max_size,omitempty" jsonschema:"maximum output width or height; 0 keeps original size, never upscales"`
 }
 type clickIn struct {
 	VM     string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
@@ -64,9 +63,23 @@ type typeIn struct {
 	VM   string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
 	Text string `json:"text"`
 }
+type typeTextIn struct {
+	VM     string `json:"vm,omitempty"`
+	Text   string `json:"text"`
+	Mode   string `json:"mode,omitempty" jsonschema:"paste (default) or keys (Unicode SendInput; requires updated agent, does not use clipboard)"`
+	Window string `json:"window,omitempty" jsonschema:"target window title; must already be foreground"`
+	Handle uint64 `json:"handle,omitempty"`
+	PID    uint32 `json:"pid,omitempty"`
+	Exact  bool   `json:"exact,omitempty"`
+}
 type keyIn struct {
-	VM   string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
-	Keys string `json:"keys" jsonschema:"a key or combination, e.g. enter, esc, tab, f2, ctrl+v, win+r, alt+f4, ctrl+plus"`
+	VM       string   `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
+	Keys     string   `json:"keys,omitempty" jsonschema:"a key or combination; pass either keys or sequence"`
+	Sequence []string `json:"sequence,omitempty" jsonschema:"ordered key combinations, e.g. [ctrl+a,backspace]; at most 256"`
+	Window   string   `json:"window,omitempty" jsonschema:"target window title; must remain foreground"`
+	Handle   uint64   `json:"handle,omitempty"`
+	PID      uint32   `json:"pid,omitempty"`
+	Exact    bool     `json:"exact,omitempty"`
 }
 type execIn struct {
 	VM        string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
@@ -113,6 +126,16 @@ type waitIn struct {
 	Handle    uint64 `json:"handle,omitempty" jsonschema:"window handle from vm_windows; when set, title is ignored"`
 	PID       uint32 `json:"pid,omitempty" jsonschema:"restrict the target window to this process ID; may be used alone if exactly one visible window matches"`
 	Exact     bool   `json:"exact,omitempty" jsonschema:"match the full title instead of a substring, case-insensitively; requires title unless handle is set"`
+}
+
+type controlsIn struct {
+	VM       string `json:"vm,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Handle   uint64 `json:"handle,omitempty"`
+	PID      uint32 `json:"pid,omitempty"`
+	Exact    bool   `json:"exact,omitempty"`
+	MaxDepth int    `json:"max_depth,omitempty" jsonschema:"default 4; maximum 10; root depth is 0"`
+	MaxNodes int    `json:"max_nodes,omitempty" jsonschema:"default 200; maximum 1000"`
 }
 
 func add[In any](s *mcp.Server, name, desc string, f func(context.Context, In) (*mcp.CallToolResult, error)) {
@@ -199,16 +222,25 @@ func NewServer(m *Manager) *mcp.Server {
 			return text("%s", b.String()), nil
 		}
 		var p proto.PingResult
+		c, err := m.Client(v.Name)
+		if err != nil {
+			return nil, err
+		}
 		pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		_, err = call(pctx, v.Name, proto.OpPing, nil, nil, &p)
+		err = c.TryCall(pctx, proto.OpPing, &p)
 		cancel()
 		if err != nil {
-			fmt.Fprintf(&b, "agent: not answering (not signed in, not installed, or busy with another request): %v\n", err)
+			if errors.Is(err, ErrAgentBusy) {
+				b.WriteString("agent: busy (this host has another request in progress)\nsession: not queried while busy\n")
+			} else {
+				fmt.Fprintf(&b, "agent: not answering (connection or response failed; guest state is unknown): %v\n", err)
+			}
 			return text("%s", b.String()), nil
 		}
 		fmt.Fprintf(&b, "agent: %s on %s as %s\n", p.Version, p.Hostname, p.User)
 		sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		st, err := u.state(sctx, v.Name)
+		var st proto.SessionStateResult
+		err = c.TryCall(sctx, proto.OpSessionState, &st)
 		cancel()
 		switch {
 		case err != nil:
@@ -302,29 +334,60 @@ func NewServer(m *Manager) *mcp.Server {
 		}
 		return text("ok"), nil
 	})
-	add(s, "vm_screenshot", "Take a PNG screenshot of the VM screen. Its pixel coordinates are the coordinates for vm_click, vm_drag and vm_scroll.",
+	add(s, "vm_screenshot", "Take a PNG screenshot, optionally cropped and scaled. Returns JSON coordinate metadata alongside the image. Map image pixels back using origin + crop + pixel/scale before vm_click, vm_drag or vm_scroll; agent screenshots from a non-console or unknown session must not be used for console input.",
 		func(ctx context.Context, in screenshotIn) (*mcp.CallToolResult, error) {
-			var png []byte
-			var w, h int
-			var err error
+			v, err := backend.Find(in.VM)
+			if err != nil {
+				return nil, err
+			}
+			if in.Source == "" {
+				in.Source = "host"
+			}
+			var data []byte
+			var capture proto.ScreenshotResult
+			compatible := in.Source == "host"
 			switch in.Source {
-			case "", "host":
-				png, w, h, err = backend.Screenshot(in.VM)
+			case "host":
+				data, _, _, err = backend.Screenshot(v.Name)
 			case "agent":
-				if png, err = call(ctx, in.VM, proto.OpScreenshot, nil, nil, nil); err == nil {
-					var cfg image.Config
-					cfg, _, err = image.DecodeConfig(bytes.NewReader(png))
-					w, h = cfg.Width, cfg.Height
-				}
+				data, err = call(ctx, v.Name, proto.OpScreenshot, nil, nil, &capture)
+				compatible = capture.Width > 0 && capture.Height > 0 && capture.Console
 			default:
 				err = fmt.Errorf("unknown source %q", in.Source)
 			}
 			if err != nil {
 				return nil, err
 			}
+			data, geometry, err := transformScreenshot(data, screenshotOptions{Region: in.Region, MaxSize: in.MaxSize})
+			if err != nil {
+				return nil, err
+			}
+			if in.Source == "agent" && capture.Width > 0 && (capture.Width != geometry.OriginalWidth || capture.Height != geometry.OriginalHeight) {
+				return nil, fmt.Errorf("agent screenshot dimensions do not match capture metadata")
+			}
+			metadata, err := json.Marshal(struct {
+				screenshotGeometry
+				VM                 string                  `json:"vm"`
+				VMID               string                  `json:"vm_id"`
+				Source             string                  `json:"source"`
+				CapturedAt         string                  `json:"captured_at"`
+				OriginX            int                     `json:"origin_x"`
+				OriginY            int                     `json:"origin_y"`
+				AgentSession       *proto.ScreenshotResult `json:"agent_session,omitempty"`
+				ConsoleCoordinates bool                    `json:"console_coordinates"`
+			}{geometry, v.Name, v.ID, in.Source, time.Now().UTC().Format(time.RFC3339Nano), capture.OriginX, capture.OriginY,
+				func() *proto.ScreenshotResult {
+					if in.Source == "agent" && capture.Width > 0 {
+						return &capture
+					}
+					return nil
+				}(), compatible})
+			if err != nil {
+				return nil, err
+			}
 			return &mcp.CallToolResult{Content: []mcp.Content{
-				&mcp.ImageContent{Data: png, MIMEType: "image/png"},
-				&mcp.TextContent{Text: fmt.Sprintf("%dx%d", w, h)},
+				&mcp.ImageContent{Data: data, MIMEType: "image/png"},
+				&mcp.TextContent{Text: string(metadata)},
 			}}, nil
 		})
 	add(s, "vm_windows", "List the guest's visible top-level windows, from the top of the Z order down, as JSON: handle, title, class, pid, process, rect (visible frame in screenshot pixels), enabled, foreground, minimized, owner (owner window handle) and modal (its owner is disabled, as while a modal dialog runs).",
@@ -350,11 +413,45 @@ func NewServer(m *Manager) *mcp.Server {
 			return nil, err
 		}
 		in.VM = v.Name
+		input.Lock()
+		defer input.Unlock()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		x, y, err := clickPoint(ctx, call, in)
 		if err != nil {
 			return nil, u.lockedHint(ctx, in.VM, err)
 		}
-		return done(backend.Click(in.VM, x, y, b, in.Double))
+		return done(raw.Click(in.VM, x, y, b, in.Double))
+	})
+	add(s, "vm_controls", "Read a bounded UI Automation control-view tree for one visible window selected by title, handle or pid. Requires an updated agent. Returns snapshot-local indexes, physical screen rectangles and truncation reasons. Does not click or read values; password names and subtrees are omitted. Provider calls time out after 10 seconds.", func(ctx context.Context, in controlsIn) (*mcp.CallToolResult, error) {
+		if in.MaxDepth < 0 || in.MaxDepth > 10 || in.MaxNodes < 0 || in.MaxNodes > 1000 {
+			return nil, fmt.Errorf("max_depth must be 0..10 and max_nodes 0..1000 (0 uses defaults)")
+		}
+		c, err := m.Client(in.VM)
+		if err != nil {
+			return nil, err
+		}
+		pinned := func(ctx context.Context, _, op string, args any, payload []byte, result any) ([]byte, error) {
+			return c.Call(ctx, op, args, payload, result)
+		}
+		ws, err := listWindows(ctx, pinned, in.VM)
+		if err != nil {
+			return nil, err
+		}
+		w, err := resolveWindow(ws, windowSelector{Title: in.Title, Handle: in.Handle, PID: in.PID, Exact: in.Exact})
+		if err != nil {
+			return nil, err
+		}
+		var r proto.ControlsResult
+		if _, err := c.Call(ctx, proto.OpListControls, proto.ControlsArgs{Handle: w.Handle, PID: w.PID, MaxDepth: in.MaxDepth, MaxNodes: in.MaxNodes}, nil, &r); err != nil {
+			return nil, fmt.Errorf("controls require an updated agent with UI Automation support: %w", err)
+		}
+		data, err := json.Marshal(r)
+		if err != nil {
+			return nil, err
+		}
+		return text("%s", data), nil
 	})
 	add(s, "vm_drag", "Drag with the left button from (x1, y1) to (x2, y2).", func(ctx context.Context, in dragIn) (*mcp.CallToolResult, error) {
 		return done(backend.Drag(in.VM, in.X1, in.Y1, in.X2, in.Y2))
@@ -362,24 +459,85 @@ func NewServer(m *Manager) *mcp.Server {
 	add(s, "vm_scroll", "Scroll the mouse wheel at (x, y).", func(ctx context.Context, in scrollIn) (*mcp.CallToolResult, error) {
 		return done(backend.Scroll(in.VM, in.X, in.Y, in.Delta))
 	})
-	var typeMu sync.Mutex // keeps clipboard_set -> ctrl+v of one vm_type together
-	add(s, "vm_type", "Type text into the focused window. Pasted through the guest clipboard (agent clipboard_set + ctrl+v) so an IME cannot swallow it; without the agent, ASCII text is typed on the keyboard instead (an IME in Chinese mode may swallow it).",
-		func(ctx context.Context, in typeIn) (*mcp.CallToolResult, error) {
-			typeMu.Lock()
-			defer typeMu.Unlock()
-			_, err := call(ctx, in.VM, proto.OpClipboardSet, proto.TextArgs{Text: in.Text}, nil, nil)
+	add(s, "vm_type", "Type text into the foreground window. mode=paste (default) uses the clipboard, with ASCII keyboard fallback without the agent. mode=keys uses guest Unicode SendInput, preserves the clipboard and requires an updated agent. Optional window/handle/pid restricts the target; never focuses it automatically. Input may be partial on failure and must not be blindly retried.",
+		func(ctx context.Context, in typeTextIn) (*mcp.CallToolResult, error) {
+			if in.Mode != "" && in.Mode != "paste" && in.Mode != "keys" {
+				return nil, fmt.Errorf("unknown input mode %q", in.Mode)
+			}
+			v, err := raw.Find(in.VM)
+			if err != nil {
+				return nil, err
+			}
+			in.VM = v.Name
+			input.Lock()
+			defer input.Unlock()
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			sel := windowSelector{Title: in.Window, Handle: in.Handle, PID: in.PID, Exact: in.Exact}
+			checkTarget := in.Mode == "keys" || sel != (windowSelector{})
+			var target proto.WindowInfo
+			if checkTarget {
+				target, err = inputWindow(ctx, call, in.VM, sel)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if in.Mode == "keys" {
+				var r proto.TypeKeysResult
+				_, err := call(ctx, in.VM, proto.OpTypeKeys, proto.TypeKeysArgs{Text: in.Text, Handle: target.Handle, PID: target.PID}, nil, &r)
+				if err != nil {
+					return nil, fmt.Errorf("keys input failed (requires an updated agent): %w", err)
+				}
+				return text("input events: %d", r.Events), nil
+			}
+			_, err = call(ctx, in.VM, proto.OpClipboardSet, proto.TextArgs{Text: in.Text}, nil, nil)
 			if err == nil {
-				return done(backend.PressKeys(in.VM, "ctrl+v"))
+				if checkTarget {
+					if _, err := inputWindow(ctx, call, in.VM, windowSelector{Handle: target.Handle, PID: target.PID}); err != nil {
+						return nil, err
+					}
+				}
+				return done(raw.PressKeys(in.VM, "ctrl+v"))
+			}
+			if checkTarget {
+				return nil, err
 			}
 			for _, r := range in.Text {
 				if r >= 128 {
 					return nil, fmt.Errorf("non-ASCII text needs the agent: %w", err)
 				}
 			}
-			return done(backend.TypeText(in.VM, in.Text))
+			return done(raw.TypeText(in.VM, in.Text))
 		})
-	add(s, "vm_key", "Press a key or key combination. Keys: ctrl, shift, alt, win, enter, esc, tab, space, backspace, delete, insert, home, end, pageup, pagedown, up, down, left, right, f1-f12, a-z, 0-9, punctuation such as ; = , - . / ` [ \\ ] ' and plus for the +/= key.", func(ctx context.Context, in keyIn) (*mcp.CallToolResult, error) {
-		return done(backend.PressKeys(in.VM, in.Keys))
+	add(s, "vm_key", "Press keys or an ordered sequence of key combinations. Optional window/handle/pid requires the target to remain foreground. Keys: ctrl, shift, alt, win, enter, esc, tab, space, backspace, delete, insert, home, end, pageup, pagedown, arrows, f1-f12, a-z, 0-9, punctuation and plus. Partial sequences are not retried.", func(ctx context.Context, in keyIn) (*mcp.CallToolResult, error) {
+		sequence, err := keySequence(in)
+		if err != nil {
+			return nil, err
+		}
+		v, err := raw.Find(in.VM)
+		if err != nil {
+			return nil, err
+		}
+		input.Lock()
+		defer input.Unlock()
+		sel := windowSelector{Title: in.Window, Handle: in.Handle, PID: in.PID, Exact: in.Exact}
+		for i, keys := range sequence {
+			if err := ctx.Err(); err != nil {
+				return nil, fmt.Errorf("after %d combinations: %w", i, err)
+			}
+			if sel != (windowSelector{}) {
+				w, err := inputWindow(ctx, call, v.Name, sel)
+				if err != nil {
+					return nil, fmt.Errorf("after %d combinations: %w", i, err)
+				}
+				sel = windowSelector{Handle: w.Handle, PID: w.PID}
+			}
+			if err := raw.PressKeys(v.Name, keys); err != nil {
+				return nil, fmt.Errorf("combination %d failed; input may be partial: %w", i+1, err)
+			}
+		}
+		return text("ok"), nil
 	})
 	add(s, "vm_exec", "Run a command in the guest (as the logged-on user); returns exit code, stdout and stderr.",
 		func(ctx context.Context, in execIn) (*mcp.CallToolResult, error) {
@@ -419,10 +577,20 @@ func NewServer(m *Manager) *mcp.Server {
 		return text("%s", r.Text), nil
 	})
 	add(s, "vm_clipboard_set", "Set the guest clipboard text.", func(ctx context.Context, in typeIn) (*mcp.CallToolResult, error) {
+		input.Lock()
+		defer input.Unlock()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		_, err := call(ctx, in.VM, proto.OpClipboardSet, proto.TextArgs{Text: in.Text}, nil, nil)
 		return done(err)
 	})
 	add(s, "vm_focus_window", "Bring the unique matching visible window to the foreground by title, handle or pid. exact matches the full title; multiple matches are an error. Returns its title and handle.", func(ctx context.Context, in titleIn) (*mcp.CallToolResult, error) {
+		input.Lock()
+		defer input.Unlock()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		// Resolve once: window handles are only meaningful in this guest.
 		c, err := m.Client(in.VM)
 		if err != nil {

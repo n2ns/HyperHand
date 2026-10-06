@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `vm_type` supports `mode: keys` through guest Unicode `SendInput`, preserving the clipboard, limiting text to 16384 UTF-8 bytes and rechecking the selected foreground window between characters. `vm_type` and `vm_key` accept optional window selectors; `vm_key` also accepts an ordered `sequence` of up to 256 combinations. Partial input is reported without automatic retry.
+- `vm_screenshot` supports a `region` crop and `max_size` downscaling, with JSON dimensions, crop origin, actual per-axis scales, VM identity and source/session coordinate metadata. Unknown or non-console agent captures are not marked compatible with console input.
+- Read-only `vm_controls` returns a bounded UI Automation control-view tree for a selected window. A separate helper has a 10-second timeout; password names and subtrees are not read.
 - `vm_focus_window`, window-relative `vm_click` and window conditions in `vm_wait` share window selection by handle, PID and case-insensitive title, with optional `exact` full-title matching. A PID can select a window alone or restrict a title or handle match.
 - `vm_wait` conditions `window_exists`, `window_gone` and `window_foreground`, polled by the host without holding the agent connection between checks. Successful appearance and foreground waits return the window's handle and title; disappearing includes windows that become hidden or cloaked. These use the existing agent `list_windows` operation without a guest protocol change.
 - Dedicated `HyperHandService` Windows service under `NT SERVICE\HyperHandService`, with Hyper-V rights assigned to the service account and an access-controlled local named pipe for specific VM operations and the guest socket tunnel.
@@ -25,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- `vm_status` reports `busy` when this host already has an agent request in progress, without queueing its probe behind that request. Connection and response failures leave the guest state unknown rather than claiming the agent is offline.
+- `vm_screenshot` now returns JSON metadata instead of the former `<width>x<height>` text item. Cropped and scaled coordinates must be mapped before console input; old agents can still supply images but cannot establish coordinate compatibility.
 - **Breaking:** `vm_focus_window` now rejects multiple matching windows instead of focusing the first match. All focus requests require an agent supporting `list_windows`; older agents must be updated, with no fallback to title-only focus. Window clicks and waits also reject ambiguous selection, including disappearance waits.
 - **Breaking:** `vm_stop` is replaced by `vm_shutdown`, which shuts the guest down normally through the Hyper-V shutdown integration service and waits up to 3 minutes until the VM is off (failing, without turning it off, when a program blocks shutdown), and `vm_turn_off`, which turns the VM off immediately as `vm_stop` did.
 - Host tray menu text is in English.

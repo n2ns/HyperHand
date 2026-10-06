@@ -199,6 +199,12 @@ func TypeText(vm, text string) error {
 	})
 }
 
+// ValidateKeys checks a combination without sending input.
+func ValidateKeys(keys string) error {
+	_, err := parseKeys(keys)
+	return err
+}
+
 // PressKeys presses a key or a combination such as "enter", "esc", "f2", "ctrl+v", "win+r", "alt+f4".
 func PressKeys(vm, keys string) error {
 	codes, err := parseKeys(keys)

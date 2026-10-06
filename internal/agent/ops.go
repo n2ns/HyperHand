@@ -242,7 +242,8 @@ func listDir(_ context.Context, args json.RawMessage, _ []byte) (any, []byte, er
 }
 
 func screenshotOp(context.Context, json.RawMessage, []byte) (any, []byte, error) {
-	img, err := screenshot.CaptureDisplay(0)
+	bounds := screenshot.GetDisplayBounds(0)
+	img, err := screenshot.CaptureRect(bounds)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -250,7 +251,12 @@ func screenshotOp(context.Context, json.RawMessage, []byte) (any, []byte, error)
 	if err := png.Encode(&buf, img); err != nil {
 		return nil, nil, err
 	}
-	return nil, buf.Bytes(), nil
+	var sessionID uint32
+	if err := windows.ProcessIdToSessionId(windows.GetCurrentProcessId(), &sessionID); err != nil {
+		return nil, nil, err
+	}
+	return proto.ScreenshotResult{Width: img.Bounds().Dx(), Height: img.Bounds().Dy(), OriginX: bounds.Min.X, OriginY: bounds.Min.Y,
+		SessionID: sessionID, Console: sessionID == windows.WTSGetActiveConsoleSessionId()}, buf.Bytes(), nil
 }
 
 func waitOp(ctx context.Context, args json.RawMessage, _ []byte) (any, []byte, error) {

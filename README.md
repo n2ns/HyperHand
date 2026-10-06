@@ -83,18 +83,21 @@ Every tool takes an optional `vm` (VM name). Without it, the only running VM is 
 | `vm_shutdown`, `vm_turn_off` | Shut the guest down normally and wait until the VM is off (fails, without turning it off, if a program blocks shutdown); turn the VM off immediately, like pulling the plug |
 | `vm_status`, `vm_unlock` | Report power state, agent, session lock state and whether an unlock password is stored; unlock a locked session with the stored password |
 | `vm_checkpoints`, `vm_checkpoint`, `vm_restore` | List, create and restore checkpoints (exact names); restore starts the VM unless `start` is false |
-| `vm_screenshot` | PNG of the VM screen; `source`: `host` (default) or `agent` |
+| `vm_screenshot` | PNG plus coordinate metadata; optional `region` crop and `max_size`; `source`: `host` (default) or `agent` |
 | `vm_click`, `vm_drag`, `vm_scroll` | Mouse at screenshot pixel coordinates; `vm_click` with `window`, `handle` or `pid` clicks inside the unique matching window only if it is the enabled foreground window |
-| `vm_type`, `vm_key` | Type text (pasted through the guest clipboard); press keys such as `enter`, `ctrl+v`, `win+r` |
+| `vm_type`, `vm_key` | Paste text or inject Unicode with `mode: keys`; press one key combination or a `sequence`; optional window targeting |
 | `vm_exec` | Run a command in the guest; `shell`, `cwd`, `timeout_ms`, `admin` |
 | `vm_push`, `vm_pull` | Copy files or directories host to guest and back; `vm_push` skips unchanged files unless `force` is true |
 | `vm_clipboard_get`, `vm_clipboard_set` | Read or write the guest clipboard |
 | `vm_windows` | List visible windows: handle, title, class, process, position, enabled, foreground, owner, modal |
+| `vm_controls` | Read a selected window's bounded UI Automation control tree; requires an updated agent |
 | `vm_focus_window` | Bring a unique window to the front by title, handle or PID; `exact` matches the full title |
 | `vm_wait` | Wait until a process exits or runs, a file exists, or a window appears, disappears or becomes foreground |
 | `vm_install_agent`, `vm_update_agent` | Install or replace the guest agent |
 
-Screen, mouse, keyboard, VM and checkpoint tools work without the agent; the others need it. Without the agent, `vm_start` still starts the VM but reports that the desktop is not usable.
+Host screenshots, untargeted mouse/keyboard input, VM and checkpoint tools work without the agent; window targeting, Unicode keys input and control inspection need it. Without the agent, `vm_start` still starts the VM but reports that the desktop is not usable. `vm_status` distinguishes this host's busy request gate from an agent that is not answering; neither establishes the guest's complete state.
+
+Use screenshot metadata to map cropped or scaled image pixels before clicking. Agent images from unknown or non-console sessions are not console input coordinates. Unicode keys input preserves the clipboard but remains subject to Windows UIPI and application support; partial input must not be retried automatically. See the [tool guide](docs/user-guide.md#using-the-tools) and [precise behavior](docs/features.md).
 
 ## Known limitations
 
