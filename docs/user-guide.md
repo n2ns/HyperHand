@@ -51,7 +51,7 @@ Run `install` again from a new release or build to update the installed copies. 
 
 Only one tray instance runs at a time. Its connection to the service uses a local named pipe restricted to the configured owner, SYSTEM, administrators and the service account. This does not add authentication to the local MCP HTTP endpoint.
 
-The tray menu shows the MCP URL, or the error if the port could not be opened.
+Click the HyperHand tray icon, or right-click it and choose **Settings...**, to open the settings window. It shows the MCP URL (with **Copy**), or the error if the port could not be opened, and whether the background service is running.
 
 ### Restarting the tray
 
@@ -59,11 +59,15 @@ Use the tray's restart action to restart the tray and MCP listener as the ordina
 
 ### Using a different port
 
+In the settings window, check **Change port**, enter a port from 1024 to 65535 and click **Apply and restart**. The port is saved for your user and also used at logon. Use the matching URL when adding the server to your MCP client.
+
+For a single run, start the tray with a port instead; it then ignores the saved port:
+
 ```
 hyperhand.exe -port 8771
 ```
 
-The server always listens on `127.0.0.1`. The scheduled task created by `install` runs without arguments; to use another port at logon, add `-port <n>` to the task's action arguments in Task Scheduler, and use the matching URL when adding the server to your MCP client.
+The server always listens on `127.0.0.1`.
 
 ## 3. Add HyperHand to an MCP client
 
@@ -132,16 +136,16 @@ The installer does the same as above: it copies itself to `%LOCALAPPDATA%\HyperH
 `vm_start` waits until the agent answers and the session is unlocked. The agent starts when the user signs in, so the guest must reach a signed-in session on its own:
 
 - **Automatic sign-in** (recommended): configure the guest to sign the user in at boot, for example with [Sysinternals Autologon](https://learn.microsoft.com/en-us/sysinternals/downloads/autologon). HyperHand cannot sign a user in at the sign-in screen.
-- **Unlock password**: Windows can sign the user in and then lock the session, for example after an update. To let `vm_start` and `vm_unlock` unlock it, right-click the HyperHand tray icon and choose **Virtual machines > *VM name* > Set unlock password...**, then enter the password or PIN the guest lock screen asks for (ASCII only). It is stored in Windows Credential Manager for your user as `HyperHand:<VM name>`; **Clear unlock password** removes it. HyperHand types it on the VM's keyboard only after the agent confirms that the sign-in screen's password box has the input, and types it once per call.
+- **Unlock password**: Windows can sign the user in and then lock the session, for example after an update. To let `vm_start` and `vm_unlock` unlock it, open the HyperHand settings window from the tray icon, select the VM under **Virtual machines** and click **Set unlock password...**, then enter the password or PIN the guest lock screen asks for (ASCII only). It is stored in Windows Credential Manager for your user as `HyperHand:<VM name>`; **Clear unlock password** removes it. HyperHand types it on the VM's keyboard only after the agent confirms that the sign-in screen's password box has the input, and types it once per call.
 
 Use `vm_status` to see whether the agent answers, whether the session is locked and whether a password is stored.
 
 ### Watch a VM
 
-HyperHand works on the VM console without any window open, so `vm_start` starts VMs in the background. To watch what the AI does, right-click the HyperHand tray icon and choose **Virtual machines > *VM name* > Open console**. Check **Open console when started** to have Virtual Machine Connection open whenever `vm_start` starts that VM; the setting is per VM and per user (`%LOCALAPPDATA%\HyperHand\settings.json`). If a console for the VM is already open, it is brought to the front instead of opening a second one, which would ask to take over the connection.
+HyperHand works on the VM console without any window open, so `vm_start` starts VMs in the background. To watch what the AI does, open the HyperHand settings window from the tray icon, select the VM under **Virtual machines** and click **Open console**. Check **Open console when started** to have Virtual Machine Connection open whenever `vm_start` starts that VM; the setting is per VM and per user (`%LOCALAPPDATA%\HyperHand\settings.json`). If a console for the VM is already open, it is brought to the front instead of opening a second one, which would ask to take over the connection.
 
 - Virtual Machine Connection needs Hyper-V rights that your everyday (non-elevated) account does not have. The tray opens it through the `HyperHand Console` task, which `install` registered with your highest privileges, so there is no UAC prompt. Your account, its groups and the VM's permissions are not changed.
-- Use a basic session. If the host allows enhanced session mode, the tray warns you: an enhanced session moves the guest session away from the console, and HyperHand's screenshots and input reach the lock screen instead. Turn it off with **View > Enhanced Session** in Virtual Machine Connection, or turn off **Allow enhanced session mode** in the Hyper-V host settings.
+- Use a basic session. If the host allows enhanced session mode, the settings window warns you: an enhanced session moves the guest session away from the console, and HyperHand's screenshots and input reach the lock screen instead. Turn it off with **View > Enhanced Session** in Virtual Machine Connection, or turn off **Allow enhanced session mode** in the Hyper-V host settings.
 - Typing or clicking in the console window while the AI works mixes your input with the AI's.
 
 ### Allow `admin` exec without a prompt
@@ -307,7 +311,7 @@ The host keyboard sends key strokes, and a non-English IME in the guest can swal
 
 ### Port 8770 is already in use
 
-The tray menu shows the error instead of the MCP URL, and the log records it. Start the tray with `-port <n>` (and change the scheduled task arguments as described in [Using a different port](#using-a-different-port)), then re-add the server in your MCP client with the new URL.
+The settings window shows the error as the server status, the tray icon's tooltip says that the MCP server is not running, and the log records it. Choose another port as described in [Using a different port](#using-a-different-port), then re-add the server in your MCP client with the new URL.
 
 ### `admin` exec hangs or times out
 

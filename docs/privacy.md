@@ -23,7 +23,7 @@ On the host:
 - `%ProgramData%\HyperHand\config.json`, including the installing user's SID used for local broker access control. This configuration is protected from ordinary user changes.
 - `%ProgramData%\HyperHand\service-data`, the service's writable working directory, including temporary staging for guest agent installation.
 - Service error log: `%ProgramData%\HyperHand\service-data\broker.log`, with an approximately 1 MiB size limit. Service errors may also appear in the Windows Application event log under `HyperHandService`; use the file log if the event source is unavailable.
-- Unlock passwords set from the tray menu: generic credentials `HyperHand:<VM name>` in Windows Credential Manager, for the current user on this machine (protected by Windows for that user). Remove them with **Clear unlock password** in the tray or in Credential Manager; uninstallation does not remove them.
+- Unlock passwords set in the tray's settings window: generic credentials `HyperHand:<VM name>` in Windows Credential Manager, for the current user on this machine (protected by Windows for that user). Remove them with **Clear unlock password** in the tray or in Credential Manager; uninstallation does not remove them.
 - Scheduled task `HyperHand`, created by `hyperhand.exe install` to start the ordinary tray for the installing user at logon, with least privilege.
 - Scheduled task `HyperHand Console`, created by `hyperhand.exe install` for the installing user: no trigger; when run, it starts `vmconnect.exe localhost "<VM>"` with that user's highest privileges (see Access control).
 - `%LOCALAPPDATA%\HyperHand\settings.json`: the VMs whose console opens when `vm_start` starts them.
