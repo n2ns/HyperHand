@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/go-ole/go-ole/oleutil"
 	"golang.org/x/sys/windows"
@@ -63,16 +64,57 @@ func TestSetupACLHasNoUserWriteGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sd, err := windows.SecurityDescriptorFromString(setupRootSDDL(owner.SID))
+	// Windows may serialize a RID-500 SID as LA instead of its numeric string.
+	// Compare binary ACEs so both forms retain the same security assertions.
+	adminSD, err := windows.SecurityDescriptorFromString("O:LA")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := sd.String()
-	if !strings.Contains(s, "D:P") || !strings.Contains(s, ";;;"+owner.SID+")") {
-		t.Fatalf("missing protected DACL or original owner: %s", s)
+	adminSID, _, err := adminSD.Owner()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(s, "(A;OICI;FA;;;"+owner.SID+")") {
-		t.Fatal("owner may modify privileged setup files")
+	for name, ownerSID := range map[string]string{"current-user": owner.SID, "local-administrator": adminSID.String()} {
+		t.Run(name, func(t *testing.T) {
+			sd, err := windows.SecurityDescriptorFromString(setupRootSDDL(ownerSID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			control, _, err := sd.Control()
+			if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
+				t.Fatalf("missing protected DACL: control=%#x err=%v", control, err)
+			}
+			dacl, _, err := sd.DACL()
+			if err != nil || dacl == nil {
+				t.Fatalf("missing DACL: %v", err)
+			}
+			const fileAllAccess = 0x1f01ff // FILE_ALL_ACCESS from winnt.h
+			want := []struct {
+				sid  string
+				mask windows.ACCESS_MASK
+			}{
+				{"S-1-5-18", fileAllAccess},
+				{"S-1-5-32-544", fileAllAccess},
+				{ownerSID, windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE},
+			}
+			if int(dacl.AceCount) != len(want) {
+				t.Fatalf("ACE count=%d, want %d", dacl.AceCount, len(want))
+			}
+			for i, entry := range want {
+				var ace *windows.ACCESS_ALLOWED_ACE
+				if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
+					t.Fatal(err)
+				}
+				sid, err := windows.StringToSid(entry.sid)
+				if err != nil {
+					t.Fatal(err)
+				}
+				trustee := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+				if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE || !windows.EqualSid(trustee, sid) || ace.Mask != entry.mask {
+					t.Fatalf("ACE %d: type=%d flags=%#x mask=%#x; want allow, OICI, SID %s, mask=%#x", i, ace.Header.AceType, ace.Header.AceFlags, ace.Mask, entry.sid, entry.mask)
+				}
+			}
+		})
 	}
 }
 
