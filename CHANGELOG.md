@@ -29,9 +29,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `hyperhand.exe install` installs both executables under `%ProgramFiles%\HyperHand`, records the owner under `%ProgramData%\HyperHand`, and migrates the `HyperHand` logon task from highest privileges to least privilege. Repeating `install` updates the installation.
 - Host file transfers use the ordinary tray user's permissions. The local MCP endpoint remains unauthenticated; the broker pipe ACL is not MCP authentication.
 - `scripts/restart-tray.ps1` now invokes installation/update of the built executables instead of terminating every process named `hyperhand.exe`.
+- `install` and `uninstall` no longer run an embedded PowerShell script: the elevated `hyperhand.exe` does the work itself through the service control manager, Task Scheduler, local group and security APIs. Uninstalling from the installed `hyperhand.exe` leaves `%ProgramData%\HyperHand\uninstall-cleanup.exe` until the next restart.
 
 ### Fixed
 
+- Reinstalling could stop with "Access is denied" after stopping the service, leaving the service stopped and no tray: setup tried to end the service's process, which runs as the service account. It now waits for that process to exit.
 - VM start and stop wait up to 45 seconds for asynchronous Hyper-V jobs and report failures or timeouts without automatically resending the operation.
 - `vm_focus_window` no longer puts ribbon programs such as AutoCAD into key-tip mode. When the window did not come to the front at once, the agent simulated an Alt press, which arrived after the switch in the focused window; it now injects a zero-distance mouse move instead.
 

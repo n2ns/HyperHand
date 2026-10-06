@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -9,12 +11,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
+	"golang.org/x/sys/windows/svc/mgr"
 
+	"hyperhand/internal/broker"
 	"hyperhand/internal/proto"
 )
 
@@ -124,6 +132,48 @@ func noSetupReparse(path string) error {
 	}
 }
 
+const (
+	serviceAccount = `NT SERVICE\` + broker.ServiceName
+	logonTask      = "HyperHand"
+	cleanupExe     = "uninstall-cleanup.exe"
+	socketKey      = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\` + proto.ServiceID
+)
+
+// setupPaths are the installation's fixed locations. System paths come from known folders and GetSystemDirectory,
+// never from environment variables, which in the elevated process can come from the user's registry.
+type setupPaths struct {
+	bin, data, hostExe, agentExe, config, serviceData, cleanup, vmconnect string
+}
+
+func installPaths() (setupPaths, error) {
+	var p setupPaths
+	programData, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
+	if err != nil {
+		return p, err
+	}
+	programFiles, err := windows.KnownFolderPath(windows.FOLDERID_ProgramFiles, 0)
+	if err != nil {
+		return p, err
+	}
+	system, err := windows.GetSystemDirectory()
+	if err != nil {
+		return p, err
+	}
+	p.bin, p.data = filepath.Join(programFiles, "HyperHand"), filepath.Join(programData, "HyperHand")
+	p.hostExe, p.agentExe = filepath.Join(p.bin, "hyperhand.exe"), filepath.Join(p.bin, "hyperhand-agent.exe")
+	p.config, p.serviceData, p.cleanup = filepath.Join(p.data, "config.json"), filepath.Join(p.data, "service-data"), filepath.Join(p.data, cleanupExe)
+	p.vmconnect = filepath.Join(system, "vmconnect.exe")
+	for _, path := range []string{p.bin, p.data, p.hostExe, p.agentExe, p.config, p.serviceData, p.cleanup} {
+		if err := noSetupReparse(path); err != nil {
+			return p, err
+		}
+	}
+	return p, nil
+}
+
+// serviceCommand is the service's command line, as mgr.CreateService builds it.
+func serviceCommand(hostExe string) string { return syscall.EscapeArg(hostExe) + " service" }
+
 func runSetup(operation string) (bool, error) {
 	owner, err := setupOwner(os.Args[2:])
 	if err != nil {
@@ -132,22 +182,21 @@ func runSetup(operation string) (bool, error) {
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		return false, runAs(operation, "--owner-sid", owner.SID, "--owner-user", owner.User)
 	}
-	programData, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
+	p, err := installPaths()
 	if err != nil {
 		return false, err
 	}
-	programFiles, err := windows.KnownFolderPath(windows.FOLDERID_ProgramFiles, 0)
+	self, err := os.Executable()
 	if err != nil {
 		return false, err
 	}
-	root, bin := filepath.Join(programData, "HyperHand"), filepath.Join(programFiles, "HyperHand")
-	for _, path := range []string{root, bin, filepath.Join(root, "config.json")} {
-		if err := noSetupReparse(path); err != nil {
-			return false, err
-		}
+	if err := noSetupReparse(self); err != nil {
+		return false, err
 	}
-	configPath := filepath.Join(root, "config.json")
-	if b, err := os.ReadFile(configPath); err == nil {
+	if err := removeStaleCleanup(p); err != nil {
+		return false, err
+	}
+	if b, err := os.ReadFile(p.config); err == nil {
 		var config struct {
 			OwnerSID string `json:"owner_sid"`
 		}
@@ -163,7 +212,7 @@ func runSetup(operation string) (bool, error) {
 		if operation == "uninstall" {
 			return false, errors.New("managed installation not found; no service or files were removed")
 		}
-		for _, path := range []string{root, bin} {
+		for _, path := range []string{p.data, p.bin} {
 			entries, err := os.ReadDir(path)
 			if err == nil && len(entries) != 0 {
 				return false, fmt.Errorf("unrecognized non-empty installation directory: %s", path)
@@ -173,285 +222,635 @@ func runSetup(operation string) (bool, error) {
 			}
 		}
 	}
-	if err := setupRoot(root, owner.SID); err != nil {
+	if err := setupRoot(p.data, owner.SID); err != nil {
 		return false, err
 	}
-	self, err := os.Executable()
+	if err := assertOwned(p.config); err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+
+	runtime.LockOSThread() // COM (Task Scheduler) is used from this thread only
+	defer runtime.UnlockOSThread()
+	ts, err := connectTaskScheduler()
 	if err != nil {
 		return false, err
 	}
-	if err := noSetupReparse(self); err != nil {
-		return false, err
-	}
-	system, err := windows.GetSystemDirectory()
+	defer ts.close()
+	m, err := mgr.Connect()
 	if err != nil {
 		return false, err
 	}
-	f, err := os.CreateTemp(root, "setup-*.ps1")
+	defer m.Disconnect()
+	state, err := inspectInstall(p, owner, ts, m)
 	if err != nil {
 		return false, err
 	}
-	defer os.Remove(f.Name())
-	if _, err := f.WriteString(setupScript); err != nil {
-		f.Close()
-		return false, err
+	if operation == "install" {
+		return true, setupInstall(p, owner, self, state, ts, m)
 	}
-	if err := f.Close(); err != nil {
-		return false, err
-	}
-	// A pre-existing root is never relied on for the executable script's ACL.
-	sd, err := windows.SecurityDescriptorFromString("O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)")
+	return true, setupUninstall(p, self, state, ts, m)
+}
+
+// installState is what an earlier installation left, checked to be HyperHand's own before it is changed.
+type installState struct {
+	logonTask, consoleTask, service bool
+	oldExe                          string // the executable the logon task started, or ""
+}
+
+func inspectInstall(p setupPaths, owner setupIdentity, ts *taskScheduler, m *mgr.Mgr) (installState, error) {
+	var st installState
+	t, err := ts.task(logonTask)
 	if err != nil {
-		return false, err
+		return st, err
+	}
+	if t != nil {
+		if t.userSID != owner.SID || len(t.actions) != 1 {
+			return st, errors.New("existing HyperHand task belongs to another user or has unexpected actions")
+		}
+		st.logonTask, st.oldExe = true, strings.Trim(t.actions[0].path, `"`)
+		if !strings.EqualFold(filepath.Base(st.oldExe), "hyperhand.exe") || t.actions[0].args != "" {
+			return st, errors.New("existing task is not a recognized HyperHand tray task")
+		}
+		if err := noSetupReparse(st.oldExe); err != nil {
+			return st, err
+		}
+	}
+	if t, err = ts.task(consoleTask); err != nil {
+		return st, err
+	}
+	if t != nil {
+		if t.userSID != owner.SID || len(t.actions) != 1 || !strings.EqualFold(strings.Trim(t.actions[0].path, `"`), p.vmconnect) {
+			return st, fmt.Errorf("existing %s task belongs to another user or has unexpected actions", consoleTask)
+		}
+		st.consoleTask = true
+	}
+	s, err := m.OpenService(broker.ServiceName)
+	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+		return st, nil
+	}
+	if err != nil {
+		return st, err
+	}
+	defer s.Close()
+	c, err := s.Config()
+	if err != nil {
+		return st, err
+	}
+	if !strings.EqualFold(c.BinaryPathName, serviceCommand(p.hostExe)) || !strings.EqualFold(c.ServiceStartName, serviceAccount) {
+		return st, errors.New("existing service has unexpected binary or account")
+	}
+	st.service = true
+	return st, nil
+}
+
+func setupInstall(p setupPaths, owner setupIdentity, self string, st installState, ts *taskScheduler, m *mgr.Mgr) error {
+	sourceAgent := filepath.Join(filepath.Dir(self), "hyperhand-agent.exe")
+	if err := noSetupReparse(sourceAgent); err != nil {
+		return err
+	}
+	if fi, err := os.Stat(sourceAgent); err != nil || !fi.Mode().IsRegular() {
+		return errors.New("place hyperhand-agent.exe beside hyperhand.exe before installing")
+	}
+	if err := ensureDir(p.bin); err != nil {
+		return err
+	}
+	if err := setProtectedACL(p.bin, "(A;OICI;FRFX;;;BU)"); err != nil {
+		return err
+	}
+	if err := setProtectedACL(p.data, "(A;OICI;FRFX;;;"+owner.SID+")"); err != nil {
+		return err
+	}
+	config, err := json.Marshal(map[string]string{"owner_sid": owner.SID})
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(p.config, config, 0o644); err != nil {
+		return err
+	}
+	if err := setProtectedACL(p.config, "(A;;FR;;;"+owner.SID+")"); err != nil {
+		return err
+	}
+
+	if err := stopService(m); err != nil {
+		return err
+	}
+	if st.logonTask {
+		if err := ts.stop(logonTask); err != nil {
+			return err
+		}
+	}
+	if err := stopProcesses(p.hostExe, self, st.oldExe); err != nil {
+		return err
+	}
+	for _, pair := range [][2]string{{self, p.hostExe}, {sourceAgent, p.agentExe}} {
+		if !strings.EqualFold(pair[0], pair[1]) {
+			if err := replaceFile(pair[0], pair[1]); err != nil {
+				return err
+			}
+		}
+	}
+
+	if err := installService(m, p.hostExe, owner.SID, st.service); err != nil {
+		return err
+	}
+	serviceSID, _, _, err := windows.LookupSID("", serviceAccount)
+	if err != nil {
+		return err
+	}
+	svcSID := serviceSID.String()
+	if err := setProtectedACL(p.bin, "(A;OICI;FRFX;;;BU)(A;OICI;FRFX;;;"+svcSID+")"); err != nil {
+		return err
+	}
+	for _, path := range []string{p.hostExe, p.agentExe} {
+		if err := setProtectedACL(path, "(A;;FRFX;;;BU)(A;;FRFX;;;"+svcSID+")"); err != nil {
+			return err
+		}
+	}
+	if err := setProtectedACL(p.data, "(A;OICI;FRFX;;;"+owner.SID+")(A;OICI;FRFX;;;"+svcSID+")"); err != nil {
+		return err
+	}
+	if err := setProtectedACL(p.config, "(A;;FR;;;"+owner.SID+")(A;;FR;;;"+svcSID+")"); err != nil {
+		return err
+	}
+	if err := ensureDir(p.serviceData); err != nil {
+		return err
+	}
+	// 0x1301bf: read, write, execute and delete, but not change permissions or take ownership.
+	if err := setProtectedACL(p.serviceData, "(A;OICI;0x1301bf;;;"+svcSID+")"); err != nil {
+		return err
+	}
+	if err := setGroupMember(serviceSID, true); err != nil {
+		return err
+	}
+	if err := registerService(); err != nil { // the Hyper-V socket guest communication service
+		return err
+	}
+	if err := startService(m); err != nil {
+		return err
+	}
+
+	if err := ts.register(logonTask, logonTaskXML(p.hostExe, owner)); err != nil {
+		return err
+	}
+	if t, err := ts.task(logonTask); err != nil {
+		return err
+	} else if t == nil || t.runLevel != taskRunLevelLUA {
+		return errors.New("logon task is not limited")
+	}
+	// On demand only (no trigger): the tray runs it with a VM name to open VMConnect with the owner's full token,
+	// since VMConnect needs Hyper-V rights that the owner's filtered token lacks. Its only action is vmconnect.exe.
+	if err := ts.register(consoleTask, consoleTaskXML(p.vmconnect, owner)); err != nil {
+		return err
+	}
+	if t, err := ts.task(consoleTask); err != nil {
+		return err
+	} else if t == nil || len(t.actions) != 1 || !strings.EqualFold(t.actions[0].path, p.vmconnect) || t.triggers != 0 {
+		return errors.New("console task verification failed")
+	}
+	return ts.run(logonTask)
+}
+
+func setupUninstall(p setupPaths, self string, st installState, ts *taskScheduler, m *mgr.Mgr) error {
+	hostHash, err := fileHash(p.hostExe)
+	if err != nil {
+		return err
+	}
+	agentHash, err := fileHash(p.agentExe)
+	if err != nil {
+		return err
+	}
+	if err := stopService(m); err != nil {
+		return err
+	}
+	if st.logonTask {
+		if err := ts.stop(logonTask); err != nil {
+			return err
+		}
+		if err := ts.delete(logonTask); err != nil {
+			return err
+		}
+	}
+	if st.consoleTask {
+		if err := ts.delete(consoleTask); err != nil {
+			return err
+		}
+	}
+	if err := stopProcesses(p.hostExe, st.oldExe); err != nil {
+		return err
+	}
+	if st.service {
+		serviceSID, _, _, err := windows.LookupSID("", serviceAccount)
+		if err != nil {
+			return err
+		}
+		if err := setGroupMember(serviceSID, false); err != nil {
+			return err
+		}
+		if err := deleteService(m); err != nil {
+			return err
+		}
+	}
+	if err := registry.DeleteKey(registry.LOCAL_MACHINE, socketKey); err != nil && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+		return err
+	}
+	if entries, err := os.ReadDir(p.serviceData); err == nil && len(entries) == 0 {
+		if err := os.Remove(p.serviceData); err != nil {
+			return err
+		}
+	}
+	if !strings.EqualFold(self, p.hostExe) {
+		return removeInstalledFiles(p, hostHash, agentHash, false)
+	}
+	// This process is the installed host and cannot delete its own file. A protected copy waits for it to exit and
+	// removes only the named files with the original hashes.
+	return startCleanup(p, self, hostHash, agentHash)
+}
+
+// removeInstalledFiles deletes the installed executables if they still have the hashes taken at uninstall ("" =
+// absent), then the empty installation directory, and the owner marker and data directory unless other data
+// remains. The cleanup copy cannot delete itself; it and the data directory are deleted at the next restart.
+func removeInstalledFiles(p setupPaths, hostHash, agentHash string, fromCleanup bool) error {
+	for _, path := range []string{p.bin, p.data} {
+		if err := noSetupReparse(path); err != nil {
+			return err
+		}
+	}
+	for _, f := range [][2]string{{p.hostExe, hostHash}, {p.agentExe, agentHash}} {
+		h, err := fileHash(f[0])
+		if err != nil {
+			return err
+		}
+		if h == "" {
+			continue
+		}
+		if h != f[1] {
+			return fmt.Errorf("%s changed; cleanup stopped", f[0])
+		}
+		if err := os.Remove(f[0]); err != nil {
+			return err
+		}
+	}
+	if entries, err := os.ReadDir(p.bin); err == nil && len(entries) == 0 {
+		if err := os.Remove(p.bin); err != nil {
+			return err
+		}
+	}
+	// Keep the owner marker with retained service data, so reinstall can verify ownership without deleting those
+	// files. Otherwise remove it last.
+	entries, err := os.ReadDir(p.data)
+	if err != nil {
+		return err
+	}
+	remaining := 0
+	for _, e := range entries {
+		if !strings.EqualFold(e.Name(), "config.json") && !(fromCleanup && strings.EqualFold(e.Name(), cleanupExe)) {
+			remaining++
+		}
+	}
+	if remaining != 0 {
+		return nil
+	}
+	if err := os.Remove(p.config); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if !fromCleanup {
+		return os.Remove(p.data)
+	}
+	for _, path := range []string{p.cleanup, p.data} { // a directory is deleted at restart only if it is empty
+		name, _ := windows.UTF16PtrFromString(path)
+		if err := windows.MoveFileEx(name, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// startCleanup copies this executable to an administrators-only file and runs it to finish uninstalling.
+func startCleanup(p setupPaths, self, hostHash, agentHash string) error {
+	if err := copyProtected(self, p.cleanup, "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)"); err != nil {
+		return err
+	}
+	cmd := exec.Command(p.cleanup, "uninstall-cleanup", "--wait-pid", strconv.Itoa(os.Getpid()), "--host-hash", hostHash, "--agent-hash", agentHash)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
+}
+
+// uninstallCleanup is the copy started by startCleanup. It finds the installation itself rather than trusting its
+// arguments, waits for the uninstalling process to exit and records a failure in uninstall-error.log.
+func uninstallCleanup(args []string) {
+	p, err := installPaths()
+	if err != nil {
+		return
+	}
+	err = func() error {
+		f := flag.NewFlagSet("uninstall-cleanup", flag.ContinueOnError)
+		f.SetOutput(io.Discard)
+		pid := f.Uint("wait-pid", 0, "")
+		hostHash := f.String("host-hash", "", "")
+		agentHash := f.String("agent-hash", "", "")
+		if err := f.Parse(args); err != nil {
+			return err
+		}
+		self, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(self, p.cleanup) || !windows.GetCurrentProcessToken().IsElevated() {
+			return errors.New("uninstall cleanup must run elevated from its own location")
+		}
+		if h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(*pid)); err == nil {
+			windows.WaitForSingleObject(h, windows.INFINITE)
+			windows.CloseHandle(h)
+		} else if err != windows.ERROR_INVALID_PARAMETER { // already exited
+			return err
+		}
+		return removeInstalledFiles(p, *hostHash, *agentHash, true)
+	}()
+	if err != nil {
+		os.WriteFile(filepath.Join(p.data, "uninstall-error.log"), []byte(err.Error()+"\n"), 0o644)
+	}
+}
+
+// removeStaleCleanup deletes the cleanup copy an earlier uninstall left for deletion at restart, unless it is still
+// running. Only inside a data directory that administrators own.
+func removeStaleCleanup(p setupPaths) error {
+	if _, err := os.Stat(p.cleanup); err != nil {
+		return nil
+	}
+	if assertOwned(p.data) != nil {
+		return nil // the ownership checks that follow report it
+	}
+	running, err := processesWithPath(p.cleanup)
+	if err != nil {
+		return err
+	}
+	if len(running) != 0 {
+		return errors.New("an earlier uninstall is still finishing; try again shortly")
+	}
+	return os.Remove(p.cleanup)
+}
+
+// assertOwned requires path to be owned by SYSTEM or Administrators, which ordinary users cannot change.
+func assertOwned(path string) error {
+	if err := noSetupReparse(path); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(path); err != nil {
+		return err
+	}
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return err
+	}
+	if s := owner.String(); s != "S-1-5-18" && s != "S-1-5-32-544" {
+		return fmt.Errorf("untrusted resource owner: %s", path)
+	}
+	return nil
+}
+
+// setProtectedACL makes Administrators the owner and replaces the DACL with SYSTEM and Administrators full control
+// plus extra ACEs, not inherited from the parent.
+func setProtectedACL(path, extra string) error {
+	if err := noSetupReparse(path); err != nil {
+		return err
+	}
+	sd, err := windows.SecurityDescriptorFromString("O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" + extra)
+	if err != nil {
+		return err
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return err
+	}
+	group, _, err := sd.Group()
+	if err != nil {
+		return err
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
-		return false, err
+		return err
 	}
-	if err := windows.SetNamedSecurityInfo(f.Name(), windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
-		return false, err
-	}
-	cmd := exec.Command(filepath.Join(system, "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", f.Name(),
-		"-Operation", operation, "-OwnerSID", owner.SID, "-OwnerUser", owner.User, "-SourceExe", self, "-BinDir", bin, "-DataDir", root, "-SetupPID", fmt.Sprint(os.Getpid()), "-SocketID", proto.ServiceID)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return false, fmt.Errorf("setup: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return true, nil
+	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner, group, dacl, nil)
 }
 
-const setupScript = `param([ValidateSet('install','uninstall')][string]$Operation,[string]$OwnerSID,[string]$OwnerUser,[string]$SourceExe,[string]$BinDir,[string]$DataDir,[int]$SetupPID,[guid]$SocketID)
-$ErrorActionPreference='Stop'
-[Console]::OutputEncoding=[Text.Encoding]::UTF8
-$serviceName='HyperHandService'
-$serviceAccount='NT SERVICE\HyperHandService'
-$hostExe=Join-Path $BinDir 'hyperhand.exe'
-$agentExe=Join-Path $BinDir 'hyperhand-agent.exe'
-$configPath=Join-Path $DataDir 'config.json'
-$serviceData=Join-Path $DataDir 'service-data'
-$cleanup=Join-Path $DataDir 'uninstall-cleanup.ps1'
-$socketPath='HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\'+$SocketID.ToString()
-$groupSID=[Security.Principal.SecurityIdentifier]'S-1-5-32-578'
-function Assert-Path([string]$Path) {
- if (-not [IO.Path]::IsPathRooted($Path)) { throw 'Expected absolute path' }
- $current=$Path
- while ($current) {
-  if (Test-Path -LiteralPath $current) {
-   $item=Get-Item -LiteralPath $current -Force
-   if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw ('Refusing reparse point: '+$current) }
-  }
-  $parent=[IO.Path]::GetDirectoryName($current)
-  if ($parent -eq $current) { break }
-  $current=$parent
- }
+// ensureDir creates an administrators-only directory, or checks that an existing one is owned by administrators.
+func ensureDir(path string) error {
+	if err := noSetupReparse(path); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return assertOwned(path)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	sd, err := windows.SecurityDescriptorFromString("O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	if err != nil {
+		return err
+	}
+	p, _ := windows.UTF16PtrFromString(path)
+	return windows.CreateDirectory(p, &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd})
 }
-function Set-ProtectedACL([string]$Path,[string]$Extra) {
- Assert-Path $Path
- $acl=Get-Acl -LiteralPath $Path
- $acl.SetSecurityDescriptorSddlForm('O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'+$Extra)
- Set-Acl -LiteralPath $Path -AclObject $acl
+
+// replaceFile copies src beside dst under its final protected descriptor, checks the copy's hash and renames it
+// over dst.
+func replaceFile(src, dst string) error {
+	if _, err := os.Lstat(dst); err == nil {
+		if err := assertOwned(dst); err != nil {
+			return err
+		}
+	}
+	next := dst + ".installing"
+	if err := noSetupReparse(next); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(next); err == nil {
+		return fmt.Errorf("stale installer file: %s", next)
+	}
+	defer os.Remove(next)
+	if err := copyProtected(src, next, "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;BU)"); err != nil {
+		return err
+	}
+	want, err := fileHash(src)
+	if err != nil {
+		return err
+	}
+	if got, err := fileHash(next); err != nil {
+		return err
+	} else if got != want {
+		return errors.New("copied executable hash mismatch")
+	}
+	from, _ := windows.UTF16PtrFromString(next)
+	to, _ := windows.UTF16PtrFromString(dst)
+	return windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
 }
-function Assert-Owned([string]$Path) {
- Assert-Path $Path
- $owner=(Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value
- if ($owner -notin @('S-1-5-18','S-1-5-32-544')) { throw ('Untrusted resource owner: '+$Path) }
+
+// copyProtected copies src to a new file dst created with the security descriptor sddl, so dst is never accessible
+// under another descriptor.
+func copyProtected(src, dst, sddl string) error {
+	if err := noSetupReparse(dst); err != nil {
+		return err
+	}
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		return err
+	}
+	name, _ := windows.UTF16PtrFromString(dst)
+	h, err := windows.CreateFile(name, windows.GENERIC_WRITE, 0,
+		&windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd},
+		windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return err
+	}
+	out := os.NewFile(uintptr(h), dst)
+	in, err := os.Open(src)
+	if err != nil {
+		out.Close()
+		return err
+	}
+	defer in.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
-function Stop-Broker {
- $s=Get-Service -Name $serviceName -ErrorAction SilentlyContinue
- if ($s -and $s.Status -ne 'Stopped') { Stop-Service -Name $serviceName -NoWait; $s.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(60)) }
+
+// fileHash returns the SHA-256 of path in hex, or "" if it does not exist.
+func fileHash(path string) (string, error) {
+	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
-function Stop-ExactProcesses([string[]]$Paths) {
- foreach ($p in Get-Process -Name 'hyperhand' -ErrorAction SilentlyContinue) {
-  if ($p.Id -eq $SetupPID) { continue }
-  try { $path=$p.MainModule.FileName } catch { throw ('Cannot verify HyperHand process '+$p.Id) }
-  if ($path -in $Paths) { $p.Kill(); if (-not $p.WaitForExit(10000)) { throw 'HyperHand process did not stop' } }
- }
+
+// processesWithPath returns the IDs of processes, other than this one, whose executable is one of paths. A process
+// with the same file name that cannot be opened to check its path is an error.
+func processesWithPath(paths ...string) ([]uint32, error) {
+	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer windows.CloseHandle(snap)
+	names := map[string]bool{}
+	for _, p := range paths {
+		if p != "" {
+			names[strings.ToLower(filepath.Base(p))] = true
+		}
+	}
+	var ids []uint32
+	e := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
+	for err = windows.Process32First(snap, &e); err == nil; err = windows.Process32Next(snap, &e) {
+		if e.ProcessID == uint32(os.Getpid()) || !names[strings.ToLower(windows.UTF16ToString(e.ExeFile[:]))] {
+			continue
+		}
+		image, err := processImage(e.ProcessID)
+		if err != nil {
+			return nil, fmt.Errorf("cannot verify HyperHand process %d: %w", e.ProcessID, err)
+		}
+		for _, p := range paths {
+			if p != "" && strings.EqualFold(image, p) {
+				ids = append(ids, e.ProcessID)
+				break
+			}
+		}
+	}
+	if !errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+		return nil, err
+	}
+	return ids, nil
 }
-function Set-GroupMember([string]$SID,[bool]$Present) {
- $found=@(Get-LocalGroupMember -SID $groupSID | Where-Object {$_.SID.Value -eq $SID}).Count -ne 0
- if ($Present -and -not $found) { Add-LocalGroupMember -SID $groupSID -Member $SID }
- if (-not $Present -and $found) { Remove-LocalGroupMember -SID $groupSID -Member $SID }
- $after=@(Get-LocalGroupMember -SID $groupSID | Where-Object {$_.SID.Value -eq $SID}).Count -ne 0
- if ($after -ne $Present) { throw 'Hyper-V group membership verification failed' }
+
+func processImage(pid uint32) (string, error) {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return "", err
+	}
+	defer windows.CloseHandle(h)
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	n := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &n); err != nil {
+		return "", err
+	}
+	return windows.UTF16ToString(buf[:n]), nil
 }
-function Check-Native { if ($LASTEXITCODE -ne 0) { throw ('Native command failed: '+$LASTEXITCODE) } }
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class HyperHandSCM {
- [DllImport("advapi32.dll",CharSet=CharSet.Unicode,SetLastError=true)] public static extern IntPtr OpenSCManager(string machine,string database,uint access);
- [DllImport("advapi32.dll",CharSet=CharSet.Unicode,SetLastError=true)] public static extern IntPtr CreateService(IntPtr manager,string name,string display,uint access,uint type,uint start,uint error,string path,string group,IntPtr tag,string dependencies,string account,string password);
- [DllImport("advapi32.dll",CharSet=CharSet.Unicode,SetLastError=true)] public static extern IntPtr OpenService(IntPtr manager,string name,uint access);
- [DllImport("advapi32.dll",CharSet=CharSet.Unicode,SetLastError=true)] public static extern bool ChangeServiceConfig(IntPtr service,uint type,uint start,uint error,string path,string group,IntPtr tag,string dependencies,string account,string password,string display);
- [DllImport("advapi32.dll",SetLastError=true)] public static extern bool DeleteService(IntPtr service);
- [DllImport("advapi32.dll")] public static extern bool CloseServiceHandle(IntPtr handle);
- public static void Install(string name,string path,string account,bool exists) {
-  IntPtr m=OpenSCManager(null,null,0xF003F);
-  if(m==IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-  try {
-   IntPtr s=exists ? OpenService(m,name,0xF01FF) : CreateService(m,name,name,0xF01FF,0x10,2,1,path,null,IntPtr.Zero,null,account,null);
-   if(s==IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-   try { if(exists && !ChangeServiceConfig(s,uint.MaxValue,2,1,path,null,IntPtr.Zero,null,account,null,null)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); }
-   finally { CloseServiceHandle(s); }
-  } finally { CloseServiceHandle(m); }
- }
- public static void Delete(string name) {
-  IntPtr m=OpenSCManager(null,null,0xF003F);
-  if(m==IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-  try {
-   IntPtr s=OpenService(m,name,0xF01FF);
-   if(s==IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-   try { if(!DeleteService(s)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); }
-   finally { CloseServiceHandle(s); }
-  } finally { CloseServiceHandle(m); }
- }
+
+// stopProcesses ends the HyperHand processes started from paths (the trays; the service process has already exited)
+// and waits for them to exit.
+func stopProcesses(paths ...string) error {
+	ids, err := processesWithPath(paths...)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, id)
+		if err == windows.ERROR_INVALID_PARAMETER {
+			continue // exited meanwhile
+		}
+		if err != nil {
+			return fmt.Errorf("cannot stop HyperHand process %d: %w", id, err)
+		}
+		err = windows.TerminateProcess(h, 1)
+		if err == nil {
+			var ev uint32
+			ev, err = windows.WaitForSingleObject(h, 10000)
+			if err == nil && ev != windows.WAIT_OBJECT_0 {
+				err = errors.New("did not exit")
+			}
+		}
+		windows.CloseHandle(h)
+		if err != nil {
+			return fmt.Errorf("HyperHand process %d: %w", id, err)
+		}
+	}
+	return nil
 }
-'@
-foreach ($path in @($BinDir,$DataDir,$hostExe,$agentExe,$configPath,$serviceData,$SourceExe)) { Assert-Path $path }
-Assert-Path $cleanup
-if (Test-Path -LiteralPath $cleanup) { throw 'Pending uninstall cleanup requires completion or inspection before setup' }
-Assert-Owned $DataDir
-if (([Security.Principal.NTAccount]$OwnerUser).Translate([Security.Principal.SecurityIdentifier]).Value -ne $OwnerSID) { throw 'Owner SID/account mismatch' }
-if (Test-Path -LiteralPath $configPath) {
- Assert-Owned $configPath
- if ((Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json).owner_sid -ne $OwnerSID) { throw 'Existing owner differs' }
+
+// waitProcessGone waits until no process with the ID and executable file name is listed. It needs no access to the
+// process, which administrators may not have for one running as a service account.
+func waitProcessGone(pid uint32, exe string, timeout time.Duration) error {
+	for deadline := time.Now().Add(timeout); ; time.Sleep(200 * time.Millisecond) {
+		listed, err := processListed(pid, exe)
+		if err != nil || !listed {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("process %d did not exit", pid)
+		}
+	}
 }
-$task=Get-ScheduledTask -TaskName 'HyperHand' -TaskPath '\' -ErrorAction SilentlyContinue
-$oldExe=$null
-if ($task) {
- $taskUser=$task.Principal.UserId
- if (-not $taskUser.StartsWith('S-1-')) { $taskUser=([Security.Principal.NTAccount]$taskUser).Translate([Security.Principal.SecurityIdentifier]).Value }
- if ($taskUser -ne $OwnerSID -or @($task.Actions).Count -ne 1) { throw 'Existing HyperHand task belongs to another user or has unexpected actions' }
- $oldExe=$task.Actions[0].Execute.Trim('"')
- if ([IO.Path]::GetFileName($oldExe) -ine 'hyperhand.exe' -or $task.Actions[0].Arguments) { throw 'Existing task is not a recognized HyperHand tray task' }
- Assert-Path $oldExe
+
+func processListed(pid uint32, exe string) (bool, error) {
+	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return false, err
+	}
+	defer windows.CloseHandle(snap)
+	e := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
+	for err = windows.Process32First(snap, &e); err == nil; err = windows.Process32Next(snap, &e) {
+		if e.ProcessID == pid && strings.EqualFold(windows.UTF16ToString(e.ExeFile[:]), exe) {
+			return true, nil
+		}
+	}
+	if !errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+		return false, err
+	}
+	return false, nil
 }
-# GetSystemDirectory, not $env:SystemRoot: the path is kept in a highest-privilege task, and environment variables
-# of the elevated process can come from the user's registry.
-$vmconnect=Join-Path ([Environment]::SystemDirectory) 'vmconnect.exe'
-$consoleTask=Get-ScheduledTask -TaskName 'HyperHand Console' -TaskPath '\' -ErrorAction SilentlyContinue
-if ($consoleTask) {
- $consoleUser=$consoleTask.Principal.UserId
- if (-not $consoleUser.StartsWith('S-1-')) { $consoleUser=([Security.Principal.NTAccount]$consoleUser).Translate([Security.Principal.SecurityIdentifier]).Value }
- if ($consoleUser -ne $OwnerSID -or @($consoleTask.Actions).Count -ne 1 -or $consoleTask.Actions[0].Execute.Trim('"') -ine $vmconnect) { throw 'Existing HyperHand Console task belongs to another user or has unexpected actions' }
-}
-$service=Get-CimInstance Win32_Service -Filter "Name='HyperHandService'"
-$serviceCommand='"'+$hostExe+'" service'
-if ($service -and ($service.PathName -ine $serviceCommand -or $service.StartName -ine $serviceAccount)) { throw 'Existing service has unexpected binary or account' }
-if ($Operation -eq 'install') {
- $sourceAgent=Join-Path ([IO.Path]::GetDirectoryName($SourceExe)) 'hyperhand-agent.exe'
- Assert-Path $sourceAgent
- if (-not (Test-Path -LiteralPath $sourceAgent -PathType Leaf)) { throw 'Place hyperhand-agent.exe beside hyperhand.exe before installing' }
- if (-not (Test-Path -LiteralPath $BinDir)) { New-Item -ItemType Directory -Path $BinDir | Out-Null }
- else { Assert-Owned $BinDir }
- Set-ProtectedACL $BinDir '(A;OICI;FRFX;;;BU)'
- Set-ProtectedACL $DataDir ('(A;OICI;FRFX;;;'+$OwnerSID+')')
- [IO.File]::WriteAllText($configPath,(@{owner_sid=$OwnerSID} | ConvertTo-Json),[Text.UTF8Encoding]::new($false))
- Set-ProtectedACL $configPath ('(A;;FR;;;'+$OwnerSID+')')
- Stop-Broker
- if ($task) { Stop-ScheduledTask -TaskName 'HyperHand' -TaskPath '\' }
- Stop-ExactProcesses @($hostExe,$SourceExe,$oldExe)
- foreach ($pair in @(@($SourceExe,$hostExe),@($sourceAgent,$agentExe))) {
-  if ($pair[0] -ine $pair[1]) {
-   if (Test-Path -LiteralPath $pair[1]) { Assert-Owned $pair[1] }
-   $next=$pair[1]+'.installing'
-   Assert-Path $next
-   if (Test-Path -LiteralPath $next) { throw ('Stale installer file: '+$next) }
-   try {
-    Copy-Item -LiteralPath $pair[0] -Destination $next
-    Set-ProtectedACL $next '(A;OICI;FRFX;;;BU)'
-    if ((Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $next -Algorithm SHA256).Hash) { throw 'Copied executable hash mismatch' }
-    Move-Item -LiteralPath $next -Destination $pair[1] -Force
-   } finally { if (Test-Path -LiteralPath $next) { Remove-Item -LiteralPath $next } }
-  }
- }
- [HyperHandSCM]::Install($serviceName,$serviceCommand,$serviceAccount,[bool]$service)
- $serviceSID=([Security.Principal.NTAccount]$serviceAccount).Translate([Security.Principal.SecurityIdentifier]).Value
- & "$env:SystemRoot\System32\sc.exe" 'sidtype' $serviceName 'unrestricted'; Check-Native
- $serviceACL='D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x20015;;;'+$OwnerSID+')'
- & "$env:SystemRoot\System32\sc.exe" 'sdset' $serviceName $serviceACL; Check-Native
- Set-ProtectedACL $BinDir ('(A;OICI;FRFX;;;BU)(A;OICI;FRFX;;;'+$serviceSID+')')
- foreach ($path in @($hostExe,$agentExe)) { Set-ProtectedACL $path ('(A;;FRFX;;;BU)(A;;FRFX;;;'+$serviceSID+')') }
- Set-ProtectedACL $DataDir ('(A;OICI;FRFX;;;'+$OwnerSID+')(A;OICI;FRFX;;;'+$serviceSID+')')
- Set-ProtectedACL $configPath ('(A;;FR;;;'+$OwnerSID+')(A;;FR;;;'+$serviceSID+')')
- if (-not (Test-Path -LiteralPath $serviceData)) { New-Item -ItemType Directory -Path $serviceData | Out-Null }
- else { Assert-Owned $serviceData }
- Set-ProtectedACL $serviceData ('(A;OICI;0x1301bf;;;'+$serviceSID+')')
- Set-GroupMember $serviceSID $true
- $installedService=Get-CimInstance Win32_Service -Filter "Name='HyperHandService'"
- if ($installedService.StartName -ine $serviceAccount -or $installedService.PathName -ine $serviceCommand -or $installedService.StartMode -ne 'Auto') { throw 'Service account, executable or automatic startup verification failed' }
- New-Item -Path $socketPath -Force | Out-Null
- New-ItemProperty -LiteralPath $socketPath -Name 'ElementName' -PropertyType String -Value 'HyperHand' -Force | Out-Null
- Start-Service -Name $serviceName
- (Get-Service -Name $serviceName).WaitForStatus('Running',[TimeSpan]::FromSeconds(60))
- $action=New-ScheduledTaskAction -Execute $hostExe
- $trigger=New-ScheduledTaskTrigger -AtLogOn -User $OwnerSID
- $principal=New-ScheduledTaskPrincipal -UserId $OwnerSID -LogonType Interactive -RunLevel Limited
- $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
- Register-ScheduledTask -TaskName 'HyperHand' -TaskPath '\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
- $installedTask=Get-ScheduledTask -TaskName 'HyperHand' -TaskPath '\'
- if ($installedTask.Principal.RunLevel -ne 'Limited') { throw 'Logon task is not limited' }
- # On demand only (no trigger): the tray runs it with a VM name to open VMConnect with the owner's full token,
- # since VMConnect needs Hyper-V rights that the owner's filtered token lacks. Its only action is vmconnect.exe.
- $consoleAction=New-ScheduledTaskAction -Execute $vmconnect -Argument 'localhost "$(Arg0)"'
- $consolePrincipal=New-ScheduledTaskPrincipal -UserId $OwnerSID -LogonType Interactive -RunLevel Highest
- $consoleSettings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances Parallel
- Register-ScheduledTask -TaskName 'HyperHand Console' -TaskPath '\' -Action $consoleAction -Principal $consolePrincipal -Settings $consoleSettings -Force | Out-Null
- $installedConsole=Get-ScheduledTask -TaskName 'HyperHand Console' -TaskPath '\'
- if (@($installedConsole.Actions).Count -ne 1 -or $installedConsole.Actions[0].Execute -ine $vmconnect -or ($installedConsole.Triggers | Measure-Object).Count -ne 0) { throw 'Console task verification failed' }
- Start-ScheduledTask -TaskName 'HyperHand' -TaskPath '\'
-} else {
- $hostHash='missing'
- $agentHash='missing'
- if (Test-Path -LiteralPath $hostExe) { $hostHash=(Get-FileHash -LiteralPath $hostExe -Algorithm SHA256).Hash }
- if (Test-Path -LiteralPath $agentExe) { $agentHash=(Get-FileHash -LiteralPath $agentExe -Algorithm SHA256).Hash }
- Stop-Broker
- if ($task) { Stop-ScheduledTask -TaskName 'HyperHand' -TaskPath '\'; Unregister-ScheduledTask -TaskName 'HyperHand' -TaskPath '\' -Confirm:$false }
- if ($consoleTask) { Unregister-ScheduledTask -TaskName 'HyperHand Console' -TaskPath '\' -Confirm:$false }
- Stop-ExactProcesses @($hostExe,$oldExe)
- if ($service) {
-  $serviceSID=([Security.Principal.NTAccount]$serviceAccount).Translate([Security.Principal.SecurityIdentifier]).Value
-  Set-GroupMember $serviceSID $false
-  [HyperHandSCM]::Delete($serviceName)
- }
- if (Test-Path -LiteralPath $socketPath) { Remove-Item -LiteralPath $socketPath }
- if ((Test-Path -LiteralPath $serviceData) -and @(Get-ChildItem -LiteralPath $serviceData -Force).Count -eq 0) { Remove-Item -LiteralPath $serviceData }
- # The current executable may be the installed host. A protected helper waits
- # for it to close; only named files with the original hashes are removed.
- @'
-param([int]$WaitPID,[string]$BinDir,[string]$DataDir,[string]$HostHash,[string]$AgentHash)
-$ErrorActionPreference='Stop'
-function Assert-Safe([string]$Path) {
- $current=$Path
- while ($current) {
-  if (Test-Path -LiteralPath $current) { if ((Get-Item -LiteralPath $current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Refusing reparse path' } }
-  $parent=[IO.Path]::GetDirectoryName($current)
-  if ($parent -eq $current) { break }; $current=$parent
- }
-}
-try {
- Wait-Process -Id $WaitPID -ErrorAction SilentlyContinue
- Assert-Safe $BinDir; Assert-Safe $DataDir
- foreach ($f in @(@('hyperhand.exe',$HostHash),@('hyperhand-agent.exe',$AgentHash))) {
-  $path=Join-Path $BinDir $f[0]
-  if (Test-Path -LiteralPath $path) {
-   Assert-Safe $path
-   if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $f[1]) { throw 'Executable changed; cleanup stopped' }
-   Remove-Item -LiteralPath $path -Force
-  }
- }
- if ((Test-Path -LiteralPath $BinDir) -and @(Get-ChildItem -LiteralPath $BinDir -Force).Count -eq 0) { Remove-Item -LiteralPath $BinDir }
- # Keep the owner marker with retained service data, so reinstall can verify
- # ownership without deleting those files. Otherwise remove it last.
- $remaining=@(Get-ChildItem -LiteralPath $DataDir -Force | Where-Object { $_.FullName -ne $PSCommandPath -and $_.Name -ne 'config.json' })
- if ($remaining.Count -eq 0) { Remove-Item -LiteralPath (Join-Path $DataDir 'config.json') -ErrorAction SilentlyContinue }
- Remove-Item -LiteralPath $PSCommandPath -Force
- if (@(Get-ChildItem -LiteralPath $DataDir -Force).Count -eq 0) { Remove-Item -LiteralPath $DataDir }
-} catch { $_.Exception.ToString() | Set-Content -LiteralPath (Join-Path $DataDir 'uninstall-error.log') -Encoding UTF8 }
-'@ | Set-Content -LiteralPath $cleanup -Encoding UTF8
- Set-ProtectedACL $cleanup ''
- $cleanupArguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$cleanup+'" -WaitPID '+$SetupPID+' -BinDir "'+$BinDir+'" -DataDir "'+$DataDir+'" -HostHash '+$hostHash+' -AgentHash '+$agentHash
- Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList $cleanupArguments -WindowStyle Hidden | Out-Null
-}
-`

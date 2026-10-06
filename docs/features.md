@@ -371,11 +371,12 @@ The update replaces the file the agent is running from; the HKCU Run entry is un
 
 ### 9.2 install
 
-`hyperhand.exe install` installs or updates the host service and ordinary tray.
+`hyperhand.exe install` installs or updates the host service and ordinary tray. Installation and uninstallation run in the elevated `hyperhand.exe` itself, through the Windows service control manager, Task Scheduler, local group and security APIs; no script is run.
 
 - If not elevated, it relaunches itself elevated with `install`.
 - It installs `hyperhand.exe` and `hyperhand-agent.exe` under `%ProgramFiles%\HyperHand`.
 - It records the installing user's SID in the protected `%ProgramData%\HyperHand\config.json` and provides a service-writable `service-data` directory beneath it.
+- It stops an installed service and waits for its process to exit before replacing the executables, and ends installed tray processes.
 - It configures automatic Windows service `HyperHandService` under `NT SERVICE\HyperHandService` and adds that service account to Hyper-V Administrators. It does not add the human user or use LocalSystem.
 - It creates or replaces the `HyperHand` logon task for the installing user with least privilege and the installed executable. Reinstalling migrates the older highest-privilege task.
 - It creates or replaces the `HyperHand Console` task for the installing user: no trigger, highest privileges, one action `<system directory>\vmconnect.exe localhost "$(Arg0)"` (the system directory from `GetSystemDirectory`, not an environment variable). An existing task of that name must belong to the installing user and run `vmconnect.exe`, or installation stops.
@@ -386,7 +387,7 @@ The update replaces the file the agent is running from; the HKCU Run entry is un
 
 - If not elevated, it relaunches itself elevated with `uninstall` (one UAC prompt).
 - It stops the installed tray and service and removes `HyperHandService`, its Hyper-V Administrators membership, the `HyperHand` logon task, the `HyperHand Console` task and the fixed guest socket registration.
-- A protected cleanup helper waits for the installed executable to exit, then removes the installed host and agent executables only if their hashes still match. Only empty directories are removed.
+- Run from another copy, it removes the installed host and agent executables itself, only if their hashes still match. Run as the installed `hyperhand.exe`, which cannot delete its own file, it copies itself to the administrators-only `%ProgramData%\HyperHand\uninstall-cleanup.exe`, which waits for it to exit and then does the same. That copy cannot delete itself either: it and the then empty data directory are deleted at the next restart (`MoveFileEx` with `MOVEFILE_DELAY_UNTIL_REBOOT`); a later `install` deletes a leftover copy that is not running. A cleanup failure is written to `%ProgramData%\HyperHand\uninstall-error.log`. Only empty directories are removed.
 - User logs, guest files and nonempty service working data are preserved. If working data remains, the owner configuration is retained for reinstallation; otherwise the configuration and empty data directory are removed.
 - It does not uninstall guest agents or change host UAC policy.
 

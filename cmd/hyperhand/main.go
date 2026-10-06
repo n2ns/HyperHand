@@ -42,6 +42,10 @@ func main() {
 		uninstall()
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "uninstall-cleanup" {
+		uninstallCleanup(os.Args[2:])
+		return
+	}
 	dir := filepath.Join(os.Getenv("LOCALAPPDATA"), "HyperHand")
 	os.MkdirAll(dir, 0o755)
 	if f, err := os.OpenFile(filepath.Join(dir, "hyperhand.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
