@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -206,19 +207,21 @@ const enhancedSessionWarning = "This host allows enhanced session mode. If VMCon
 	"and HyperHand's screenshots and input reach the lock screen instead. Use View > Enhanced Session to switch it off in VMConnect, " +
 	"or turn off \"Allow enhanced session mode\" in the Hyper-V host settings."
 
-// consoleSettings is the per-user list of VMs whose console opens when vm_start starts them.
-type consoleSettings struct {
+// hostSettings are the per-user host settings: the MCP port and the VMs whose console opens when vm_start starts them.
+type hostSettings struct {
 	mu   sync.Mutex
 	path string
 	vms  map[string]bool
+	mcp  int // MCP port; 0 means the default
 }
 
 type settingsFile struct {
+	Port               int      `json:"port,omitempty"`
 	OpenConsoleOnStart []string `json:"open_console_on_start"`
 }
 
-func loadConsoleSettings(path string) *consoleSettings {
-	s := &consoleSettings{path: path, vms: map[string]bool{}}
+func loadHostSettings(path string) *hostSettings {
+	s := &hostSettings{path: path, vms: map[string]bool{}}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -234,17 +237,50 @@ func loadConsoleSettings(path string) *consoleSettings {
 	for _, vm := range f.OpenConsoleOnStart {
 		s.vms[vm] = true
 	}
+	s.mcp = f.Port
 	return s
 }
 
-func (s *consoleSettings) onStart(vm string) bool {
+// mcpPort picks the MCP port: an explicit -port flag, else the saved setting, else the flag's default.
+func mcpPort(flagPort int, explicit bool, saved int) int {
+	if !explicit && saved != 0 {
+		return saved
+	}
+	return flagPort
+}
+
+// parsePort accepts a port from 1024 to 65535.
+func parsePort(s string) (int, error) {
+	p, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || p < 1024 || p > 65535 {
+		return 0, fmt.Errorf("enter a port from 1024 to 65535")
+	}
+	return p, nil
+}
+
+// port returns the saved MCP port, or 0 for the default.
+func (s *hostSettings) port() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mcp
+}
+
+// setPort changes and saves the MCP port.
+func (s *hostSettings) setPort(p int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mcp = p
+	return s.save()
+}
+
+func (s *hostSettings) onStart(vm string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.vms[vm]
 }
 
 // setOnStart changes and saves the setting for vm.
-func (s *consoleSettings) setOnStart(vm string, on bool) error {
+func (s *hostSettings) setOnStart(vm string, on bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if on {
@@ -252,7 +288,12 @@ func (s *consoleSettings) setOnStart(vm string, on bool) error {
 	} else {
 		delete(s.vms, vm)
 	}
-	f := settingsFile{OpenConsoleOnStart: []string{}}
+	return s.save()
+}
+
+// save writes the settings; s.mu must be held.
+func (s *hostSettings) save() error {
+	f := settingsFile{Port: s.mcp, OpenConsoleOnStart: []string{}}
 	for v := range s.vms {
 		f.OpenConsoleOnStart = append(f.OpenConsoleOnStart, v)
 	}

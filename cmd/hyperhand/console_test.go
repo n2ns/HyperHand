@@ -50,7 +50,7 @@ func TestConsoleTitleVM(t *testing.T) {
 
 func TestConsoleSettingsRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sub", "settings.json")
-	s := loadConsoleSettings(path) // missing file: nothing enabled
+	s := loadHostSettings(path) // missing file: nothing enabled
 	if s.onStart("Win10") {
 		t.Fatal("enabled without a settings file")
 	}
@@ -63,8 +63,39 @@ func TestConsoleSettingsRoundTrip(t *testing.T) {
 	if err := s.setOnStart("Other", false); err != nil {
 		t.Fatal(err)
 	}
-	r := loadConsoleSettings(path)
-	if !r.onStart("Win10") || r.onStart("Other") {
-		t.Errorf("reloaded: %v", r.vms)
+	if s.port() != 0 {
+		t.Errorf("default port %d", s.port())
+	}
+	if err := s.setPort(8899); err != nil {
+		t.Fatal(err)
+	}
+	r := loadHostSettings(path)
+	if !r.onStart("Win10") || r.onStart("Other") || r.port() != 8899 {
+		t.Errorf("reloaded: %v port %d", r.vms, r.port())
+	}
+}
+
+func TestMCPPort(t *testing.T) {
+	for _, c := range []struct {
+		flag     int
+		explicit bool
+		saved    int
+		want     int
+	}{
+		{8770, false, 0, 8770},
+		{8770, false, 8899, 8899},
+		{9000, true, 8899, 9000}, // an explicit -port wins
+	} {
+		if got := mcpPort(c.flag, c.explicit, c.saved); got != c.want {
+			t.Errorf("%+v: %d", c, got)
+		}
+	}
+	for _, bad := range []string{"", "abc", "0", "80", "1023", "65536", "8770x"} {
+		if _, err := parsePort(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if p, err := parsePort(" 8899 "); err != nil || p != 8899 {
+		t.Errorf("8899: %d %v", p, err)
 	}
 }

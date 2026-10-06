@@ -57,9 +57,11 @@ func main() {
 		return
 	}
 
-	port := flag.Int("port", 8770, "MCP HTTP port on 127.0.0.1")
+	portFlag := flag.Int("port", 8770, "MCP HTTP port on 127.0.0.1; overrides the port saved in the settings window")
 	restartParent := flag.Uint("restart-parent", 0, "internal: wait for the previous tray process")
 	flag.Parse()
+	explicitPort := false
+	flag.Visit(func(f *flag.Flag) { explicitPort = explicitPort || f.Name == "port" })
 	if *restartParent != 0 {
 		if err := waitForPrevious(uint32(*restartParent)); err != nil {
 			log.Print("restart: ", err)
@@ -78,13 +80,19 @@ func main() {
 	}
 	defer windows.CloseHandle(mutex)
 
-	settings := loadConsoleSettings(filepath.Join(dir, "settings.json"))
-	url := fmt.Sprintf("http://127.0.0.1:%d/mcp", *port)
-	status := "MCP: " + url
+	settings := loadHostSettings(filepath.Join(dir, "settings.json"))
+	var restart atomic.Bool
+	info := &trayInfo{
+		port:     mcpPort(*portFlag, explicitPort, settings.port()),
+		explicit: explicitPort,
+		settings: settings,
+		restart:  func() { restart.Store(true); systray.Quit() },
+	}
+	url := info.url()
 	var httpServer *http.Server
-	if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", *port)); err != nil {
+	if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", info.port)); err != nil {
 		log.Print(err)
-		status = "Error: " + err.Error()
+		info.listenErr = err.Error()
 	} else {
 		srv := host.NewServer(&host.Manager{AfterStart: func(vm string) {
 			if settings.onStart(vm) {
@@ -101,22 +109,26 @@ func main() {
 		go func() { log.Print(httpServer.Serve(ln)) }()
 		log.Print("listening on ", url)
 	}
-	var restart atomic.Bool
 	systray.Run(func() {
 		systray.SetIcon(icon())
-		systray.SetTooltip("HyperHand")
-		st := systray.AddMenuItem(status, "")
-		st.Disable()
-		if httpServer != nil {
+		if info.listenErr != "" {
+			systray.SetTooltip("HyperHand: MCP server not running, see Settings")
+		} else {
+			systray.SetTooltip("HyperHand")
 			go func() {
 				if _, err := (&broker.Client{}).ListVMs(); err != nil {
 					log.Print("Hyper-V service unavailable: ", err)
-					st.SetTitle("Background service unavailable: run hyperhand.exe install")
+					systray.SetTooltip("HyperHand: background service unavailable, see Settings")
 				}
 			}()
 		}
-		systray.AddSeparator()
-		newVMMenu(settings)
+		open := systray.AddMenuItem("Settings...", "Open the HyperHand settings window (also a left click on the tray icon)")
+		systray.SetOnTapped(func() { showSettings(info) })
+		go func() {
+			for range open.ClickedCh {
+				showSettings(info)
+			}
+		}()
 		systray.AddSeparator()
 		reload := systray.AddMenuItem("Restart", "Restart the HyperHand tray and MCP server; VMs keep running")
 		quit := systray.AddMenuItem("Quit", "")
@@ -133,20 +145,25 @@ func main() {
 		httpServer.Close()
 	}
 	if restart.Load() {
-		if err := startReplacement(*port); err != nil {
+		if err := startReplacement(*portFlag, explicitPort); err != nil {
 			log.Print("restart: ", err)
 			msgBox("HyperHand restart failed:\n"+err.Error(), windows.MB_ICONERROR)
 		}
 	}
 }
 
-// The replacement waits for this process, including its mutex and pipe handles, to exit.
-func startReplacement(port int) error {
+// The replacement waits for this process, including its mutex and pipe handles, to exit. It gets -port only if this
+// process had it; otherwise it reads the port saved in the settings, which the settings window may have changed.
+func startReplacement(port int, explicit bool) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(self, "-port", strconv.Itoa(port), "-restart-parent", strconv.Itoa(os.Getpid()))
+	args := []string{"-restart-parent", strconv.Itoa(os.Getpid())}
+	if explicit {
+		args = append(args, "-port", strconv.Itoa(port))
+	}
+	cmd := exec.Command(self, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 	if err := cmd.Start(); err != nil {
 		return err
