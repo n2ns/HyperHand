@@ -270,7 +270,7 @@ Run it in the guest itself: by hand, or from the host with `vm_key` `win+r`, `vm
 
 - stops the other running agent instances;
 - deletes the `HyperHandAgent` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`;
-- deletes `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`. A running program's file cannot be deleted, so it first moves its own executable out of the folder to `%TEMP%\hyperhand-agent-uninstalled-<number>.exe`, which you can delete afterwards;
+- deletes `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`. A running program's file cannot be deleted, so it first moves its own executable out of the folder to `%TEMP%\hyperhand-agent-uninstalled-<number>.exe`, (or to the folder above if `%TEMP%` is on another drive), which you can delete afterwards;
 - shows a message box listing what was removed.
 
 On the host:

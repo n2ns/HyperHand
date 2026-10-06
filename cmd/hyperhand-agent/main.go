@@ -203,22 +203,8 @@ func uninstall() {
 	}
 
 	self, _ := os.Executable()
-	for _, dir := range []string{filepath.Join(os.Getenv("LOCALAPPDATA"), "HyperHand"), `C:\Users\Public\HyperHand`} {
-		if self != "" && strings.HasPrefix(strings.ToLower(self), strings.ToLower(dir)+`\`) {
-			moved, err := moveOut(self, os.TempDir())
-			if err != nil {
-				failed = append(failed, dir+": "+err.Error())
-				continue
-			}
-			self = moved
-			done = append(done, "本程序已移到 "+moved+"（之后可直接删除）")
-		}
-		if err := os.RemoveAll(dir); err != nil { // removes what it can even when some entries fail
-			failed = append(failed, dir+": "+err.Error())
-		} else {
-			done = append(done, dir)
-		}
-	}
+	d, f := removeFolders(self, os.TempDir(), filepath.Join(os.Getenv("LOCALAPPDATA"), "HyperHand"), `C:\Users\Public\HyperHand`)
+	done, failed = append(done, d...), append(failed, f...)
 
 	msg := "已移除:\n" + strings.Join(done, "\n")
 	flags := uint32(0x40) // MB_ICONINFORMATION
@@ -227,6 +213,32 @@ func uninstall() {
 		flags = 0x30 // MB_ICONWARNING
 	}
 	windows.MessageBox(0, windows.StringToUTF16Ptr(msg), windows.StringToUTF16Ptr("HyperHand 卸载"), flags)
+}
+
+// removeFolders deletes dirs; the running executable self, if it is in one of them, is moved to temp first, or to the
+// parent of its folder when temp is on another volume. The working directory leaves the folders too.
+func removeFolders(self, temp string, dirs ...string) (done, failed []string) {
+	os.Chdir(temp)
+	for _, dir := range dirs {
+		if self != "" && strings.HasPrefix(strings.ToLower(self), strings.ToLower(dir)+`\`) {
+			moved, err := moveOut(self, temp)
+			if err != nil {
+				moved, err = moveOut(self, filepath.Dir(dir))
+			}
+			if err != nil {
+				failed = append(failed, self+": "+err.Error())
+			} else {
+				self = moved
+				done = append(done, "本程序已移到 "+moved+"（之后可直接删除）")
+			}
+		}
+		if err := os.RemoveAll(dir); err != nil { // removes what it can even when some entries fail
+			failed = append(failed, dir+": "+err.Error())
+		} else {
+			done = append(done, dir)
+		}
+	}
+	return done, failed
 }
 
 // moveOut moves the running executable exe into dir, so that the folder it was in can be deleted now. Windows does

@@ -332,7 +332,7 @@ Because step 3 types blindly, a failure there is visible only on screen; the too
 
 - It stops every other running `hyperhand-agent.exe`.
 - It deletes the `HyperHandAgent` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
-- It deletes `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`. The file of a running program cannot be deleted but can be renamed on its volume, so before deleting the folder it is running from it moves its own executable to `%TEMP%\hyperhand-agent-uninstalled-<pid>.exe`, where it remains. No script or helper process is started.
+- It deletes `%LOCALAPPDATA%\HyperHand` and `C:\Users\Public\HyperHand`. The file of a running program cannot be deleted but can be renamed on its volume, so before deleting the folder it is running from it moves its own executable to `%TEMP%\hyperhand-agent-uninstalled-<pid>.exe`, where it remains (or to the parent of that folder if `%TEMP%` is on another volume), and leaves the folder as its working directory. No script or helper process is started.
 - It shows a message box listing what was removed.
 
 ### 8.3 Single instance and startup
