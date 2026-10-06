@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-07
+
 ### Added
 
 - `vm_type` supports `mode: keys` through guest Unicode `SendInput`, preserving the clipboard, limiting text to 16384 UTF-8 bytes and rechecking the selected foreground window between characters. `vm_type` and `vm_key` accept optional window selectors; `vm_key` also accepts an ordered `sequence` of up to 256 combinations. Partial input is reported without automatic retry.
@@ -44,6 +46,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Window click checks, focus changes, keyboard sequences and clipboard writes share the input lock, so another MCP input operation cannot invalidate a queued click check or replace text between clipboard setup and paste.
 - Elevated command cleanup could hang when an early launcher failure raced a pending named-pipe accept, even after the request deadline. Pin `go-winio` to Microsoft's [listener shutdown fix](https://github.com/microsoft/go-winio/commit/7e8af9b09c4b3e8da1a8ba080484c8a84b71354a), which preserves the close signal; the fix is not yet in a tagged release. A repeated early-failure regression test covers this path.
 - Reinstalling could stop with "Access is denied" after stopping the service, leaving the service stopped and no tray: setup tried to end the service's process, which runs as the service account. It now waits for that process to exit.
 - The host tray icon no longer stays an empty placeholder without menu when the tray starts at logon before the taskbar is ready. The tray now uses its own notification icon code instead of `fyne.io/systray`: a failed add is retried every 5 seconds and whenever the taskbar is created, and every add carries the icon, tooltip and callback message and selects version 4 behaviour.
