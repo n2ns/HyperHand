@@ -507,6 +507,11 @@ func removeInstalledFiles(p setupPaths, hostHash, agentHash string, fromCleanup 
 			remaining++
 		}
 	}
+	if fromCleanup {
+		if err := deleteAtRestart(p.cleanup); err != nil {
+			return err
+		}
+	}
 	if remaining != 0 {
 		return nil
 	}
@@ -516,13 +521,16 @@ func removeInstalledFiles(p setupPaths, hostHash, agentHash string, fromCleanup 
 	if !fromCleanup {
 		return os.Remove(p.data)
 	}
-	for _, path := range []string{p.cleanup, p.data} { // a directory is deleted at restart only if it is empty
-		name, _ := windows.UTF16PtrFromString(path)
-		if err := windows.MoveFileEx(name, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT); err != nil {
-			return err
-		}
+	return deleteAtRestart(p.data) // a directory is deleted at restart only if it is empty
+}
+
+// deleteAtRestart registers path to be deleted when Windows restarts (administrators only).
+var deleteAtRestart = func(path string) error {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
 	}
-	return nil
+	return windows.MoveFileEx(name, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
 }
 
 // startCleanup copies this executable to an administrators-only file and runs it to finish uninstalling.

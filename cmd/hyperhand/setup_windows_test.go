@@ -312,3 +312,32 @@ func TestCopyProtectedCreatesNewFileOnly(t *testing.T) {
 		t.Fatal("overwrote an existing file")
 	}
 }
+
+// The cleanup copy cannot delete itself, so it is always deleted at restart, also when service data is kept.
+func TestCleanupCopyDeletedAtRestart(t *testing.T) {
+	var scheduled []string
+	defer func(f func(string) error) { deleteAtRestart = f }(deleteAtRestart)
+	deleteAtRestart = func(path string) error { scheduled = append(scheduled, path); return nil }
+	for _, keep := range []bool{true, false} {
+		scheduled = nil
+		dir := t.TempDir()
+		p := setupPaths{bin: filepath.Join(dir, "bin"), data: filepath.Join(dir, "data")}
+		p.hostExe, p.agentExe = filepath.Join(p.bin, "hyperhand.exe"), filepath.Join(p.bin, "hyperhand-agent.exe")
+		p.config, p.cleanup = filepath.Join(p.data, "config.json"), filepath.Join(p.data, cleanupExe)
+		os.Mkdir(p.data, 0o700)
+		os.WriteFile(p.config, []byte("{}"), 0o600)
+		os.WriteFile(p.cleanup, []byte("copy"), 0o600)
+		if keep {
+			os.Mkdir(filepath.Join(p.data, "service-data"), 0o700)
+		}
+		if err := removeInstalledFiles(p, "", "", true); err != nil {
+			t.Fatal(err)
+		}
+		if len(scheduled) == 0 || scheduled[0] != p.cleanup {
+			t.Errorf("service data kept %v: deleted at restart %v", keep, scheduled)
+		}
+		if _, err := os.Stat(p.config); keep != (err == nil) {
+			t.Errorf("service data kept %v: owner marker present %v", keep, err == nil)
+		}
+	}
+}
