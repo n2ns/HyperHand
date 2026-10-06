@@ -118,7 +118,7 @@ The agent installer, running as the logged-on user:
 
 If the install fails, call `vm_screenshot` to see what the guest shows, fix the cause (for example the IME mode or a dialog in the way) and run `vm_install_agent` again.
 
-Tools that need the agent: `vm_exec`, `vm_push`, `vm_pull`, `vm_clipboard_get`, `vm_clipboard_set`, `vm_windows`, `vm_focus_window`, `vm_wait`, `vm_unlock`, `vm_update_agent`, `vm_screenshot` with `source: agent`, and `vm_click` with `window` or `handle`. `vm_type` uses the agent when it is available. `vm_start` starts the VM without the agent but reports that the desktop is not usable until the agent answers.
+Tools that need the agent: `vm_exec`, `vm_push`, `vm_pull`, `vm_clipboard_get`, `vm_clipboard_set`, `vm_windows`, `vm_focus_window`, `vm_wait`, `vm_unlock`, `vm_update_agent`, `vm_screenshot` with `source: agent`, and `vm_click` with `window`, `handle` or `pid`. `vm_type` uses the agent when it is available. `vm_start` starts the VM without the agent but reports that the desktop is not usable until the agent answers.
 
 ### Install the guest agent manually
 
@@ -210,10 +210,19 @@ Host-side screenshots and input work on the guest's secure desktop, so a guest U
 - `vm_exec` runs as the logged-on user with `powershell` (default) or `cmd`. The default timeout is 60 seconds (`timeout_ms`). The result has the exit code, stdout, stderr and whether it timed out.
 - `vm_push` and `vm_pull` copy a file or a directory recursively. A single file pushed to a guest path ending in `\` goes into that directory under its own name; a single file pulled to an existing host directory, or to a path ending in `\`, goes into it under the guest file's name. `vm_push` skips files whose SHA-256 already matches the guest copy unless `force` is true. Files are written to unique `.hyperhand-*.hhpart` temporary files in the destination directory and renamed when complete.
 - `vm_start` returns once the desktop is usable; if it fails, the VM may still be running, and the error says why (no agent answer, locked without a stored password, wrong password). `vm_status` reports the state without changing anything; `vm_unlock` unlocks a session that was locked later.
-- `vm_windows` lists the visible windows with their handles and positions. Use a handle with `vm_focus_window` or `vm_click` when several windows share a title.
-- `vm_click` with `window` or `handle` takes coordinates relative to that window and clicks only if the window is the enabled foreground window and the point is inside it, on screen and not covered by another window. Otherwise it fails and names the foreground window, so a click never lands on whatever happens to be in front.
-- `vm_wait` waits for `process_exit` or `process_running` (with `name`, for example `notepad`) or `file_exists` (with `path`, for example `C:\temp\app\done.txt`). The default timeout is 60 seconds.
+- `vm_windows` lists the visible windows with their handles, PIDs and positions. Use a handle with `vm_focus_window`, `vm_click` or a window wait when several windows share a title.
+- `vm_focus_window` selects a unique window by `title`, `handle` or `pid`. Titles match a case-insensitive substring by default; `exact: true` matches the full title, still case-insensitively. A handle overrides the title and `exact`; a PID restricts either match and can be used alone when it has only one visible window. All window selectors reject multiple matches. Focus no longer picks the first matching title and requires an agent supporting `list_windows`.
+- `vm_click` uses the same selection rules, with `window` instead of `title`. With `window`, `handle` or `pid`, coordinates are relative to that window and the click proceeds only if it is the enabled foreground window and the point is inside it, on screen and not covered by another window. Without a selector, coordinates are absolute screenshot pixels. A window can still appear between the check and click.
+- `vm_wait` waits for `process_exit` or `process_running` (with `name`, for example `notepad`), `file_exists` (with `path`, for example `C:\temp\app\done.txt`), or `window_exists`, `window_gone` or `window_foreground` (with `title`, `handle` or `pid`, and optional `exact`). The default timeout is 60 seconds; expiration returns `satisfied: false`, while cancellation returns an error.
 - `vm_restore` takes the exact checkpoint name (case-sensitive, no wildcards). If the VM is not running after the restore, it is started unless `start` is false.
+
+### Waiting for a window
+
+For example, after launching an application, use `vm_wait` with `{"kind":"window_exists","title":"Untitled - Notepad","exact":true}` (substitute the actual title shown by the application). On success, it returns `satisfied: true`, the handle and full title. Pass that handle to `vm_focus_window` to bring it forward, or to `vm_wait` with `kind: window_foreground` to wait without activating it. To wait for a specific dialog to disappear, take its handle from `vm_windows` and use `kind: window_gone`.
+
+Window waits check every 300 ms and allow other agent tools to run between checks. They use the existing `list_windows` operation, so an agent that already supports `vm_windows` needs no update. A disappearance wait succeeds immediately if no visible window matches, including when a window is hidden or cloaked; it does not prove that its process exited. A title change can stop a title selector matching, so use a handle to track a particular window. Multiple matches and query failures are errors, including for disappearance waits.
+
+An appearing window does not prove the application is ready for input. A foreground main window does not prove a command line or text box has keyboard focus; inspect and select the intended control before typing.
 
 ## Updating
 

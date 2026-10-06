@@ -44,6 +44,8 @@ type clickIn struct {
 	Double bool   `json:"double,omitempty" jsonschema:"double click"`
 	Window string `json:"window,omitempty" jsonschema:"click inside this window: case-insensitive title substring that must match exactly one window (see vm_windows); x and y are then relative to its top-left corner, and the click is refused unless it is the enabled foreground window and the point is inside it; needs the agent"`
 	Handle uint64 `json:"handle,omitempty" jsonschema:"like window, but selects the window by its handle from vm_windows"`
+	PID    uint32 `json:"pid,omitempty" jsonschema:"restrict the target window to this process ID; may be used alone if exactly one visible window matches"`
+	Exact  bool   `json:"exact,omitempty" jsonschema:"match the full window title instead of a substring, case-insensitively; requires window unless handle is set"`
 }
 type dragIn struct {
 	VM string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
@@ -98,13 +100,19 @@ type titleIn struct {
 	VM     string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
 	Title  string `json:"title,omitempty" jsonschema:"case-insensitive substring of the window title"`
 	Handle uint64 `json:"handle,omitempty" jsonschema:"window handle from vm_windows; when set, title is ignored"`
+	PID    uint32 `json:"pid,omitempty" jsonschema:"restrict the target window to this process ID; may be used alone if exactly one visible window matches"`
+	Exact  bool   `json:"exact,omitempty" jsonschema:"match the full title instead of a substring, case-insensitively; requires title unless handle is set"`
 }
 type waitIn struct {
 	VM        string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
-	Kind      string `json:"kind" jsonschema:"process_exit, process_running (use name) or file_exists (use path)"`
+	Kind      string `json:"kind" jsonschema:"process_exit, process_running (use name), file_exists (use path), window_exists, window_gone or window_foreground (use title, handle or pid)"`
 	Name      string `json:"name,omitempty" jsonschema:"process name, e.g. notepad"`
 	Path      string `json:"path,omitempty" jsonschema:"file path in the guest"`
 	TimeoutMs int    `json:"timeout_ms,omitempty" jsonschema:"default 60000"`
+	Title     string `json:"title,omitempty" jsonschema:"window title substring, case-insensitive; only for window conditions"`
+	Handle    uint64 `json:"handle,omitempty" jsonschema:"window handle from vm_windows; when set, title is ignored"`
+	PID       uint32 `json:"pid,omitempty" jsonschema:"restrict the target window to this process ID; may be used alone if exactly one visible window matches"`
+	Exact     bool   `json:"exact,omitempty" jsonschema:"match the full title instead of a substring, case-insensitively; requires title unless handle is set"`
 }
 
 func add[In any](s *mcp.Server, name, desc string, f func(context.Context, In) (*mcp.CallToolResult, error)) {
@@ -331,11 +339,17 @@ func NewServer(m *Manager) *mcp.Server {
 			}
 			return text("%s", b), nil
 		})
-	add(s, "vm_click", "Click at screen pixel (x, y), or with window or handle at (x, y) inside that window after checking it is the enabled foreground window.", func(ctx context.Context, in clickIn) (*mcp.CallToolResult, error) {
+	add(s, "vm_click", "Click at screen pixel (x, y), or with window, handle or pid at (x, y) inside the unique matching window after checking it is the enabled foreground window. exact matches the full title.", func(ctx context.Context, in clickIn) (*mcp.CallToolResult, error) {
 		b := map[string]int{"": 1, "left": 1, "right": 2, "middle": 3}[in.Button]
 		if b == 0 {
 			return nil, fmt.Errorf("unknown button %q", in.Button)
 		}
+		// Keep window checks and the final input on the same VM if the default changes.
+		v, err := backend.Find(in.VM)
+		if err != nil {
+			return nil, err
+		}
+		in.VM = v.Name
 		x, y, err := clickPoint(ctx, call, in)
 		if err != nil {
 			return nil, u.lockedHint(ctx, in.VM, err)
@@ -408,14 +422,32 @@ func NewServer(m *Manager) *mcp.Server {
 		_, err := call(ctx, in.VM, proto.OpClipboardSet, proto.TextArgs{Text: in.Text}, nil, nil)
 		return done(err)
 	})
-	add(s, "vm_focus_window", "Bring a window to the foreground: the window with handle (from vm_windows), or else the first window whose title contains title. Returns its title and handle.", func(ctx context.Context, in titleIn) (*mcp.CallToolResult, error) {
-		r, err := focusWindow(ctx, call, in)
+	add(s, "vm_focus_window", "Bring the unique matching visible window to the foreground by title, handle or pid. exact matches the full title; multiple matches are an error. Returns its title and handle.", func(ctx context.Context, in titleIn) (*mcp.CallToolResult, error) {
+		// Resolve once: window handles are only meaningful in this guest.
+		c, err := m.Client(in.VM)
+		if err != nil {
+			return nil, err
+		}
+		r, err := focusWindow(ctx, func(ctx context.Context, _, op string, args any, payload []byte, result any) ([]byte, error) {
+			return c.Call(ctx, op, args, payload, result)
+		}, in)
 		if err != nil {
 			return nil, u.lockedHint(ctx, in.VM, err)
 		}
 		return r, nil
 	})
-	add(s, "vm_wait", "Wait in the guest until a process exits, a process is running, or a file exists.", func(ctx context.Context, in waitIn) (*mcp.CallToolResult, error) {
+	add(s, "vm_wait", "Wait for a process or file condition, or for a unique visible window to appear, disappear (hidden or destroyed), or become foreground. Window conditions use title, handle or pid, with optional exact title matching. Timeout returns satisfied: false; multiple window matches are an error.", func(ctx context.Context, in waitIn) (*mcp.CallToolResult, error) {
+		switch in.Kind {
+		case "window_exists", "window_gone", "window_foreground":
+			// Resolve the VM once so changing the default running VM cannot move a wait to another VM.
+			c, err := m.Client(in.VM)
+			if err != nil {
+				return nil, err
+			}
+			return waitWindow(ctx, func(ctx context.Context, _, op string, args any, payload []byte, result any) ([]byte, error) {
+				return c.Call(ctx, op, args, payload, result)
+			}, in)
+		}
 		var r proto.WaitResult
 		if _, err := call(ctx, in.VM, proto.OpWait, proto.WaitArgs{Kind: in.Kind, Name: in.Name, Path: in.Path, TimeoutMs: in.TimeoutMs}, nil, &r); err != nil {
 			return nil, err

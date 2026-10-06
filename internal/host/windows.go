@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -28,14 +29,18 @@ func listWindows(ctx context.Context, call agentCall, vm string) ([]proto.Window
 // clickPoint returns the screen point for vm_click: (x, y) as given, or with window or handle, the point inside that
 // window after every check passed. An error means nothing may be clicked.
 func clickPoint(ctx context.Context, call agentCall, in clickIn) (int, int, error) {
-	if in.Window == "" && in.Handle == 0 {
+	if in.Window == "" && in.Handle == 0 && in.PID == 0 && !in.Exact {
 		return in.X, in.Y, nil
+	}
+	sel := windowSelector{Title: in.Window, Handle: in.Handle, PID: in.PID, Exact: in.Exact}
+	if err := sel.validate(); err != nil {
+		return 0, 0, err
 	}
 	ws, err := listWindows(ctx, call, in.VM)
 	if err != nil {
 		return 0, 0, err
 	}
-	w, err := resolveWindow(ws, in.Window, in.Handle)
+	w, err := resolveWindow(ws, sel)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -54,21 +59,21 @@ func clickPoint(ctx context.Context, call agentCall, in clickIn) (int, int, erro
 }
 
 func focusWindow(ctx context.Context, call agentCall, in titleIn) (*mcp.CallToolResult, error) {
-	if in.Title == "" && in.Handle == 0 {
-		return nil, errors.New("pass title or handle") // an empty title would match any window
-	}
-	if in.Handle != 0 {
-		// An agent without list_windows ignores handle and would focus by an empty title, i.e. any window.
-		if _, err := listWindows(ctx, call, in.VM); err != nil {
-			return nil, err
-		}
-	}
-	var r proto.FocusResult
-	if _, err := call(ctx, in.VM, proto.OpFocusWindow, proto.TitleArgs{Title: in.Title, Handle: in.Handle}, nil, &r); err != nil {
+	sel := windowSelector{Title: in.Title, Handle: in.Handle, PID: in.PID, Exact: in.Exact}
+	if err := sel.validate(); err != nil {
 		return nil, err
 	}
-	if r.Handle == 0 { // older agent
-		return text("focused: %s", r.Text), nil
+	ws, err := listWindows(ctx, call, in.VM)
+	if err != nil {
+		return nil, err
+	}
+	w, err := resolveWindow(ws, sel)
+	if err != nil {
+		return nil, err
+	}
+	var r proto.FocusResult
+	if _, err := call(ctx, in.VM, proto.OpFocusWindow, proto.TitleArgs{Handle: w.Handle}, nil, &r); err != nil {
+		return nil, err
 	}
 	return text("focused: %s\nhandle: %d", r.Text, r.Handle), nil
 }
@@ -78,35 +83,121 @@ func describe(w proto.WindowInfo) string {
 	return fmt.Sprintf("%q (handle %d, %s)", w.Title, w.Handle, w.Process)
 }
 
-// resolveWindow picks the window with the handle, or else the only window whose title contains title
-// (case-insensitive). Several matches are an error that lists them, so the caller can pass a handle instead.
-func resolveWindow(ws []proto.WindowInfo, title string, handle uint64) (proto.WindowInfo, error) {
-	if handle != 0 {
-		for _, w := range ws {
-			if w.Handle == handle {
-				return w, nil
-			}
-		}
-		return proto.WindowInfo{}, fmt.Errorf("no visible top-level window has handle %d", handle)
+type windowSelector struct {
+	Title  string
+	Handle uint64
+	PID    uint32
+	Exact  bool
+}
+
+func (s windowSelector) validate() error {
+	if s.Handle == 0 && s.Exact && s.Title == "" {
+		return errors.New("exact requires a title")
+	}
+	if s.Handle == 0 && s.PID == 0 && s.Title == "" {
+		return errors.New("pass title, handle or pid")
+	}
+	return nil
+}
+
+var errWindowNotFound = errors.New("no matching visible window")
+
+// A handle takes precedence over the title, as before; PID always restricts the match.
+// Several matches are an error even when only one of them is in the foreground.
+func resolveWindow(ws []proto.WindowInfo, s windowSelector) (proto.WindowInfo, error) {
+	if err := s.validate(); err != nil {
+		return proto.WindowInfo{}, err
 	}
 	var found []proto.WindowInfo
 	for _, w := range ws {
-		if strings.Contains(strings.ToLower(w.Title), strings.ToLower(title)) {
-			found = append(found, w)
+		if s.PID != 0 && w.PID != s.PID {
+			continue
 		}
+		if s.Handle != 0 {
+			if w.Handle != s.Handle {
+				continue
+			}
+		} else if s.Title != "" {
+			if s.Exact {
+				if !strings.EqualFold(w.Title, s.Title) {
+					continue
+				}
+			} else if !strings.Contains(strings.ToLower(w.Title), strings.ToLower(s.Title)) {
+				continue
+			}
+		}
+		found = append(found, w)
 	}
 	switch len(found) {
 	case 0:
-		return proto.WindowInfo{}, fmt.Errorf("no visible window title contains %q", title)
+		return proto.WindowInfo{}, fmt.Errorf("%w (handle %d, pid %d, title %q, exact %v)", errWindowNotFound, s.Handle, s.PID, s.Title, s.Exact)
 	case 1:
 		return found[0], nil
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d windows have a title containing %q; pass handle instead:", len(found), title)
+	fmt.Fprintf(&b, "%d windows match; pass handle instead:", len(found))
 	for _, w := range found {
 		b.WriteString("\n" + describe(w))
 	}
 	return proto.WindowInfo{}, fmt.Errorf("%s", b.String())
+}
+
+// Window waits run on the host, releasing the agent between polls so other tools can make progress.
+func waitWindow(ctx context.Context, call agentCall, in waitIn) (*mcp.CallToolResult, error) {
+	switch in.Kind {
+	case "window_exists", "window_gone", "window_foreground":
+	default:
+		return nil, fmt.Errorf("unknown window wait kind %q", in.Kind)
+	}
+	sel := windowSelector{Title: in.Title, Handle: in.Handle, PID: in.PID, Exact: in.Exact}
+	if err := sel.validate(); err != nil {
+		return nil, err
+	}
+	d := 60 * time.Second
+	if in.TimeoutMs > 0 {
+		// Avoid overflowing time.Duration for a large JSON integer.
+		if int64(in.TimeoutMs) > int64((1<<63-1)/time.Millisecond) {
+			return nil, errors.New("timeout_ms is too large")
+		}
+		d = time.Duration(in.TimeoutMs) * time.Millisecond
+	}
+	wctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	ticker := time.NewTicker(300 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if wctx.Err() != nil {
+			return text("satisfied: false"), nil
+		}
+		ws, err := listWindows(wctx, call, in.VM)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if wctx.Err() != nil {
+			return text("satisfied: false"), nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		w, err := resolveWindow(ws, sel)
+		missing := errors.Is(err, errWindowNotFound)
+		if err != nil && !missing {
+			return nil, err
+		}
+		if in.Kind == "window_gone" && missing {
+			return text("satisfied: true"), nil
+		}
+		if !missing && (in.Kind == "window_exists" || in.Kind == "window_foreground" && w.Foreground) {
+			return text("satisfied: true\nhandle: %d\ntitle: %s", w.Handle, w.Title), nil
+		}
+		select {
+		case <-wctx.Done():
+		case <-ticker.C:
+		}
+	}
 }
 
 // clickTarget converts (x, y), relative to the top-left of w's visible frame, to screen pixels. It refuses when w is

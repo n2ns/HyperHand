@@ -64,6 +64,31 @@ func TestAdminLauncherFailure(t *testing.T) {
 	}
 }
 
+func TestAdminEarlyLauncherFailureClosesPipe(t *testing.T) {
+	// The launcher can reject the request before Accept has started connecting.
+	// go-winio v0.6.2 could lose the listener close signal in this race and leave
+	// execAdminWithLauncher blocked in cleanup even after its deadline expired.
+	denied := errors.New("launcher rejected request")
+	for i := 0; i < 500; i++ {
+		done := make(chan error, 1)
+		go func() {
+			_, _, err := execAdminWithLauncher(context.Background(), proto.ExecArgs{Command: "exit 0", TimeoutMs: 1000},
+				func(context.Context, adminEndpoint) error { return denied })
+			done <- err
+		}()
+		timer := time.NewTimer(5 * time.Second)
+		select {
+		case err := <-done:
+			timer.Stop()
+			if !errors.Is(err, denied) {
+				t.Fatalf("iteration %d: expected launcher rejection, got %v", i, err)
+			}
+		case <-timer.C:
+			t.Fatalf("iteration %d: pipe cleanup did not finish after the request deadline", i)
+		}
+	}
+}
+
 func TestAdminWorkerRejectsWrongOwner(t *testing.T) {
 	_, _, err := execAdminWithLauncher(context.Background(), proto.ExecArgs{Command: "exit 0", TimeoutMs: 1000},
 		func(_ context.Context, endpoint adminEndpoint) error {
@@ -83,8 +108,17 @@ func TestAdminWorkerRejectsReplacementPipeServer(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer listener.Close()
+		// The rejected client can disconnect before Accept completes, causing
+		// go-winio to retry Accept. Use parent EOF to end the helper explicitly.
+		go func() {
+			io.Copy(io.Discard, os.Stdin)
+			listener.Close()
+		}()
 		fmt.Fprintln(os.Stdout, "ready")
 		conn, err := listener.Accept()
+		if errors.Is(err, winio.ErrPipeListenerClosed) {
+			return
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -112,6 +146,11 @@ func TestAdminWorkerRejectsReplacementPipeServer(t *testing.T) {
 	cmd.Env = append(os.Environ(), helperPipeEnv+"="+endpoint.Pipe)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -120,6 +159,7 @@ func TestAdminWorkerRejectsReplacementPipeServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() {
+		stdin.Close()
 		if err := cmd.Wait(); err != nil {
 			t.Errorf("replacement pipe server: %v, stderr=%s", err, &stderr)
 		}

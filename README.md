@@ -19,7 +19,7 @@ HyperHand has two executables and three roles:
 - **Commands in the guest**: run PowerShell or cmd in the user's desktop session and get the exit code, stdout and stderr back; optionally elevated.
 - **File transfer**: copy files or whole directories in either direction, streamed at hundreds of MB/s. Uploads skip files whose SHA-256 already matches the guest copy.
 - **Checkpoints**: list, create and restore; a restored VM is started again automatically.
-- **Clipboard, windows and waiting**: read and write the guest clipboard, bring a window to the front, wait until a process exits or a file appears.
+- **Clipboard, windows and waiting**: read and write the guest clipboard, select a unique window by title, handle or PID, bring it to the front, and wait for process, file or window conditions.
 - **Start to a usable desktop**: `vm_start` waits until the agent answers and the session is unlocked. If Windows locked the session after signing in, it types the unlock password you stored in the tray; `vm_status` reports power, agent and lock state.
 - **No guest network; guest password optional**: host and agent talk over a Hyper-V socket; the agent is copied in with Hyper-V's guest file copy and installed from the keyboard. A guest password is needed only if you want HyperHand to unlock a locked session; it stays in Windows Credential Manager on the host.
 - **Cancellation**: when the MCP client cancels a long command, the agent kills it and is ready for the next request immediately.
@@ -84,14 +84,14 @@ Every tool takes an optional `vm` (VM name). Without it, the only running VM is 
 | `vm_status`, `vm_unlock` | Report power state, agent, session lock state and whether an unlock password is stored; unlock a locked session with the stored password |
 | `vm_checkpoints`, `vm_checkpoint`, `vm_restore` | List, create and restore checkpoints (exact names); restore starts the VM unless `start` is false |
 | `vm_screenshot` | PNG of the VM screen; `source`: `host` (default) or `agent` |
-| `vm_click`, `vm_drag`, `vm_scroll` | Mouse at screenshot pixel coordinates; `vm_click` with `window` or `handle` clicks inside that window only if it is the enabled foreground window |
+| `vm_click`, `vm_drag`, `vm_scroll` | Mouse at screenshot pixel coordinates; `vm_click` with `window`, `handle` or `pid` clicks inside the unique matching window only if it is the enabled foreground window |
 | `vm_type`, `vm_key` | Type text (pasted through the guest clipboard); press keys such as `enter`, `ctrl+v`, `win+r` |
 | `vm_exec` | Run a command in the guest; `shell`, `cwd`, `timeout_ms`, `admin` |
 | `vm_push`, `vm_pull` | Copy files or directories host to guest and back; `vm_push` skips unchanged files unless `force` is true |
 | `vm_clipboard_get`, `vm_clipboard_set` | Read or write the guest clipboard |
 | `vm_windows` | List visible windows: handle, title, class, process, position, enabled, foreground, owner, modal |
-| `vm_focus_window` | Bring a window to the front by title or handle |
-| `vm_wait` | Wait until a process exits or runs, or a file exists |
+| `vm_focus_window` | Bring a unique window to the front by title, handle or PID; `exact` matches the full title |
+| `vm_wait` | Wait until a process exits or runs, a file exists, or a window appears, disappears or becomes foreground |
 | `vm_install_agent`, `vm_update_agent` | Install or replace the guest agent |
 
 Screen, mouse, keyboard, VM and checkpoint tools work without the agent; the others need it. Without the agent, `vm_start` still starts the VM but reports that the desktop is not usable.

@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `vm_focus_window`, window-relative `vm_click` and window conditions in `vm_wait` share window selection by handle, PID and case-insensitive title, with optional `exact` full-title matching. A PID can select a window alone or restrict a title or handle match.
+- `vm_wait` conditions `window_exists`, `window_gone` and `window_foreground`, polled by the host without holding the agent connection between checks. Successful appearance and foreground waits return the window's handle and title; disappearing includes windows that become hidden or cloaked. These use the existing agent `list_windows` operation without a guest protocol change.
 - Dedicated `HyperHandService` Windows service under `NT SERVICE\HyperHandService`, with Hyper-V rights assigned to the service account and an access-controlled local named pipe for specific VM operations and the guest socket tunnel.
 - Host tray restart action: restarts the ordinary tray/MCP process without restarting the service or any VM; in-progress requests are interrupted.
 - `vm_start` waits until the desktop is usable: the guest agent answers (up to 90 seconds) and the session is unlocked. A session Windows locked after signing in is unlocked with the password stored for the VM; otherwise the error says why the desktop is not usable.
@@ -23,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** `vm_focus_window` now rejects multiple matching windows instead of focusing the first match. All focus requests require an agent supporting `list_windows`; older agents must be updated, with no fallback to title-only focus. Window clicks and waits also reject ambiguous selection, including disappearance waits.
 - **Breaking:** `vm_stop` is replaced by `vm_shutdown`, which shuts the guest down normally through the Hyper-V shutdown integration service and waits up to 3 minutes until the VM is off (failing, without turning it off, when a program blocks shutdown), and `vm_turn_off`, which turns the VM off immediately as `vm_stop` did.
 - Host tray menu text is in English.
 - `hyperhand.exe`, its tray icon and the settings window use a new gripper icon, from the executable's resources at the system's small and large icon sizes. `hyperhand-agent.exe` and its tray icon use it too.
@@ -36,6 +39,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Elevated command cleanup could hang when an early launcher failure raced a pending named-pipe accept, even after the request deadline. Pin `go-winio` to Microsoft's [listener shutdown fix](https://github.com/microsoft/go-winio/commit/7e8af9b09c4b3e8da1a8ba080484c8a84b71354a), which preserves the close signal; the fix is not yet in a tagged release. A repeated early-failure regression test covers this path.
 - Reinstalling could stop with "Access is denied" after stopping the service, leaving the service stopped and no tray: setup tried to end the service's process, which runs as the service account. It now waits for that process to exit.
 - The host tray icon no longer stays an empty placeholder without menu when the tray starts at logon before the taskbar is ready. The tray now uses its own notification icon code instead of `fyne.io/systray`: a failed add is retried every 5 seconds and whenever the taskbar is created, and every add carries the icon, tooltip and callback message and selects version 4 behaviour.
 - VM start and stop wait up to 45 seconds for asynchronous Hyper-V jobs and report failures or timeouts without automatically resending the operation.

@@ -106,7 +106,7 @@ These use the agent's `session_state` (see 10.2), which reports for the agent's 
 - `vm_unlock` unlocks a running VM's locked session; an unlocked session returns `the session is not locked`.
 - Unlocking reads the VM's unlock password from Windows Credential Manager (generic credential `HyperHand:<VM name>`, stored from the tray, see 9.1). It refuses before any input when no password is stored, the password is not ASCII, or the session is not the console session. It presses `ctrl` to dismiss the lock screen curtain and waits 1.5 seconds. Then, holding the input lock (see 4.5), it presses `ctrl+a`, checks once more that the session is locked, is the console session, runs `LogonUI.exe`, has keyboard input on the secure desktop and shows no UAC prompt, and only then types the password and `enter`. It waits up to 15 seconds for the session to report unlocked. The password is typed once per call: a wrong password is reported, not retried, so that the account is not locked out. The password never appears in results, errors or logs.
 - An agent too old to know `session_state` is reported with a request to run `vm_update_agent`, and nothing is typed.
-- When `vm_focus_window` or `vm_click` with `window` or `handle` fails and the agent reports the session locked, the error ends with `(the guest session is locked: run vm_unlock)`.
+- When `vm_focus_window` or `vm_click` with a window selector fails and the agent reports the session locked, the error ends with `(the guest session is locked: run vm_unlock)`.
 
 ## 4. Screen and Input
 
@@ -128,8 +128,8 @@ Mouse input goes through the VM's synthetic mouse (`Msvm_SyntheticMouse`) with a
 - `vm_click` moves to (`x`, `y`), waits 100 ms and clicks.
   - `button`: `left` (default), `right` or `middle`; anything else fails with `unknown button "<value>"`.
   - `double` = `true` clicks twice.
-  - `window` (case-insensitive title substring) or `handle` (from `vm_windows`) makes (`x`, `y`) relative to the top-left corner of that window's visible frame. The agent lists the windows first (see 7.3), and the click is refused, with nothing clicked, if:
-    - no window matches, or `window` matches more than one (the error lists their handles);
+  - `window` (case-insensitive title substring), `handle` (from `vm_windows`) or `pid` makes (`x`, `y`) relative to the top-left corner of the unique matching window's visible frame. `exact: true` matches the full `window` title case-insensitively. The shared selection rules in 7.2 apply, using `window` instead of `title`. Without a selector, coordinates remain absolute screen pixels. The agent lists the windows first (see 7.3), and the click is refused, with nothing clicked, if:
+    - no window matches, or more than one matches (the error lists their handles);
     - the window is not the foreground window (the error names the foreground window);
     - the window is disabled, as an owner window is while its modal dialog runs;
     - the point is outside the window;
@@ -275,12 +275,21 @@ These tools need the agent.
 
 ### 7.2 vm_focus_window
 
-`vm_focus_window` brings to the foreground the first visible top-level window, in enumeration order, whose title contains `title` (case-insensitive substring). With `handle` (from `vm_windows`) it brings that window instead and ignores `title`; a handle that is not a visible top-level window fails with `no visible top-level window has handle <handle>`. Passing neither fails with `pass title or handle`. The host lists the windows before a focus by handle, so an agent too old to know handles is rejected instead of focusing an arbitrary window.
+`vm_focus_window` brings the unique matching visible top-level window to the foreground. It shares selection rules with window-relative `vm_click` and window conditions in `vm_wait`:
+
+- `title` matches a case-insensitive substring; `exact: true` matches the full title, still case-insensitively. `vm_click` calls this parameter `window`.
+- `handle` (from `vm_windows`) overrides `title` and `exact`.
+- `pid` always restricts the match, including when `handle` is given. It can be used alone if the process has exactly one visible top-level window.
+- At least one of `title`, `handle` or `pid` is required. Without a handle, `exact: true` requires a title.
+- Multiple matches are an error listing the matching windows, even if only one is in the foreground. Use `vm_windows` to choose a handle or narrow the selection.
+- Every focus request lists windows before passing the selected handle to the agent. Agents without `list_windows` must be updated; there is no title-only fallback. This changes the former first-match title behavior.
 
 - A minimised window is restored first.
 - If `SetForegroundWindow` alone does not work, the agent attaches to the foreground thread's input, injects a zero-distance mouse move (so the agent sent the last input) and retries. It injects no key, so the focused window receives no keystroke.
-- No match fails with `no visible window title contains "<title>"`; a window that still does not reach the foreground fails with `could not bring "<title>" to the foreground`.
-- The result is `focused: <full window title>` and, on a line of its own, `handle: <handle>`. An older agent returns only the title.
+- No match fails with `no matching visible window` and the selector details; a window that still does not reach the foreground fails with `could not bring "<title>" to the foreground`.
+- The result is `focused: <full window title>` and, on a line of its own, `handle: <handle>`. A foreground top-level window does not establish which child control has keyboard focus.
+
+Microsoft documents the process lookup used for selection in [GetWindowThreadProcessId](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowthreadprocessid), foreground activation restrictions in [SetForegroundWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow), and DPI and invisible-border differences in [GetWindowRect](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrect). Unique-match selection and the wait conditions below are HyperHand interface choices.
 
 ### 7.3 vm_windows
 
@@ -302,8 +311,14 @@ An agent without this operation fails with `the guest agent is too old to list w
 - `kind` = `process_exit`: no process named `name` exists (true immediately if none was running).
 - Process names are compared case-insensitively on the executable name; a directory part is ignored and `.exe` is added if missing, so `notepad`, `Notepad.exe` and `C:\Windows\notepad.exe` are equivalent.
 - `kind` = `file_exists`: `path` exists (a file or a directory).
+- `kind` = `window_exists`: exactly one visible top-level window matches `title`, `handle` or `pid`, using the selection rules in 7.2.
+- `kind` = `window_gone`: no visible top-level window matches. This succeeds immediately if the window is already absent, and includes hiding, DWM cloaking and destruction; it does not prove the application exited. A title change can also stop a title selector matching, so use a handle to track a particular window.
+- `kind` = `window_foreground`: exactly one visible top-level window matches and is foreground. This waits without activating it.
+- All three window conditions reject multiple matches, including `window_gone`. A failed window query is an error, not evidence that a window is gone.
+- Successful `window_exists` and `window_foreground` return `satisfied: true`, `handle: <handle>` and `title: <full window title>` on separate lines. Appearance does not mean the application is ready for input, and foreground state does not establish a child control's keyboard focus.
+- Window conditions poll the existing agent `list_windows` operation from the host, releasing the agent connection between checks so other tools can run. The selected VM stays fixed throughout the wait. An agent already supporting `list_windows` needs no update for these conditions.
 - An empty `name` or `path` for its kind, or an unknown `kind`, is an error.
-- If the host disconnects, the wait stops (see 1.4).
+- Cancellation returns an error. If the host disconnects, the wait stops (see 1.4).
 
 ## 8. Guest Agent Installation and Update
 
