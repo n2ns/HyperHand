@@ -770,6 +770,9 @@ func processesWithPath(paths ...string) ([]uint32, error) {
 			continue
 		}
 		image, err := processImage(e.ProcessID)
+		if err == windows.ERROR_INVALID_PARAMETER {
+			continue // exited since the snapshot
+		}
 		if err != nil {
 			return nil, fmt.Errorf("cannot verify HyperHand process %d: %w", e.ProcessID, err)
 		}
@@ -815,20 +818,30 @@ func stopProcesses(paths ...string) error {
 		if err != nil {
 			return fmt.Errorf("cannot stop HyperHand process %d: %w", id, err)
 		}
-		err = windows.TerminateProcess(h, 1)
-		if err == nil {
-			var ev uint32
-			ev, err = windows.WaitForSingleObject(h, 10000)
-			if err == nil && ev != windows.WAIT_OBJECT_0 {
-				err = errors.New("did not exit")
-			}
-		}
+		err = stopProcess(h)
 		windows.CloseHandle(h)
 		if err != nil {
 			return fmt.Errorf("HyperHand process %d: %w", id, err)
 		}
 	}
 	return nil
+}
+
+// stopProcess ends the process h (PROCESS_TERMINATE and SYNCHRONIZE access) and waits up to 10 seconds for it to exit.
+// TerminateProcess is asynchronous and fails with ERROR_ACCESS_DENIED for a process that has already terminated, as a
+// tray just ended by its task's Stop may have, so its error counts only if the process does not exit.
+func stopProcess(h windows.Handle) error {
+	terr := windows.TerminateProcess(h, 1)
+	ev, err := windows.WaitForSingleObject(h, 10000)
+	switch {
+	case err != nil:
+		return err
+	case ev == windows.WAIT_OBJECT_0:
+		return nil
+	case terr != nil:
+		return terr
+	}
+	return errors.New("did not exit")
 }
 
 // waitProcessGone waits until no process with the ID and executable file name is listed. It needs no access to the

@@ -341,3 +341,31 @@ func TestCleanupCopyDeletedAtRestart(t *testing.T) {
 		}
 	}
 }
+
+// TerminateProcess fails with ERROR_ACCESS_DENIED for a process that has already exited, for example a tray the
+// logon task's Stop ended a moment before; that counts as stopped.
+func TestStopProcessAlreadyExited(t *testing.T) {
+	if os.Getenv("HYPERHAND_TEST_SLEEP") == "1" {
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(self, "-test.run=^TestStopProcessAlreadyExited$")
+	cmd.Env = append(os.Environ(), "HYPERHAND_TEST_SLEEP=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, uint32(cmd.Process.Pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(h)
+	cmd.Process.Kill()
+	cmd.Wait()
+	if err := stopProcess(h); err != nil {
+		t.Fatal(err)
+	}
+}
