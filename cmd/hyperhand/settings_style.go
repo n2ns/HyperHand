@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"unsafe"
 
 	"github.com/rodrigocfd/windigo/co"
@@ -34,6 +35,7 @@ type windowStyle struct {
 	readBox        win.HBRUSH
 	colors         map[win.HWND]win.COLORREF
 	readOnly       map[win.HWND]bool
+	icons          []win.HICON
 }
 
 func newWindowStyle() *windowStyle {
@@ -55,7 +57,24 @@ func newWindowStyle() *windowStyle {
 	return s
 }
 
+// setIcons gives the window the application icon: the small one in the caption, the large one in Alt+Tab.
+func (s *windowStyle) setIcons(h win.HWND) {
+	const wmSetIcon, iconSmall, iconBig = 0x0080, 0, 1
+	for _, i := range []struct{ lims, which int }{{limSmall, iconSmall}, {limLarge, iconBig}} {
+		icon, err := appIcon(i.lims)
+		if err != nil {
+			log.Print("settings window icon: ", err)
+			return
+		}
+		s.icons = append(s.icons, icon)
+		h.SendMessage(co.WM(wmSetIcon), win.WPARAM(i.which), win.LPARAM(icon))
+	}
+}
+
 func (s *windowStyle) free() {
+	for _, i := range s.icons {
+		i.DestroyIcon()
+	}
 	for _, f := range []win.HFONT{s.title, s.section} {
 		if f != 0 {
 			f.DeleteObject()

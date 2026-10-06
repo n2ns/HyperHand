@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"fmt"
 	"log"
 	"runtime"
@@ -239,13 +238,9 @@ func (t *tray) create() (win.HICON, error) {
 	if t.taskbarCreated, err = win.RegisterWindowMessage("TaskbarCreated"); err != nil {
 		return 0, fmt.Errorf("RegisterWindowMessage: %w", err)
 	}
-	// CreateIconFromResourceEx takes the RT_ICON image, which the .ico holds at the offset in its one directory entry,
-	// in a DWORD-aligned buffer; a fresh allocation is.
-	ico := icon()
-	bits := append([]byte(nil), ico[binary.LittleEndian.Uint32(ico[18:]):]...)
-	hIcon, err := win.CreateIconFromResourceEx(bits, 0x00030000, win.SIZE{}, co.LR_DEFAULTCOLOR)
+	hIcon, err := appIcon(limSmall) // the notification area shows small icons
 	if err != nil {
-		return 0, fmt.Errorf("CreateIconFromResourceEx: %w", err)
+		return 0, err
 	}
 	if t.menu, err = win.CreatePopupMenu(); err != nil {
 		return hIcon, fmt.Errorf("CreatePopupMenu: %w", err)

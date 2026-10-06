@@ -2,14 +2,12 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
 	"log"
 	"os"
 	"strings"
 	"testing"
 	"unsafe"
 
-	"github.com/rodrigocfd/windigo/co"
 	"github.com/rodrigocfd/windigo/win"
 	"golang.org/x/sys/windows"
 )
@@ -251,15 +249,15 @@ func TestNotifyIconRemove(t *testing.T) {
 	}
 }
 
-// The tray passes the image of icon()'s one directory entry to CreateIconFromResourceEx.
-func TestTrayIconResource(t *testing.T) {
-	ico := icon()
-	bits := append([]byte(nil), ico[binary.LittleEndian.Uint32(ico[18:]):]...)
-	h, err := win.CreateIconFromResourceEx(bits, 0x00030000, win.SIZE{}, co.LR_DEFAULTCOLOR)
-	if err != nil {
-		t.Fatal(err)
+// The application icon is in the executable's resources at both sizes the tray and settings window load.
+func TestAppIcon(t *testing.T) {
+	for _, lims := range []int{limSmall, limLarge} {
+		h, err := appIcon(lims)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.DestroyIcon()
 	}
-	h.DestroyIcon()
 }
 
 // Without NIM_SETVERSION 4 the icon reports clicks in the old format, which the tray does not handle; it counts as

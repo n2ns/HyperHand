@@ -97,7 +97,7 @@ func newSettingsWindow(info *trayInfo) *settingsWindow {
 	url := info.url()
 	wnd := ui.NewMain(ui.OptsMain().
 		Title("HyperHand Settings").
-		Size(ui.Dpi(600, 600)).
+		Size(ui.Dpi(600, 632)).
 		ClassBrush(win.HBRUSH(co.COLOR_WINDOW + 1)).
 		Center(true))
 	style := newWindowStyle()
@@ -159,7 +159,7 @@ func newSettingsWindow(info *trayInfo) *settingsWindow {
 		Column("State", ui.DpiX(90)).
 		Column("Unlock password", ui.DpiX(130)).
 		Column("Console when started", ui.DpiX(130)))
-	me.onStart = ui.NewCheckBox(wnd, ui.OptsCheckBox().Text("Open console when &started").Position(ui.Dpi(left, 544)))
+	me.onStart = ui.NewCheckBox(wnd, ui.OptsCheckBox().Text("Open console when &started").Position(ui.Dpi(left, 578)).Size(ui.Dpi(right-left, 20)))
 	me.clearPw = ui.NewButton(wnd, ui.OptsButton().Text("C&lear password").Position(ui.Dpi(right-120, 540)).Width(ui.DpiX(120)))
 	me.setPw = ui.NewButton(wnd, ui.OptsButton().Text("Set unlock pass&word...").Position(ui.Dpi(right-120-8-160, 540)).Width(ui.DpiX(160)))
 	me.console = ui.NewButton(wnd, ui.OptsButton().Text("&Open console").Position(ui.Dpi(right-120-8-160-8-110, 540)).Width(ui.DpiX(110)))
@@ -168,6 +168,7 @@ func newSettingsWindow(info *trayInfo) *settingsWindow {
 		settingsMu.Lock()
 		settingsHwnd = wnd.Hwnd()
 		settingsMu.Unlock()
+		style.setIcons(wnd.Hwnd())
 		setFont(title.Hwnd(), style.title)
 		for _, s := range []*ui.Static{mcpHead, hostHead, vmHead} {
 			setFont(s.Hwnd(), style.section)
