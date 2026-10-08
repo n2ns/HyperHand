@@ -52,6 +52,14 @@ func main() {
 		log.SetOutput(f)
 	}
 
+	if len(os.Args) > 1 && os.Args[1] == "startup" {
+		if err := startupCommand(os.Args[2:]); err != nil {
+			log.Print("startup: ", err)
+			msgBox("Changing Windows startup failed:\n"+err.Error(), windows.MB_ICONERROR)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "install" {
 		if err := install(); err != nil {
 			log.Print("install: ", err)

@@ -31,6 +31,7 @@ type settingsWindow struct {
 	editPort *ui.CheckBox
 	apply    *ui.Button
 	service  *ui.Static
+	startup  *ui.CheckBox
 	enhanced *ui.Static
 	list     *ui.ListView
 	onStart  *ui.CheckBox
@@ -97,7 +98,7 @@ func newSettingsWindow(info *trayInfo) *settingsWindow {
 	url := info.url()
 	wnd := ui.NewMain(ui.OptsMain().
 		Title("HyperHand Settings").
-		Size(ui.Dpi(600, 632)).
+		Size(ui.Dpi(600, 664)).
 		ClassBrush(win.HBRUSH(co.COLOR_WINDOW + 1)).
 		Center(true))
 	style := newWindowStyle()
@@ -147,11 +148,12 @@ func newSettingsWindow(info *trayInfo) *settingsWindow {
 	lblVersion := label("Version", 308)
 	version := value(proto.Version, 308, 200)
 	logs := ui.NewButton(wnd, ui.OptsButton().Text("Open &log folder").Position(ui.Dpi(right-140, 302)).Width(ui.DpiX(140)))
-	me.enhanced = ui.NewStatic(wnd, ui.OptsStatic().Position(ui.Dpi(left, 336)).Size(ui.Dpi(right-left, 34)))
+	me.startup = ui.NewCheckBox(wnd, ui.OptsCheckBox().Text("Start with &Windows").Position(ui.Dpi(left, 336)).Size(ui.Dpi(right-left, 20)))
+	me.enhanced = ui.NewStatic(wnd, ui.OptsStatic().Position(ui.Dpi(left, 368)).Size(ui.Dpi(right-left, 34)))
 
-	vmHead := section("Virtual machines", 376)
+	vmHead := section("Virtual machines", 408)
 	me.list = ui.NewListView(wnd, ui.OptsListView().
-		Position(ui.Dpi(left, 418)).
+		Position(ui.Dpi(left, 450)).
 		Size(ui.Dpi(right-left, 112)).
 		CtrlStyle(co.LVS_REPORT|co.LVS_NOSORTHEADER|co.LVS_SHOWSELALWAYS|co.LVS_SINGLESEL|co.LVS_SHAREIMAGELISTS).
 		CtrlExStyle(co.LVS_EX_FULLROWSELECT|co.LVS_EX_DOUBLEBUFFER).
@@ -159,10 +161,10 @@ func newSettingsWindow(info *trayInfo) *settingsWindow {
 		Column("State", ui.DpiX(90)).
 		Column("Unlock password", ui.DpiX(130)).
 		Column("Console when started", ui.DpiX(130)))
-	me.onStart = ui.NewCheckBox(wnd, ui.OptsCheckBox().Text("Open console when &started").Position(ui.Dpi(left, 578)).Size(ui.Dpi(right-left, 20)))
-	me.clearPw = ui.NewButton(wnd, ui.OptsButton().Text("C&lear password").Position(ui.Dpi(right-120, 540)).Width(ui.DpiX(120)))
-	me.setPw = ui.NewButton(wnd, ui.OptsButton().Text("Set unlock pass&word...").Position(ui.Dpi(right-120-8-160, 540)).Width(ui.DpiX(160)))
-	me.console = ui.NewButton(wnd, ui.OptsButton().Text("&Open console").Position(ui.Dpi(right-120-8-160-8-110, 540)).Width(ui.DpiX(110)))
+	me.onStart = ui.NewCheckBox(wnd, ui.OptsCheckBox().Text("Open console when &started").Position(ui.Dpi(left, 610)).Size(ui.Dpi(right-left, 20)))
+	me.clearPw = ui.NewButton(wnd, ui.OptsButton().Text("C&lear password").Position(ui.Dpi(right-120, 572)).Width(ui.DpiX(120)))
+	me.setPw = ui.NewButton(wnd, ui.OptsButton().Text("Set unlock pass&word...").Position(ui.Dpi(right-120-8-160, 572)).Width(ui.DpiX(160)))
+	me.console = ui.NewButton(wnd, ui.OptsButton().Text("&Open console").Position(ui.Dpi(right-120-8-160-8-110, 572)).Width(ui.DpiX(110)))
 
 	wnd.On().WmCreate(func(_ ui.WmCreate) int {
 		settingsMu.Lock()
@@ -206,6 +208,12 @@ func newSettingsWindow(info *trayInfo) *settingsWindow {
 		}
 	})
 	me.apply.On().BnClicked(me.applyPort)
+	me.startup.On().BnClicked(func() {
+		if err := changeStartup(me.startup.IsChecked()); err != nil {
+			wnd.Hwnd().MessageBox("Changing Windows startup failed: "+err.Error(), "HyperHand", co.MB_ICONERROR)
+		}
+		me.refreshStartup()
+	})
 	copyURL.On().BnClicked(func() {
 		if err := setClipboard(wnd.Hwnd(), url); err != nil {
 			wnd.Hwnd().MessageBox("Copying failed: "+err.Error(), "HyperHand", co.MB_ICONERROR)
@@ -253,6 +261,7 @@ func newSettingsWindow(info *trayInfo) *settingsWindow {
 
 // refresh reads the VMs from the service in the background and then updates the window.
 func (me *settingsWindow) refresh() {
+	me.refreshStartup()
 	go func() {
 		vms, err := (&broker.Client{}).ListVMs()
 		rows := make([]vmRow, len(vms))
@@ -263,6 +272,21 @@ func (me *settingsWindow) refresh() {
 		enhanced := enhancedSessionAllowed()
 		me.wnd.UiThread(func() { me.show(rows, err, enhanced) })
 	}()
+}
+
+func (me *settingsWindow) refreshStartup() {
+	owner, err := setupOwner(nil)
+	var enabled bool
+	if err == nil {
+		enabled, err = startupEnabled(owner, nil)
+	}
+	me.startup.SetCheck(enabled)
+	me.startup.Hwnd().EnableWindow(err == nil)
+	text := "Start with &Windows"
+	if err != nil {
+		text += " (unavailable; check the HyperHand installation)"
+	}
+	me.startup.Hwnd().SetWindowText(text)
 }
 
 func (me *settingsWindow) show(rows []vmRow, err error, enhanced bool) {

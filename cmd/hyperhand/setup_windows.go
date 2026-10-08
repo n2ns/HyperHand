@@ -254,6 +254,7 @@ func runSetup(operation string) (bool, error) {
 // installState is what an earlier installation left, checked to be HyperHand's own before it is changed.
 type installState struct {
 	logonTask, consoleTask, service bool
+	startupDisabled                 bool
 	oldExe                          string // the executable the logon task started, or ""
 }
 
@@ -268,6 +269,7 @@ func inspectInstall(p setupPaths, owner setupIdentity, ts *taskScheduler, m *mgr
 			return st, errors.New("existing HyperHand task belongs to another user or has unexpected actions")
 		}
 		st.logonTask, st.oldExe = true, strings.Trim(t.actions[0].path, `"`)
+		st.startupDisabled = !t.enabled
 		if !strings.EqualFold(filepath.Base(st.oldExe), "hyperhand.exe") || t.actions[0].args != "" {
 			return st, errors.New("existing task is not a recognized HyperHand tray task")
 		}
@@ -303,7 +305,7 @@ func inspectInstall(p setupPaths, owner setupIdentity, ts *taskScheduler, m *mgr
 	return st, nil
 }
 
-func setupInstall(p setupPaths, owner setupIdentity, self string, st installState, ts *taskScheduler, m *mgr.Mgr) error {
+func setupInstall(p setupPaths, owner setupIdentity, self string, st installState, ts *taskScheduler, m *mgr.Mgr) (resultErr error) {
 	sourceAgent := filepath.Join(filepath.Dir(self), "hyperhand-agent.exe")
 	if err := noSetupReparse(sourceAgent); err != nil {
 		return err
@@ -391,6 +393,10 @@ func setupInstall(p setupPaths, owner setupIdentity, self string, st installStat
 
 	if err := ts.register(logonTask, logonTaskXML(p.hostExe, owner)); err != nil {
 		return err
+	}
+	if st.startupDisabled {
+		// Installation starts the tray once, but must preserve the disabled logon task even if a later step fails.
+		defer func() { resultErr = errors.Join(resultErr, ts.setEnabled(logonTask, false)) }()
 	}
 	if t, err := ts.task(logonTask); err != nil {
 		return err

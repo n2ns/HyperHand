@@ -74,6 +74,7 @@ type taskAction struct{ path, args string }
 
 // taskInfo is the part of a registered task's definition that setup checks.
 type taskInfo struct {
+	enabled  bool
 	userSID  string
 	runLevel int64
 	actions  []taskAction
@@ -91,6 +92,12 @@ func (ts *taskScheduler) task(name string) (*taskInfo, error) {
 	}
 	defer t.Clear()
 	var info taskInfo
+	enabled, err := oleutil.GetProperty(t.ToIDispatch(), "Enabled")
+	if err != nil {
+		return nil, err
+	}
+	info.enabled = enabled.Val != 0
+	enabled.Clear()
 	get := func(obj *ole.IDispatch, prop string) (*ole.VARIANT, error) { return oleutil.GetProperty(obj, prop) }
 	def, err := get(t.ToIDispatch(), "Definition")
 	if err != nil {
@@ -185,6 +192,20 @@ func (ts *taskScheduler) stop(name string) error {
 // run starts the task without parameters.
 func (ts *taskScheduler) run(name string) error {
 	return ts.call(name, "Run", nil)
+}
+
+func (ts *taskScheduler) setEnabled(name string, enabled bool) error {
+	t, err := oleutil.CallMethod(ts.folder, "GetTask", name)
+	if err != nil {
+		return err
+	}
+	defer t.Clear()
+	r, err := oleutil.PutProperty(t.ToIDispatch(), "Enabled", enabled)
+	if err != nil {
+		return err
+	}
+	r.Clear()
+	return nil
 }
 
 func (ts *taskScheduler) call(name, method string, arg any) error {
