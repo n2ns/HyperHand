@@ -697,12 +697,12 @@ func TestScreenObservationWithControls(t *testing.T) {
 }
 
 func TestTypeByIndexReadsBack(t *testing.T) {
-	f := controlAgent(proto.ControlActionResult{Value: "LINE", HasValue: true}, nil)
-	f.results[proto.OpTypeKeys] = proto.TypeKeysResult{Events: 10}
+	f := controlAgent(proto.ControlActionResult{Value: "one\r\nLINE", HasValue: true}, nil) // edit controls store CRLF
+	f.results[proto.OpTypeKeys] = proto.TypeKeysResult{Events: 18}
 	td := newTestDeps(t, f)
 	id := td.put(options(), 1, controlNodes())
-	r, m := td.call(t, "vm_type", map[string]any{"text": "LINE\n", "observation_id": id, "index": 1})
-	if r.IsError || m["verified"] != true || m["value"] != "LINE" || m["applied_chars"] != float64(5) {
+	r, m := td.call(t, "vm_type", map[string]any{"text": "one\nLINE\n", "observation_id": id, "index": 1})
+	if r.IsError || m["verified"] != true || m["value"] != "one\r\nLINE" || m["applied_chars"] != float64(9) {
 		t.Errorf("verified: %v", m)
 	}
 	// The application dropped the text: verified is false and the value tells what is there.

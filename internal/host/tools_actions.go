@@ -351,8 +351,9 @@ func (a *action) typeText(in typeTextIn) (*actionOut, error) {
 		// Read the control back: a value without the typed text means the application dropped it (design 4.3, step 8).
 		fields["verified"], fields["value"] = nil, nil
 		if r, err := a.controlAction(o, target, *node, "Locate", ""); err == nil && r.HasValue {
-			typed := strings.TrimRight(strings.ReplaceAll(in.Text, "\r\n", "\n"), "\n\t")
-			fields["verified"], fields["value"] = strings.Contains(r.Value, typed), r.Value
+			// Compare without carriage returns: Enter is typed as \n and edit controls store lines as \r\n.
+			typed := strings.TrimRight(strings.ReplaceAll(in.Text, "\r", ""), "\n\t")
+			fields["verified"], fields["value"] = strings.Contains(strings.ReplaceAll(r.Value, "\r", ""), typed), r.Value
 		}
 	}
 	return a.out(fields, target, o), nil
