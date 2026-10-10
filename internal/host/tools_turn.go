@@ -3,8 +3,11 @@ package host
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"hyperhand/internal/hyperv"
 )
 
 type endTurnIn struct {
@@ -40,18 +43,57 @@ func (t *turnState) takeWaits() (waits []context.CancelFunc) {
 	return waits
 }
 
-// takeCheckpoints removes and returns the temporary checkpoints of vm, or of every VM when vm is "".
+// takeCheckpoints removes and returns the temporary checkpoints of vm (compared case-insensitively, as Hyper-V
+// names VMs), or of every VM when vm is "".
 func (t *turnState) takeCheckpoints(vm string) map[string][]tempCheckpoint {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	checkpoints := map[string][]tempCheckpoint{}
 	for name, cps := range t.checkpoints {
-		if vm == "" || name == vm {
+		if vm == "" || strings.EqualFold(name, vm) {
 			checkpoints[name] = cps
 			delete(t.checkpoints, name)
 		}
 	}
 	return checkpoints
+}
+
+// deleteRegisteredTemp deletes this run's registered temp checkpoints of one VM after checking each against the
+// VM's current checkpoint list: one that no longer exists is forgotten, one whose current name is no longer a temp
+// name (renamed to keep by another client or by hand) is forgotten and reported in Skipped, one whose deletion fails
+// stays registered for the next call and is reported in Errors.
+func deleteRegisteredTemp(d *deps, vm string, cps []tempCheckpoint, out *endTurnOut) {
+	l, err := d.raw.ListCheckpoints(vm)
+	if err != nil {
+		out.Errors = append(out.Errors, fmt.Sprintf("%s: %v", vm, err))
+		for _, c := range cps {
+			d.turn.addTempCheckpoint(vm, c)
+		}
+		return
+	}
+	byID := map[string]hyperv.Checkpoint{}
+	for _, c := range l.Checkpoints {
+		byID[strings.ToUpper(c.ID)] = c
+	}
+	for _, c := range cps {
+		cur, ok := byID[strings.ToUpper(c.ID)]
+		if !ok {
+			continue // already gone: nothing to delete, nothing to remember
+		}
+		if _, typ, _ := parseCheckpointName(cur.Name); typ != checkpointTemp {
+			out.Skipped = append(out.Skipped, skippedCheckpoint{ID: cur.ID, Name: cur.Name, Reason: "no longer a temp checkpoint (now " + typ + "); not deleted"})
+			continue
+		}
+		if err := d.raw.DeleteCheckpoint(vm, c.ID, false); err != nil {
+			if isNoCheckpoint(err) {
+				continue
+			}
+			out.Errors = append(out.Errors, fmt.Sprintf("%s/%s: %v", vm, cur.Name, err))
+			d.turn.addTempCheckpoint(vm, c) // keep it for the next vm_end_turn
+			continue
+		}
+		out.DeletedCheckpoints = append(out.DeletedCheckpoints, cur.Name)
+	}
 }
 
 // registerTurn registers vm_end_turn.
@@ -67,14 +109,7 @@ func registerTurn(d *deps) {
 			return jsonResult(out)
 		}
 		for vm, cps := range d.turn.takeCheckpoints(in.VM) {
-			for _, c := range cps {
-				if err := d.raw.DeleteCheckpoint(vm, c.ID, false); err != nil {
-					out.Errors = append(out.Errors, fmt.Sprintf("%s/%s: %v", vm, c.Name, err))
-					d.turn.addTempCheckpoint(vm, c) // keep it for the next vm_end_turn
-					continue
-				}
-				out.DeletedCheckpoints = append(out.DeletedCheckpoints, c.Name)
-			}
+			deleteRegisteredTemp(d, vm, cps, &out)
 		}
 		return jsonResult(out)
 	})

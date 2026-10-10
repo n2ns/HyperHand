@@ -362,7 +362,14 @@ func registerVM(d *deps) {
 			out.SavedCurrent = &checkpointRef{ID: saved.ID, Name: saved.Name, Type: saved.Type}
 		}
 		if err := backend.RestoreCheckpoint(v.Name, target.ID); err != nil {
-			return nil, checkpointErr(err, target.ID)
+			te := asToolError(checkpointErr(err, target.ID))
+			if out.SavedCurrent != nil { // the state was saved before the failed restore: say where
+				if te.Fields == nil {
+					te.Fields = map[string]any{}
+				}
+				te.Fields["saved_current"] = out.SavedCurrent
+			}
+			return nil, te
 		}
 		m.Drop(v.ID)
 		if v, err = backend.Find(v.Name); err != nil {

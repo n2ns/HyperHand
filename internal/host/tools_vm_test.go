@@ -62,15 +62,17 @@ func TestParseCheckpointName(t *testing.T) {
 // (nil Backend). A delete of an id ending in "-fails" fails.
 type vmToolsBackend struct {
 	Backend
-	mu        sync.Mutex
-	created   []string
-	deleted   []string
-	renamed   []string
-	restored  []string
-	vms       []hyperv.VM
-	listErr   error
-	createErr error
-	tree      *hyperv.CheckpointList // nil: defaultTree on first use
+	mu                 sync.Mutex
+	created            []string
+	deleted            []string
+	renamed            []string
+	restored           []string
+	vms                []hyperv.VM
+	listErr            error
+	createErr          error
+	tree               *hyperv.CheckpointList // nil: defaultTree on first use
+	deleteErr          error                  // returned by DeleteCheckpoint and RestoreCheckpoint when set
+	listCheckpointsErr error                  // returned by ListCheckpoints when set
 }
 
 // defaultTree is a manual root with one temp child, which is the current state's parent.
@@ -115,6 +117,9 @@ func (b *vmToolsBackend) Find(name string) (hyperv.VM, error) {
 func (b *vmToolsBackend) ListCheckpoints(vm string) (hyperv.CheckpointList, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.listCheckpointsErr != nil {
+		return hyperv.CheckpointList{}, b.listCheckpointsErr
+	}
 	t := *b.current()
 	t.Checkpoints = append([]hyperv.Checkpoint{}, t.Checkpoints...)
 	return t, nil
@@ -140,6 +145,9 @@ func (b *vmToolsBackend) CreateCheckpoint(vm, name string) (hyperv.Checkpoint, e
 func (b *vmToolsBackend) DeleteCheckpoint(vm, id string, subtree bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.deleteErr != nil {
+		return b.deleteErr
+	}
 	if strings.HasSuffix(id, "-fails") {
 		return errors.New("Hyper-V job failed")
 	}
@@ -183,6 +191,9 @@ func (b *vmToolsBackend) RenameCheckpoint(vm, id, name string) error {
 func (b *vmToolsBackend) RestoreCheckpoint(vm, id string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.deleteErr != nil {
+		return b.deleteErr
+	}
 	if _, _, err := b.node(id); err != nil {
 		return err
 	}

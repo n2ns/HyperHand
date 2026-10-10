@@ -221,8 +221,8 @@ func TestCheckpointDelete(t *testing.T) {
 	if *cps.CurrentParent != "id-2" || len(cps.Checkpoints) != 5 || len(registeredTemps(d, "Win10")) != 0 {
 		t.Errorf("after deletes %s, temps %v", jsonString(cps), registeredTemps(d, "Win10"))
 	}
-	// A manual checkpoint by id: its child (id-2, now current parent) is re-parented, nothing merges into current.
-	// With subtree the whole branch is listed, computed from the tree before deleting.
+	// A manual checkpoint by id with subtree: the whole branch is listed, computed from the tree before deleting, and
+	// the current parent (id-2) is among the deleted, so the current state absorbs the merge.
 	callJSON(t, ctx, cs, "vm_checkpoint_delete", map[string]any{"id": "id-1", "subtree": true}, &out)
 	wantDeleted := []checkpointRef{
 		{ID: "id-1", Name: "baseline", Type: "manual"},
@@ -339,5 +339,95 @@ func TestEndTurnAllTemp(t *testing.T) {
 	callJSON(t, ctx, cs, "vm_end_turn", map[string]any{"vm": "nope", "all_temp": true}, &out)
 	if len(out.Errors) != 1 || !strings.Contains(out.Errors[0], "nope") {
 		t.Errorf("unknown VM %s", jsonString(out))
+	}
+}
+
+func TestEndTurnDefaultPathRechecksRegisteredTemps(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tree := hyperv.CheckpointList{CheckpointType: "Standard", CurrentParentID: "id-1", Checkpoints: []hyperv.Checkpoint{
+		{ID: "id-1", Name: "baseline"},
+		{ID: "id-2", Name: "run-20261010-0812-7f3a-temp-step1", ParentID: "id-1"},
+		{ID: "id-3", Name: "run-20261010-0812-7f3a-keep-step2", ParentID: "id-1"}, // registered as temp, renamed to keep by hand
+		{ID: "id-fails", Name: "run-20261010-0812-7f3a-temp-stuck", ParentID: "id-1"},
+	}}
+	b := &vmToolsBackend{vms: []hyperv.VM{{Name: "Win10", ID: "id-a", State: "Running"}}, tree: &tree}
+	cs, d := connectTools(t, ctx, b)
+	for _, c := range []tempCheckpoint{
+		{ID: "id-2", Name: "run-20261010-0812-7f3a-temp-step1"},
+		{ID: "id-3", Name: "run-20261010-0812-7f3a-temp-step2"},
+		{ID: "id-gone", Name: "run-20261010-0812-7f3a-temp-deleted-by-hand"},
+		{ID: "id-fails", Name: "run-20261010-0812-7f3a-temp-stuck"},
+	} {
+		d.turn.addTempCheckpoint("Win10", c)
+	}
+	// The VM name is matched case-insensitively, as Hyper-V does.
+	var out endTurnOut
+	callJSON(t, ctx, cs, "vm_end_turn", map[string]any{"vm": "win10"}, &out)
+	want := endTurnOut{
+		DeletedCheckpoints: []string{"run-20261010-0812-7f3a-temp-step1"},
+		Skipped:            []skippedCheckpoint{{ID: "id-3", Name: "run-20261010-0812-7f3a-keep-step2", Reason: "no longer a temp checkpoint (now keep); not deleted"}},
+		Errors:             []string{"Win10/run-20261010-0812-7f3a-temp-stuck: Hyper-V job failed"},
+	}
+	if !reflect.DeepEqual(out, want) || !reflect.DeepEqual(b.deleted, []string{"Win10/id-2"}) {
+		t.Errorf("end_turn %s, deleted %v", jsonString(out), b.deleted)
+	}
+	// Only the failed one stays registered: the renamed and the vanished ones are forgotten.
+	if got := registeredTemps(d, "Win10"); !reflect.DeepEqual(got, []string{"id-fails"}) {
+		t.Errorf("registered after end_turn: %v", got)
+	}
+	// Once it can be deleted it goes and nothing stays registered.
+	b.mu.Lock()
+	for i := range b.tree.Checkpoints {
+		if b.tree.Checkpoints[i].ID == "id-fails" {
+			b.tree.Checkpoints[i].ID = "id-4"
+		}
+	}
+	b.mu.Unlock()
+	d.turn.addTempCheckpoint("Win10", tempCheckpoint{ID: "id-4", Name: "run-20261010-0812-7f3a-temp-stuck"})
+	callJSON(t, ctx, cs, "vm_end_turn", nil, &out)
+	if !reflect.DeepEqual(out.DeletedCheckpoints, []string{"run-20261010-0812-7f3a-temp-stuck"}) || len(out.Errors) != 0 || len(registeredTemps(d, "Win10")) != 0 {
+		t.Errorf("second end_turn %s, registered %v", jsonString(out), registeredTemps(d, "Win10"))
+	}
+	// A listing failure deletes nothing and keeps everything registered.
+	d.turn.addTempCheckpoint("Win10", tempCheckpoint{ID: "id-2", Name: "x"})
+	b.mu.Lock()
+	b.listCheckpointsErr = errors.New("PowerShell failed")
+	b.mu.Unlock()
+	callJSON(t, ctx, cs, "vm_end_turn", nil, &out)
+	if len(out.DeletedCheckpoints) != 0 || len(out.Errors) != 1 || !reflect.DeepEqual(registeredTemps(d, "Win10"), []string{"id-2"}) {
+		t.Errorf("list failure %s, registered %v", jsonString(out), registeredTemps(d, "Win10"))
+	}
+}
+
+func TestDeleteAfterListNoCheckpoint(t *testing.T) {
+	// The checkpoint disappears between the list and the delete: the backend's "checkpoint not found" (as text after
+	// the broker pipe) is no_checkpoint.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	b := &vmToolsBackend{vms: []hyperv.VM{{Name: "Win10", ID: "id-a", State: "Running"}}}
+	b.deleteErr = errors.New("checkpoint not found: id-2")
+	cs, _ := connectTools(t, ctx, b)
+	e := callRefused(t, ctx, cs, "vm_checkpoint_delete", map[string]any{"id": "id-2"})
+	if e["error"] != codeNoCheckpoint || e["id"] != "id-2" {
+		t.Errorf("vanished: %v", e)
+	}
+	// Likewise for restore, where the state saved by save_current is reported in the refusal.
+	e = callRefused(t, ctx, cs, "vm_restore", map[string]any{"id": "id-2", "save_current": true})
+	if e["error"] != codeNoCheckpoint || e["saved_current"] == nil {
+		t.Errorf("restore after save_current: %v", e)
+	}
+}
+
+func TestSubtreeOfIgnoresOrder(t *testing.T) {
+	l := hyperv.CheckpointList{Checkpoints: []hyperv.Checkpoint{
+		{ID: "c", ParentID: "b"}, // listed before its parent (clock set back)
+		{ID: "a"},
+		{ID: "b", ParentID: "a"},
+		{ID: "x", ParentID: "a"},
+	}}
+	got := subtreeOf(l, "b")
+	if len(got) != 2 || got[0].ID != "c" || got[1].ID != "b" {
+		t.Errorf("subtree of b: %+v", got)
 	}
 }

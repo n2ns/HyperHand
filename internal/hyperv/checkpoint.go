@@ -14,8 +14,9 @@ import (
 // Checkpoint is one VM checkpoint (Hyper-V snapshot). ID is the snapshot GUID (the second part of the
 // Msvm_VirtualSystemSettingData InstanceID "Microsoft:<vm id>\<snapshot id>", also Get-VMSnapshot's Id); ParentID is
 // the parent checkpoint's ID, "" for a root. CreatedAt is RFC 3339 with the host's offset. Kind is "standard" (the
-// checkpoint may hold memory) or "production" (application-consistent, restores to Off; Hyper-V's Recovery type counts
-// as production). State is the power state the checkpoint saved: "running", "off" or "saved".
+// checkpoint may hold memory), "production" (application-consistent, Hyper-V's Recovery type; restores to Off), or
+// another Hyper-V SnapshotType lower-cased ("planned", "missing", "replica", ...), which cannot be restored normally.
+// State is the power state the checkpoint saved: "running", "off" or "saved".
 type Checkpoint struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -42,7 +43,7 @@ var ErrCheckpointNotFound = errors.New("checkpoint not found")
 // a root, which [string] turns into ""); SnapshotType is Standard for a user checkpoint and Recovery/Planned/Missing/
 // Replica... otherwise; State is the saved power state (Running, Off, Saved...).
 // https://learn.microsoft.com/en-us/powershell/module/hyper-v/get-vmsnapshot
-const snapshotFields = `@{n='id';e={[string]$_.Id}},@{n='name';e={$_.Name}},@{n='parent_id';e={[string]$_.ParentSnapshotId}},@{n='created_at';e={$_.CreationTime.ToString('yyyy-MM-ddTHH:mm:sszzz')}},@{n='kind';e={if ([string]$_.SnapshotType -eq 'Standard') {'standard'} else {'production'}}},@{n='state';e={([string]$_.State).ToLower()}}`
+const snapshotFields = `@{n='id';e={[string]$_.Id}},@{n='name';e={$_.Name}},@{n='parent_id';e={[string]$_.ParentSnapshotId}},@{n='created_at';e={$_.CreationTime.ToString('yyyy-MM-ddTHH:mm:sszzz')}},@{n='kind';e={switch ([string]$_.SnapshotType) { 'Standard' {'standard'} 'Recovery' {'production'} default {([string]$_.SnapshotType).ToLower()} }}},@{n='state';e={([string]$_.State).ToLower()}}`
 
 // checkpointScript is the PowerShell that lists a VM's checkpoint tree as one JSON object. vmScript sets $vm to the
 // Microsoft.HyperV.PowerShell.VirtualMachine, whose CheckpointType is the Set-VM -CheckpointType setting (Disabled,

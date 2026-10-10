@@ -112,14 +112,23 @@ func checkpointTree(l hyperv.CheckpointList) []checkpointOut {
 	return out
 }
 
-// subtreeOf returns the checkpoint with ID id and all its descendants in l, parents before children (l is in
-// creation order, so one pass finds every descendant).
+// subtreeOf returns the checkpoint with ID id and all its descendants in l, in l's order. Membership is computed to
+// a fixed point, so it does not depend on parents being listed before children (a clock set back can order them
+// otherwise).
 func subtreeOf(l hyperv.CheckpointList, id string) []hyperv.Checkpoint {
 	in := map[string]bool{id: true}
+	for changed := true; changed; {
+		changed = false
+		for _, c := range l.Checkpoints {
+			if !in[c.ID] && in[c.ParentID] {
+				in[c.ID] = true
+				changed = true
+			}
+		}
+	}
 	var out []hyperv.Checkpoint
 	for _, c := range l.Checkpoints {
-		if c.ID == id || in[c.ParentID] {
-			in[c.ID] = true
+		if in[c.ID] {
 			out = append(out, c)
 		}
 	}
@@ -181,4 +190,4 @@ func checkpointsDisabled(err error) bool {
 }
 
 // disabledNext is the next step when the VM's checkpoint setting is Disabled.
-const disabledNext = "enable checkpoints for the VM in Hyper-V Manager (Settings > Checkpoints) or with Set-VM -CheckpointType Standard, then call vm_checkpoint again"
+const disabledNext = "enable checkpoints for the VM in Hyper-V Manager (Settings > Checkpoints) or with Set-VM -CheckpointType Standard, then retry"
