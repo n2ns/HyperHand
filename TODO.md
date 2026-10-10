@@ -24,25 +24,12 @@ These are development candidates, not authorization to implement all of them tog
 
 | Priority | Capability | Minimum delivery and acceptance |
 | --- | --- | --- |
-| P1 | Asynchronous guest command jobs | Submit a command and receive a job ID; query state and incremental output, cancel its process tree, and retrieve results after reconnecting. Define retention and restart behavior. Current `vm_exec` waits for completion; detached `vm_launch` does not capture command results. |
-| P1/P2 | Recovery of abandoned task ownership | Inspect the owning task and in-flight calls, then provide controlled cleanup and release. Preserve active work and avoid unsafe automatic takeover. Current VM write ownership lasts until successful `vm_end_turn`; there is no idle takeover. |
 | P2 | VM save and pause controls | Add explicit Save/Pause operations and define resume readiness for the agent and desktop. Saved/Paused states are already recognized, and `vm_start` already requests Running; checkpoint restore is a separate capability. |
 | P2 | Sequential batches with assertions | Execute ordered tool steps with per-step results, stop on failure and identify the last completed step. Do not automatically repeat side effects. Existing key sequences and action readback remain available. |
 | P2 | Acceptance evidence export | Package versions, environment, steps, assertions, screenshots and file hashes into a reviewable artifact. Exclude credentials and unrelated data. Current evidence primarily consists of local ignored files. |
 | P2 | VMConnect viewer reconnection | Recover the host viewer after VM lifecycle operations leave it disconnected. Verify viewer recovery separately from guest command and screenshot connectivity; the latter can remain healthy while the viewer is disconnected. |
 
 References: [tool behavior](docs/features.md), [Win10 acceptance](docs/acceptance-20261010.md), and [semantic control acceptance](docs/semantic-acceptance-20261010.md).
-
-### AI-caller feedback: PipeSifu 3D session (2026-10-10)
-
-Friction an AI caller hit while deploying PipeSifu builds, installing its AutoCAD plugin and drawing 3D parts on the Win10 VM through the PipeSifu `Invoke-HyperHand.ps1` helper (one MCP session per call). Each item names the observed behavior; none has been reproduced in isolation yet, so confirm the cause before changing code. Window waits (`window_exists` etc.) were also wanted and already shipped in `3c2241c`.
-
-| Priority | Item | Observed behavior and minimum delivery |
-| --- | --- | --- |
-| P1 | Orphaned write ownership from session-per-call clients (concrete cause for the "Recovery of abandoned task ownership" row above) | The helper opens and deletes one MCP session per call, so each call without `task_id` runs in a new default task. The first write (`vm_exec`) reserved Win10 for a task that no later call could reach, and the next session's write (`vm_checkpoint`) got `vm_busy`; the only way on was to copy `owner_task_id` from the error and pass it explicitly. Minimum delivery: end a default task, releasing ownership, when its MCP session is deleted with no accepted calls in flight (explicit `task_id`s keep today's behavior), and document that scripts needing ownership across calls must pass an explicit `task_id`. Acceptance: two consecutive session-per-call writes without `task_id` both succeed; an explicit-ID task still keeps ownership across sessions. |
-| P3 | Minimal official client for scripts | Every caller rebuilds the same wrapper (the AI wrote `hhlib.py`): JSON argument files to survive shell quoting of Windows paths, a stable `task_id`, UTF-8 decoding, turning error objects into failures, saving images, and finding a control index in the tree text. Ship a small documented client (CLI or Python module) with these, so agents and subagents do not each re-derive it. |
-
-Out of scope for this file: the helper script itself lives in the PipeSifu repository (`.agents/skills/hyperhand-vm/scripts/Invoke-HyperHand.ps1`); its Chinese output arriving in the console code page and its `-TimeoutSec` cap of 300 seconds were PipeSifu skill issues and are fixed there (UTF-8 output, cap 3600; 2026-10-10).
 
 ## 3. Remaining acceptance coverage
 
@@ -82,6 +69,9 @@ Evidence and boundaries: [v0.2.0 acceptance](docs/acceptance-v0.2.0.md#remaining
 
 - [x] Window groups, target integrity checks, structured tool results/errors, observation IDs and freshness checks.
 - [x] Typing into AutoCAD with its dynamic-input tooltip: the agent accepts a bare input popup of the target (no caption, sizing border or system menu; same process and UI thread; owner chain to the target) as the foreground while the target stays usable, so `vm_type "_qnew\n"` with the cursor in the drawing area runs the command; modal dialogs and floating palettes still stop input. Installed Win10 acceptance: see the [acceptance record](docs/dyninput-acceptance-20261010.md). `Win10-PipeSifu` still needs `vm_update_agent`.
+- [x] Ownership of session-per-call clients: deleting an MCP session ends its default task once no call of it is in flight, releasing the VM (temp checkpoints kept); explicit task IDs keep ownership across sessions. `vm_busy` reports `owner_idle_ms` and `owner_in_flight` and names `vm_end_turn {task_id, vm}` for an abandoned explicit owner; `vm_status` reports `owner`. There is no idle takeover and no session timeout: a client that dies without deleting its session keeps its default task. Installed Win10 acceptance: see the [acceptance record](docs/tasks-jobs-client-acceptance-20261010.md).
+- [x] Asynchronous guest command jobs: `vm_exec background: true` and `vm_job` (state, incremental output by offsets, `wait_ms`, process-tree cancel, listing); jobs live in the agent and survive MCP reconnects, task ends and host restarts; retention 32 jobs / 24 hours / 16 MiB per stream; guest protocol 3. Installed Win10 acceptance: see the [acceptance record](docs/tasks-jobs-client-acceptance-20261010.md). Not run on the installed host: a host restart while a job runs. `Win10-PipeSifu` still needs `vm_update_agent`.
+- [x] Minimal official client: `client/hyperhand_client.py` (module and command; stable task ID, `key=value` arguments, UTF-8 JSON, errors as failures, saved images, control search). See [client/README.md](client/README.md).
 - [x] Required `vm` on every tool except `vm_list` (no default VM; `all_temp` needs `vm`), so a call meant for a VM that is off never reaches another one. Installed-host acceptance with `Win10` and `Win10-PipeSifu`: see the [acceptance record](docs/vm-required-acceptance-20261010.md).
 - [x] UIA semantic actions, state readback and four-direction semantic scrolling; custom-provider coverage remains bounded by the acceptance records.
 - [x] UI condition waits and assertions: six window/control kinds, exact enabled/value/state matching, one-shot checks, timeout/cancellation, unknown-state protection and concurrent actions. See the [wait contract](docs/features.md#73-vm_wait).
