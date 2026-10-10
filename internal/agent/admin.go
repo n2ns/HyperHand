@@ -23,17 +23,23 @@ type adminEndpoint struct {
 	ParentCreated windows.Filetime
 }
 
+// adminRequest is what the elevated worker receives: a command to run, or with Launch set, a program to start detached.
 type adminRequest struct {
 	Args     proto.ExecArgs
+	Launch   *proto.LaunchArgs
 	Deadline time.Time
+}
+
+type adminReply struct {
+	Result proto.ExecResult
+	PID    uint32
+	Error  string
 }
 
 func execAdmin(ctx context.Context, a proto.ExecArgs) (any, []byte, error) {
 	return execAdminWithLauncher(ctx, a, launchAdmin)
 }
 
-// The launcher runs only ShellExecuteEx, in a disposable ordinary process. The
-// elevated worker receives the command only over this live, single-use pipe.
 func execAdminWithLauncher(ctx context.Context, a proto.ExecArgs, launch func(context.Context, adminEndpoint) error) (any, []byte, error) {
 	opctx, cancel := context.WithTimeout(ctx, timeout(a.TimeoutMs))
 	defer cancel()
@@ -50,20 +56,63 @@ func execAdminWithLauncher(ctx context.Context, a proto.ExecArgs, launch func(co
 			return nil, nil, err
 		}
 	}
+	a.Admin = false
+	reply, err := adminCall(ctx, opctx, adminRequest{Args: a}, launch)
+	if err != nil {
+		if ctx.Err() == nil && opctx.Err() != nil {
+			return proto.ExecResult{ExitCode: -1, TimedOut: true}, nil, nil
+		}
+		return adminInterrupted(ctx, err)
+	}
+	return reply.Result, nil, nil
+}
+
+// adminLaunchTimeout bounds launch with Admin: elevation plus the start of the program.
+const adminLaunchTimeout = 60 * time.Second
+
+func launchAdminProcess(ctx context.Context, a proto.LaunchArgs) (any, []byte, error) {
+	return launchAdminWithLauncher(ctx, a, launchAdmin)
+}
+
+func launchAdminWithLauncher(ctx context.Context, a proto.LaunchArgs, launch func(context.Context, adminEndpoint) error) (any, []byte, error) {
+	opctx, cancel := context.WithTimeout(ctx, adminLaunchTimeout)
+	defer cancel()
+	if a.Cwd == "" {
+		var err error
+		a.Cwd, err = os.Getwd()
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	a.Admin = false
+	reply, err := adminCall(ctx, opctx, adminRequest{Launch: &a}, launch)
+	if err != nil {
+		if ctx.Err() == nil && opctx.Err() != nil {
+			return nil, nil, fmt.Errorf("elevated launch not completed within %s (UAC prompt unanswered?)", adminLaunchTimeout)
+		}
+		return adminInterrupted(ctx, err)
+	}
+	return proto.LaunchResult{PID: reply.PID}, nil, nil
+}
+
+// adminCall sends one request to a freshly elevated worker and returns its reply. The launcher runs only
+// ShellExecuteEx, in a disposable ordinary process. The elevated worker receives the request only over this live,
+// single-use pipe. opctx bounds the whole exchange; its deadline is the one the worker enforces.
+func adminCall(ctx, opctx context.Context, req adminRequest, launch func(context.Context, adminEndpoint) error) (adminReply, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
-		return nil, nil, err
+		return adminReply{}, err
 	}
 	endpoint := adminEndpoint{Pipe: `\\.\pipe\hyperhand-admin-` + rand.Text(), ParentPID: uint32(os.Getpid())}
 	var exited, kernel, userTime windows.Filetime
 	if err := windows.GetProcessTimes(windows.CurrentProcess(), &endpoint.ParentCreated, &exited, &kernel, &userTime); err != nil {
-		return nil, nil, err
+		return adminReply{}, err
 	}
 	listener, err := winio.ListenPipe(endpoint.Pipe, &winio.PipeConfig{
 		SecurityDescriptor: "D:P(A;;GA;;;" + user.User.Sid.String() + ")(A;;GA;;;BA)(A;;GA;;;SY)",
 	})
 	if err != nil {
-		return nil, nil, err
+		return adminReply{}, err
 	}
 	var conn net.Conn
 	var acceptErr error
@@ -87,21 +136,21 @@ func execAdminWithLauncher(ctx context.Context, a proto.ExecArgs, launch func(co
 	for {
 		select {
 		case <-opctx.Done():
-			return adminInterrupted(ctx, opctx.Err())
+			return adminReply{}, opctx.Err()
 		case <-launchDone:
 			if opctx.Err() != nil {
-				return adminInterrupted(ctx, opctx.Err())
+				return adminReply{}, opctx.Err()
 			}
 			if launchErr != nil {
-				return nil, nil, launchErr
+				return adminReply{}, launchErr
 			}
 			launchDone = nil // runas succeeded; the worker may still be connecting
 		case <-accepted:
 			if opctx.Err() != nil {
-				return adminInterrupted(ctx, opctx.Err())
+				return adminReply{}, opctx.Err()
 			}
 			if acceptErr != nil {
-				return nil, nil, acceptErr
+				return adminReply{}, acceptErr
 			}
 			deadline, _ := opctx.Deadline()
 			// The worker enforces the original deadline. Allow it to reap its job
@@ -109,27 +158,24 @@ func execAdminWithLauncher(ctx context.Context, a proto.ExecArgs, launch func(co
 			conn.SetDeadline(deadline.Add(5 * time.Second))
 			stopIO := context.AfterFunc(ctx, func() { conn.Close() })
 			defer stopIO()
-			a.Admin = false
-			if err := json.NewEncoder(conn).Encode(adminRequest{a, deadline}); err != nil {
-				return adminInterrupted(ctx, err)
+			req.Deadline = deadline
+			if err := json.NewEncoder(conn).Encode(req); err != nil {
+				return adminReply{}, err
 			}
-			var reply struct {
-				Result proto.ExecResult
-				Error  string
-			}
+			var reply adminReply
 			if err := json.NewDecoder(conn).Decode(&reply); err != nil {
 				if opctx.Err() != nil {
-					return adminInterrupted(ctx, opctx.Err())
+					return adminReply{}, opctx.Err()
 				}
-				return adminInterrupted(ctx, err)
+				return adminReply{}, err
 			}
 			if ctx.Err() != nil {
-				return nil, nil, ctx.Err()
+				return adminReply{}, ctx.Err()
 			}
 			if reply.Error != "" {
-				return nil, nil, errors.New(reply.Error)
+				return adminReply{}, errors.New(reply.Error)
 			}
-			return reply.Result, nil, nil
+			return reply, nil
 		}
 	}
 }
@@ -144,8 +190,8 @@ func adminInterrupted(ctx context.Context, err error) (any, []byte, error) {
 	return nil, nil, err
 }
 
-// runAdminWorker executes one request. Checking both PID and creation time stops
-// a late UAC approval from trusting a replacement pipe server after its parent exits.
+// runAdminWorker executes one request: a command in a job object, or a detached launch. Checking both PID and
+// creation time stops a late UAC approval from trusting a replacement pipe server after its parent exits.
 func runAdminWorker(endpoint adminEndpoint) error {
 	parent, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, endpoint.ParentPID)
 	if err != nil {
@@ -190,16 +236,21 @@ func runAdminWorker(endpoint adminEndpoint) error {
 		close(watchDone)
 	}()
 	defer func() { conn.Close(); <-watchDone }()
-	request.Args.Admin = false
-	result, _, execErr := execAdminCommand(execCtx, request.Args)
-	reply := struct {
-		Result proto.ExecResult
-		Error  string
-	}{}
-	if execErr != nil {
-		reply.Error = execErr.Error()
+	var reply adminReply
+	if request.Launch != nil {
+		pid, err := startDetached(*request.Launch)
+		if err != nil {
+			reply.Error = err.Error()
+		}
+		reply.PID = pid
 	} else {
-		reply.Result = result.(proto.ExecResult)
+		request.Args.Admin = false
+		result, _, execErr := execAdminCommand(execCtx, request.Args)
+		if execErr != nil {
+			reply.Error = execErr.Error()
+		} else {
+			reply.Result = result.(proto.ExecResult)
+		}
 	}
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	return json.NewEncoder(conn).Encode(reply)

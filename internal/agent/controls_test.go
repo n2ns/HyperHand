@@ -40,14 +40,14 @@ func TestControlsBounds(t *testing.T) {
 type fakeControl struct {
 	name                        string
 	child, sibling              *fakeControl
-	password, cut               bool
+	password, cut, focused      bool
 	err                         error
 	reads, releases, childCalls int
 }
 
 func (e *fakeControl) info() (proto.ControlInfo, bool, bool, error) {
 	e.reads++
-	return proto.ControlInfo{Name: e.name}, e.password, e.cut, e.err
+	return proto.ControlInfo{Name: e.name, Focused: e.focused}, e.password, e.cut, e.err
 }
 func (e *fakeControl) first() (controlElement, error) {
 	e.childCalls++
@@ -160,62 +160,23 @@ func TestControlsSubprocessCancellation(t *testing.T) {
 	}
 }
 
-func TestControlsNativeSnapshot(t *testing.T) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	h := offscreenWindow(t, "hyperhand-controls-test", 0, -30000)
-	cls, _ := windows.UTF16PtrFromString("EDIT")
-	secret, _ := windows.UTF16PtrFromString("controls-test-password-secret")
-	child, _, childErr := pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(cls)), uintptr(unsafe.Pointer(secret)), 0x40000000|0x10000000|0x20, 10, 10, 100, 20, uintptr(h), 0, 0, 0)
-	if child == 0 {
-		t.Fatal(childErr)
-	}
-	a := proto.ControlsArgs{Handle: uint64(h), PID: uint32(os.Getpid()), MaxDepth: 2, MaxNodes: 20}
-	wrong := a
-	wrong.PID++
-	if err := validateControlsWindow(wrong); err == nil {
-		t.Fatal("wrong PID accepted")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// pumpHelper runs one helper request in a test subprocess while this thread services the messages of its test
+// windows, which the helper's UIA provider needs.
+func pumpHelper(t *testing.T, req helperRequest) (helperReply, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := controlsTestCommand(t, ctx, "serve")
 	type outcome struct {
-		r   proto.ControlsResult
+		r   helperReply
 		err error
 	}
 	done := make(chan outcome, 1)
-	go func() { r, err := runControlsCommand(ctx, cmd, a); done <- outcome{r, err} }()
-	// The target test window must service provider messages while the helper queries it.
+	go func() { r, err := runHelper(ctx, cmd, req); done <- outcome{r, err} }()
 	for {
 		select {
 		case out := <-done:
-			if out.err != nil {
-				t.Fatal(out.err)
-			}
-			if len(out.r.Nodes) == 0 {
-				t.Fatal("no root")
-			}
-			data, _ := json.Marshal(out.r)
-			if strings.Contains(string(data), "controls-test-password-secret") {
-				t.Fatal("password text leaked")
-			}
-			foundEdit := false
-			for _, node := range out.r.Nodes {
-				if node.ControlType == 50004 {
-					foundEdit = true
-					if node.Name != "" {
-						t.Errorf("password name not redacted: %q", node.Name)
-					}
-				}
-			}
-			if !foundEdit {
-				t.Fatal("password edit control missing")
-			}
-			n := out.r.Nodes[0]
-			if n.PID != a.PID || n.Name != "hyperhand-controls-test" || n.Rect.Left != -30000 {
-				t.Fatalf("root: %+v", n)
-			}
-			return
+			return out.r, out.err
 		default:
 			var msg win.MSG
 			for win.PeekMessage(&msg, 0, 0, 0, co.PM_REMOVE) {
@@ -224,6 +185,181 @@ func TestControlsNativeSnapshot(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
+	}
+}
+
+func editChild(t *testing.T, parent windows.HWND, text string, style uintptr, x int32) windows.HWND {
+	t.Helper()
+	cls, _ := windows.UTF16PtrFromString("EDIT")
+	name, _ := windows.UTF16PtrFromString(text)
+	child, _, err := pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(cls)), uintptr(unsafe.Pointer(name)), 0x40000000|0x10000000|style, uintptr(x), 10, 100, 20, uintptr(parent), 0, 0, 0)
+	if child == 0 {
+		t.Fatal(err)
+	}
+	return windows.HWND(child)
+}
+
+func TestControlsNativeSnapshot(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	h := offscreenWindow(t, "hyperhand-controls-test", 0, -30000)
+	editChild(t, h, "controls-test-password-secret", 0x20, 10) // ES_PASSWORD
+	editChild(t, h, "plain-text", 0, 150)
+	a := proto.ControlsArgs{Handle: uint64(h), PID: uint32(os.Getpid()), MaxDepth: 2, MaxNodes: 20}
+	wrong := a
+	wrong.PID++
+	if err := validateControlsWindow(wrong); err == nil {
+		t.Fatal("wrong PID accepted")
+	}
+	reply, err := pumpHelper(t, helperRequest{Controls: &a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := *reply.Controls
+	if len(r.Nodes) == 0 {
+		t.Fatal("no root")
+	}
+	data, _ := json.Marshal(r)
+	if strings.Contains(string(data), "controls-test-password-secret") {
+		t.Fatal("password text leaked")
+	}
+	var password, plain *proto.ControlInfo
+	for i, node := range r.Nodes {
+		if node.ControlType != 50004 {
+			continue
+		}
+		if node.Rect.Left == -30000+150 {
+			plain = &r.Nodes[i]
+		} else {
+			password = &r.Nodes[i]
+		}
+	}
+	if password == nil || plain == nil {
+		t.Fatalf("edit controls missing: %s", data)
+	}
+	if password.Name != "" || password.HasValue || password.Value != "" {
+		t.Errorf("password not redacted: %+v", password)
+	}
+	if !plain.HasValue || plain.Value != "plain-text" || !slices.Contains(plain.Patterns, "Value") || plain.RuntimeID == "" {
+		t.Errorf("plain edit: %+v", plain)
+	}
+	if !slices.Contains(r.Truncation, "password_subtree") {
+		t.Errorf("truncation: %v", r.Truncation)
+	}
+	n := r.Nodes[0]
+	if n.PID != a.PID || n.Name != "hyperhand-controls-test" || n.Rect.Left != -30000 || n.RuntimeID == "" || n.Index != 0 {
+		t.Fatalf("root: %+v", n)
+	}
+	if strings.Count(n.RuntimeID, ".") < 1 {
+		t.Errorf("runtime ID %q is not dot-joined integers", n.RuntimeID)
+	}
+	if r.Focused != -1 { // the off-screen test window never takes focus
+		t.Errorf("focused %d", r.Focused)
+	}
+
+	// control_action: SetValue on the plain edit, with read-back, and the two error strings the host maps.
+	act := proto.ControlActionArgs{Handle: a.Handle, PID: a.PID, RuntimeID: plain.RuntimeID, Action: "setvalue", Value: "new 文本"}
+	reply, err = pumpHelper(t, helperRequest{Action: &act})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := reply.Action; res == nil || !res.HasValue || res.Value != "new 文本" || res.Verified == nil || !*res.Verified {
+		t.Fatalf("SetValue result: %+v", reply.Action)
+	}
+	act.Action = "Toggle"
+	if _, err = pumpHelper(t, helperRequest{Action: &act}); err == nil || !strings.HasPrefix(err.Error(), "unsupported pattern: Toggle; supported: ") || !strings.Contains(err.Error(), "SetValue") {
+		t.Fatalf("unsupported pattern: %v", err)
+	}
+	act.RuntimeID = "1.2.3.4"
+	if _, err = pumpHelper(t, helperRequest{Action: &act}); err == nil || err.Error() != "element not found" {
+		t.Fatalf("missing element: %v", err)
+	}
+}
+
+// The focused-element helper answers within its budget; what has focus on the test machine is not under our control.
+func TestFocusedHelper(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), focusedTimeout)
+	defer cancel()
+	reply, err := runHelper(ctx, controlsTestCommand(t, ctx, "serve"), helperRequest{Focused: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := reply.Focused; f != nil && (f.Window == 0 || f.ControlType == "") {
+		t.Errorf("focused: %+v", f)
+	}
+}
+
+func TestControlActionArgs(t *testing.T) {
+	for _, a := range []proto.ControlActionArgs{
+		{PID: 1, RuntimeID: "1", Action: "Invoke"},
+		{Handle: 1, PID: 1, Action: "Invoke"},
+		{Handle: 1, PID: 1, RuntimeID: "1", Action: "Click"},
+	} {
+		if _, _, err := controlAction(context.Background(), mustJSON(a), nil); err == nil {
+			t.Errorf("accepted %+v", a)
+		}
+	}
+}
+
+func TestRuntimeIDFormat(t *testing.T) {
+	if s := formatRuntimeID([]int32{42, 1234, 5}); s != "42.1234.5" {
+		t.Errorf("%q", s)
+	}
+	if s := formatRuntimeID(nil); s != "" {
+		t.Errorf("%q", s)
+	}
+	if s := formatRuntimeID([]int32{-7}); s != "-7" {
+		t.Errorf("%q", s)
+	}
+}
+
+func TestParseAction(t *testing.T) {
+	for in, want := range map[string]string{"setvalue": "SetValue", "INVOKE": "Invoke", "scrollintoview": "ScrollIntoView", "Collapse": "Collapse"} {
+		if got, err := parseAction(in); err != nil || got != want {
+			t.Errorf("%q: %q %v", in, got, err)
+		}
+	}
+	if _, err := parseAction("Click"); err == nil || !strings.Contains(err.Error(), "SetValue, Invoke") {
+		t.Errorf("unknown action: %v", err)
+	}
+	for _, a := range proto.ControlActions {
+		if patternFor(a) < 0 {
+			t.Errorf("no pattern for %s", a)
+		}
+	}
+}
+
+func TestPatternNames(t *testing.T) {
+	available := []bool{true, false, true, false, true, false} // Invoke, ExpandCollapse, Value
+	if got := fmt.Sprint(patternNames(available)); got != "[Invoke Expand Collapse Value]" {
+		t.Errorf("patterns: %s", got)
+	}
+	if got := fmt.Sprint(actionNames(available)); got != "[Invoke Expand Collapse SetValue]" {
+		t.Errorf("actions: %s", got)
+	}
+	if patternNames(make([]bool, len(uiaPatterns))) != nil {
+		t.Error("names for no patterns")
+	}
+	err := unsupportedPattern("Toggle", actionNames(available))
+	if err.Error() != "unsupported pattern: Toggle; supported: Invoke, Expand, Collapse, SetValue" {
+		t.Errorf("%v", err)
+	}
+	if errElementNotFound.Error() != "element not found" {
+		t.Errorf("%v", errElementNotFound)
+	}
+}
+
+func TestWalkControlsFocused(t *testing.T) {
+	leaf := &fakeControl{name: "leaf", focused: true}
+	first := &fakeControl{name: "first", child: leaf, sibling: &fakeControl{name: "second", focused: true}}
+	root := &fakeControl{name: "root", child: first}
+	r, err := walkControls(root, proto.ControlsArgs{MaxDepth: 4, MaxNodes: 200})
+	if err != nil || r.Focused != 2 || !r.Nodes[2].Focused {
+		t.Fatalf("%+v %v", r, err)
+	}
+	r, err = walkControls(&fakeControl{name: "alone"}, proto.ControlsArgs{MaxDepth: 4, MaxNodes: 200})
+	if err != nil || r.Focused != -1 {
+		t.Fatalf("%+v %v", r, err)
 	}
 }
 

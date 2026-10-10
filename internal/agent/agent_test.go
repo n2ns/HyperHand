@@ -51,7 +51,7 @@ func TestServe(t *testing.T) {
 
 	var p proto.PingResult
 	call(t, client, proto.OpPing, nil, nil, &p)
-	if p.Version != proto.Version || p.Hostname == "" || p.User == "" {
+	if p.Version != proto.Version || p.Protocol != proto.Protocol || p.Hostname == "" || p.User == "" {
 		t.Fatalf("ping: %+v", p)
 	}
 
