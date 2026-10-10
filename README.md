@@ -1,12 +1,12 @@
 # HyperHand: Hyper-V VM Control for AI Agents
 
-Let an AI agent such as Claude Code or Codex see and operate a Windows virtual machine on Hyper-V: take screenshots, click, type, run commands, move files and roll back to checkpoints, without a network connection to the guest and without a guest password. Built for Windows 10/11 hosts running Hyper-V with Windows guests; works with any MCP client that supports Streamable HTTP.
+Let an AI agent such as Claude Code or Codex see and operate a Windows virtual machine on Hyper-V: observe the screen and the window's control tree, click, type, run commands, launch programs, move files and roll back to checkpoints, without a network connection to the guest and without a guest password. Built for Windows 10/11 hosts running Hyper-V with Windows guests; works with any MCP client that supports Streamable HTTP.
 
 HyperHand has two executables and three roles:
 
 - **`hyperhand.exe`**, an ordinary user tray program on the host. It serves MCP at `http://127.0.0.1:8770/mcp` and handles host file access.
 - **`HyperHandService`**, the same host executable running as a Windows service under its dedicated account, `NT SERVICE\HyperHandService`. The tray delegates Hyper-V operations through an access-controlled local named pipe; the service connects to the guest over a Hyper-V socket.
-- **`hyperhand-agent.exe`**, a tray program inside the guest. It runs commands, transfers files and handles the clipboard and windows in the logged-on user's session, talking to the host over a Hyper-V socket.
+- **`hyperhand-agent.exe`**, a tray program inside the guest. It runs commands, launches programs, transfers files and handles the clipboard, windows and UI Automation controls in the logged-on user's session, talking to the host over a Hyper-V socket.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
@@ -15,12 +15,15 @@ HyperHand has two executables and three roles:
 
 ## Features
 
-- **Screen, mouse and keyboard from the host**: screenshots at the guest's resolution, clicks, drag, wheel, typing and key combinations. Works on the login screen and UAC prompts too, since it does not depend on anything running in the guest.
-- **Commands in the guest**: run PowerShell or cmd in the user's desktop session and get the exit code, stdout and stderr back; optionally elevated.
+- **One observation, then act on it**: `vm_observe` returns a screenshot of the screen or of one window, the focused control and, on request, the window's UI Automation control tree as indexed text, under an `observation_id`. Actions take that id with image pixels or a control index; the host maps pixels back to the screen, re-finds controls and refuses stale observations. No coordinate arithmetic on the AI's side.
+- **Actions that prepare themselves**: `vm_click`, `vm_type`, `vm_set_value` and the others activate the target window first, check that it is enabled, not covered and reachable, perform the action and return a fresh observation (`after`) in the same call.
+- **Screen, mouse and keyboard from the host**: the screenshot and raw mouse and keyboard input go through Hyper-V and work on the sign-in screen and UAC prompts too, since they do not depend on anything running in the guest.
+- **Commands and programs in the guest**: run PowerShell or cmd in the user's desktop session and get the exit code, stdout and stderr back, optionally elevated; `vm_launch` starts a GUI program detached and returns its window handle.
 - **File transfer**: copy files or whole directories in either direction, streamed at hundreds of MB/s. Uploads skip files whose SHA-256 already matches the guest copy.
-- **Checkpoints**: list, create and restore; optionally start the VM if it is not running after restoration.
-- **Clipboard, windows and waiting**: read and write the guest clipboard, select a unique window by title, handle or PID, bring it to the front, and wait for process, file or window conditions.
-- **Start to a usable desktop**: `vm_start` waits until the agent answers and the session is unlocked. If Windows locked the session after signing in, it types the unlock password you stored in the tray; `vm_status` reports power, agent and lock state.
+- **Checkpoints**: list, create and restore; `vm_end_turn` deletes the temporary checkpoints of a turn, keeps the ones marked `keep`.
+- **Clipboard, windows and waiting**: read and write the guest clipboard, list windows with their owner groups, focused control and session state, and wait for process or file conditions.
+- **Start to a usable desktop**: `vm_start` waits until the agent answers and the session is unlocked. If Windows locked the session after signing in, it types the unlock password you stored in the tray; `vm_status` reports power, agent and lock state, `vm_doctor` diagnoses host and guest.
+- **Results an AI can act on**: every result is one JSON object; every error is a JSON object with an error code, the reason and `next`, the call that makes progress.
 - **No guest network; guest password optional**: host and agent talk over a Hyper-V socket; the agent is copied in with Hyper-V's guest file copy and installed from the keyboard. A guest password is needed only if you want HyperHand to unlock a locked session; it stays in Windows Credential Manager on the host.
 - **Cancellation**: when the MCP client cancels a long command, the agent kills it and is ready for the next request immediately.
 - **No UAC during normal host use**: install or update the service once with administrator approval, then start or restart the tray as an ordinary user. Restarting the tray reconnects MCP without restarting the service or any VM; in-progress requests are interrupted.
@@ -71,7 +74,7 @@ build\hyperhand.exe install
 
 2. Start the VM and log on in the guest. Switch the guest keyboard to English: the agent's install command is typed on the keyboard, and an input method in Chinese mode would garble it.
 3. Ask the AI to install the agent (`vm_install_agent`). It copies the agent into the guest, runs its installer and waits until it answers. The agent then starts at every logon. Alternatively, copy `hyperhand-agent.exe` into the guest yourself and run `hyperhand-agent.exe install` there; see [Install the guest agent manually](docs/user-guide.md#install-the-guest-agent-manually).
-4. Ask the AI to work in the VM: take a screenshot, open an application, run a command, copy a build in, restore a checkpoint.
+4. Ask the AI to work in the VM: observe the screen, open an application, run a command, copy a build in, restore a checkpoint. Optionally add `vm_end_turn` as a Stop hook (examples in [docs/hooks/](docs/hooks/)) so that temporary checkpoints are cleaned up after every turn.
 
 ## Tools
 
@@ -79,33 +82,35 @@ Every tool takes an optional `vm` (VM name). Without it, the only running VM is 
 
 | Tool | What it does |
 |---|---|
-| `vm_list`, `vm_start` | List VMs with their state; start and wait until the desktop is usable (unlocking it with the stored password) |
+| `vm_list`, `vm_start` | List VMs with their state and the server's `run_id`; start and wait until the desktop is usable (unlocking it with the stored password) |
 | `vm_shutdown`, `vm_turn_off` | Shut the guest down normally and wait until the VM is off (fails, without turning it off, if a program blocks shutdown); turn the VM off immediately, like pulling the plug |
-| `vm_status`, `vm_unlock` | Report power state, agent, session lock state and whether an unlock password is stored; unlock a locked session with the stored password |
-| `vm_checkpoints`, `vm_checkpoint`, `vm_restore` | List, create and restore checkpoints (exact names); restore starts a VM that is not running unless `start` is false |
-| `vm_screenshot` | PNG plus coordinate metadata; optional `region` crop and `max_size`; `source`: `host` (default) or `agent` |
-| `vm_click`, `vm_drag`, `vm_scroll` | Mouse at screenshot pixel coordinates; `vm_click` with `window`, `handle` or `pid` clicks inside the unique matching window only if it is the enabled foreground window |
-| `vm_type`, `vm_key` | Paste text or inject Unicode with `mode: keys`; press one key combination or a `sequence`; optional window targeting |
-| `vm_exec` | Run a command in the guest; `shell`, `cwd`, `timeout_ms`, `admin` |
+| `vm_status`, `vm_unlock`, `vm_doctor` | Report power state, agent, session lock state and whether an unlock password is stored; unlock a locked session with the stored password; run read-only host and guest checks with a suggestion per problem |
+| `vm_checkpoints`, `vm_checkpoint`, `vm_restore` | List checkpoints (`name`, `id`, `parent`, `type`); create one named `<run_id>-temp-<label>` (or `-keep-` with `keep: true`); restore by exact name and start the VM unless `start` is false |
+| `vm_windows` | List visible windows: handle, title, class, process, rect, enabled, foreground, owner, `group_root`, `integrity`; plus the foreground handle, the focused control and the session state |
+| `vm_observe` | The observation entry point: PNG of the screen or of one window (`handle`), the focused control, `selected_text` and with `controls: true` the indexed control tree (`diff_from` for changes only); returns an `observation_id` |
+| `vm_click`, `vm_drag`, `vm_scroll` | Mouse at image pixels of an `observation_id`, or at a control `index` (`vm_click`); `button`, `count`, `modifiers`, `delta_y`/`delta_x`; without an observation, raw screen pixels |
+| `vm_set_value`, `vm_invoke` | Set a control's value, or Invoke, Toggle, Expand, Collapse, Select or ScrollIntoView it, by its `index` in an observation's tree; the value is read back (`verified`) |
+| `vm_type`, `vm_key` | Type Unicode text into a window (`handle`/`pid`, or an observation `index` to focus first) as key events, never through the clipboard; press one key combination or a `sequence` (numeric keypad and X11-style names included) |
+| `vm_launch` | Start a program detached and return its `pid` and first window's `handle`, `title` and `class` |
+| `vm_exec` | Run a command to completion in the guest; `shell`, `cwd`, `timeout_ms`, `admin` |
 | `vm_push`, `vm_pull` | Copy files or directories host to guest and back; `vm_push` skips unchanged files unless `force` is true |
 | `vm_clipboard_get`, `vm_clipboard_set` | Read or write the guest clipboard |
-| `vm_windows` | List visible windows: handle, title, class, process, position, enabled, foreground, owner, modal |
-| `vm_controls` | Read a selected window's bounded UI Automation control tree; requires an updated agent |
-| `vm_focus_window` | Bring a unique window to the front by title, handle or PID; `exact` matches the full title |
-| `vm_wait` | Wait until a process exits or runs, a file exists, or a window appears, disappears or becomes foreground |
+| `vm_wait` | Wait until a process exits or runs, or a file exists |
+| `vm_end_turn` | Cancel pending waits and delete this run's temporary checkpoints; meant for a Stop hook |
 | `vm_install_agent`, `vm_update_agent` | Install or replace the guest agent |
 
-Host screenshots, untargeted mouse/keyboard input, VM and checkpoint tools work without the agent; window targeting, Unicode keys input and control inspection need it. Without the agent, `vm_start` still starts the VM but reports that the desktop is not usable. `vm_status` distinguishes this host's busy request gate from an agent that is not answering; neither establishes the guest's complete state.
+The host screenshot, raw mouse and keyboard input (actions without `observation_id`, `handle` or `pid`), VM and checkpoint tools work without the agent; window lists, control trees, targeted actions, Unicode text, launching, commands and files need it. Without the agent, `vm_start` still starts the VM but reports that the desktop is not usable.
 
-Use screenshot metadata to map cropped or scaled image pixels before clicking. Agent images from unknown or non-console sessions are not console input coordinates. Unicode keys input preserves the clipboard but remains subject to Windows UIPI and application support; partial input must not be retried automatically. See the [tool guide](docs/user-guide.md#using-the-tools) and [precise behavior](docs/features.md).
+Actions take `observation_id` from `vm_observe` and either image pixels of that observation's screenshot or a control `index` of its tree; the host converts and checks them. By default they activate the target window, refuse a disabled, covered or stale target, and return the window that received the input plus an `after` observation (`observe_after`: `none`, `screenshot`, `controls`, `both`). Titles are not selectors: pass a `handle` from `vm_windows`, `vm_observe` or `vm_launch`. Every result is one JSON object; every refusal is an `isError` result whose text is `{"error": <code>, "reason": "...", "next": "...", "run_id": "...", ...}`, where `next` names the call that makes progress (for example `stale_observation`: call `vm_observe` again; `agent_outdated`: call `vm_update_agent`). See the [tool guide](docs/user-guide.md#using-the-tools) and [precise behavior](docs/features.md).
 
 ## Known limitations
 
 - One AI client per VM at a time: several clients can connect, but requests to a VM's agent are handled one after another and their mouse and keyboard actions would interleave.
 - `vm_install_agent` types its command on the keyboard; the guest input method must be in English mode. Installing the agent manually avoids this.
 - `admin` commands elevate without a prompt only if the guest's UAC is set to elevate administrators without prompting; otherwise the UAC wait counts toward the command timeout. A late approval cannot execute a cancelled or expired request.
-- Host-side screenshots and input act on the VM console; they do not reach a remote desktop or enhanced session.
-- Checkpoints cannot be deleted from HyperHand.
+- Host-side screenshots and input act on the VM console; they do not reach a remote desktop or enhanced session. Actions refuse such a session with `session_unusable`.
+- Only this run's temporary checkpoints can be deleted from HyperHand (`vm_end_turn`); other checkpoints are deleted in Hyper-V Manager.
+- Control trees depend on the application's UI Automation support; custom-drawn controls may be missing, so some targets are reachable only by image pixels.
 - HyperHand unlocks only a session that is signed in and locked, with its agent running: it cannot sign a user in at the sign-in screen after a cold boot. Use automatic sign-in for that. The unlock password must be ASCII (the Hyper-V keyboard types ASCII only); store the PIN instead if the lock screen asks for one.
 
 ## Privacy

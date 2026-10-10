@@ -6,7 +6,7 @@ HyperHand has two executables and three roles:
 
 - `hyperhand.exe` runs as an ordinary user tray program on the Hyper-V host. It serves MCP over Streamable HTTP at `http://127.0.0.1:8770/mcp` and reads and writes host files using that user's permissions.
 - `HyperHandService` runs the same executable as a Windows service under `NT SERVICE\HyperHandService`. The tray requests specific Hyper-V operations over an access-controlled local named pipe. Screenshots, mouse, keyboard, VM state and checkpoints work without anything installed in the guest; the service also tunnels the guest agent connection.
-- `hyperhand-agent.exe` runs inside the guest, in the logged-on user's desktop session. It answers requests from the host over a Hyper-V socket and provides command execution, file transfer, clipboard, window focus, waits and an in-guest screenshot.
+- `hyperhand-agent.exe` runs inside the guest, in the logged-on user's desktop session. It answers requests from the host over a Hyper-V socket and provides command execution, program launching, file transfer, clipboard, window and UI Automation control inspection, control actions, Unicode text input and waits.
 
 ## Requirements
 
@@ -116,9 +116,9 @@ The agent installer, running as the logged-on user:
 - Adds the value `HyperHandAgent` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` so it starts at that user's logon. No administrator rights are needed.
 - Starts the agent. A tray icon appears in the guest; its menu shows whether the host is connected.
 
-If the install fails, call `vm_screenshot` to see what the guest shows, fix the cause (for example the IME mode or a dialog in the way) and run `vm_install_agent` again.
+If the install fails, call `vm_observe` to see what the guest shows, fix the cause (for example the IME mode or a dialog in the way) and run `vm_install_agent` again.
 
-Tools that need the agent: `vm_exec`, `vm_push`, `vm_pull`, `vm_clipboard_get`, `vm_clipboard_set`, `vm_windows`, `vm_controls`, `vm_focus_window`, `vm_wait`, `vm_unlock`, `vm_update_agent`, `vm_screenshot` with `source: agent`, and window-targeted `vm_click`, `vm_type` and `vm_key`. `vm_type` with `mode: keys` always needs an updated agent; untargeted paste uses the agent when available. `vm_start` starts the VM without the agent but reports that the desktop is not usable until the agent answers.
+Tools that need the agent: `vm_exec`, `vm_launch`, `vm_push`, `vm_pull`, `vm_clipboard_get`, `vm_clipboard_set`, `vm_windows`, `vm_wait`, `vm_unlock`, `vm_update_agent`, `vm_set_value`, `vm_invoke`, `vm_observe` with a `handle` or with `controls: true`, and every action with an `observation_id`, `handle`, `pid` or `index`. Without the agent, `vm_observe` still returns the host screenshot (with `"agent": "offline"`), and `vm_click`, `vm_drag`, `vm_scroll`, `vm_key` and ASCII `vm_type` without a target still reach the VM console. `vm_start` starts the VM without the agent but reports that the desktop is not usable. An agent older than the host is refused with `agent_outdated` until `vm_update_agent` is run.
 
 ### Install the guest agent manually
 
@@ -167,7 +167,7 @@ The change itself needs elevation, and it can be made through HyperHand once the
             timeout_ms: 60000
    ```
 
-2. While it waits, answer the prompt from the host: `vm_screenshot` shows it on the secure desktop; `vm_key shift+tab` moves the focus from No to Yes, then `vm_key enter` confirms. Host-side input reaches the secure desktop, unlike the agent.
+2. While it waits, answer the prompt from the host: `vm_observe` (without `handle`) shows it on the secure desktop; `vm_key shift+tab` moves the focus from No to Yes, then `vm_key enter` confirms. Host-side input reaches the secure desktop, unlike the agent; use `vm_key` and `vm_click` without `observation_id` or `handle` there.
 3. Check: `vm_exec` with `(Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System).ConsentPromptBehaviorAdmin` returns `0`.
 
 See [UAC](#uac) for every place a prompt can appear.
@@ -198,45 +198,39 @@ Where UAC prompts appear, and where they do not:
 | Updating with `scripts\restart-tray.ps1` | Host | Once per update; the script invokes the installer. This is not the tray-only restart action. |
 | `vm_install_agent`, `hyperhand-agent.exe install`, `hyperhand-agent.exe uninstall`, `vm_update_agent`, the agent at logon | Guest | None. The agent runs as the logged-on user, not elevated. |
 | `vm_exec` with `admin: true` | Guest | None if `ConsentPromptBehaviorAdmin` is `0` (see [Allow `admin` exec without a prompt](#allow-admin-exec-without-a-prompt)); otherwise a prompt that the command waits for. |
-| A program started in the guest that asks for elevation | Guest | As configured in the guest; answer it from the host with `vm_screenshot` and `vm_key` (or `vm_click`). |
+| A program started in the guest that asks for elevation | Guest | As configured in the guest; answer it from the host with `vm_observe` and `vm_key` (or `vm_click` with raw screen pixels). |
 
 Host-side screenshots and input work on the guest's secure desktop, so a guest UAC prompt can always be answered through HyperHand. The agent cannot see or answer it.
 
 ## Using the tools
 
-- `vm_screenshot` returns a PNG and JSON metadata. The default `source: host` reads the Hyper-V console without the agent; `source: agent` captures inside the guest. Optional `region: {x, y, width, height}` crops in original image pixels; `max_size` only shrinks the result. Use the coordinate conversion below before clicking a transformed image.
-- `vm_type` defaults to `mode: paste`, using the guest clipboard and `ctrl+v`. Untargeted paste falls back to ASCII keyboard input if the agent call fails. `mode: keys` requires an updated agent, preserves the clipboard and accepts at most 16384 UTF-8 bytes. It uses Unicode `VK_PACKET` events, not physical scan codes; Windows UIPI can block it and applications may not support it. CRLF or a lone newline sends Enter; Tab sends Tab, which can change focus or submit input.
-- `vm_type` optionally accepts `window`, `handle`, `pid` and `exact`. The selected window must be enabled, and it or one of its own windows (see `vm_click`) must already be foreground; the text goes to the foreground one and the result reports it by handle. The tool does not focus anything. Without a selector, `mode: keys` records the current foreground window. It rechecks that target between characters. A failed or cancelled operation may have typed part of the text: inspect the application before continuing and never retry automatically.
-- `vm_key` takes either `keys`, such as `ctrl+v`, or `sequence`, such as `["ctrl+a", "backspace"]` (up to 256 combinations). Optional window selectors require the selected window to stay enabled and it or one of its own windows to remain foreground before each combination, and need the agent; the result reports the window that received the keys. Use `plus` for the `+`/`=` key, for example `ctrl+plus`. A partial sequence is not undone or retried.
-- `vm_exec` runs as the logged-on user with `powershell` (default) or `cmd`. The default timeout is 60 seconds (`timeout_ms`). The result has the exit code, stdout, stderr and whether it timed out.
+Every result is one JSON object; `vm_observe` and actions that observe afterwards put a PNG before it. Every refusal is an error result whose text is `{"error": "<code>", "reason": "...", "next": "...", "run_id": "...", ...}`: `next` names the call that makes progress, the other fields carry the handles and facts it needs. The codes are listed in [features.md](features.md#22-error-object-and-codes).
+
+### Observing and acting
+
+1. Get a window handle: `vm_windows` lists the visible windows with `handle`, `pid`, `process`, `title`, `rect`, `group_root` (windows with the same group root belong together, such as AutoCAD's main window and its command line) and `integrity`, plus the foreground handle, the focused control and the session state; `vm_launch` starts a program and returns its first window's handle. Titles are not selectors: pick the handle yourself from the list.
+2. Observe: `vm_observe` with `handle` returns a PNG cropped to the window, the window, the focused control (`focused`) and an `observation_id`. Add `controls: true` for the UI Automation tree as indexed text, one control per line: `[12] Edit "" id=cmdline (0,980 1920x60) focused value="LINE"`. `diff_from` with the previous `observation_id` returns only what changed. Without `handle` it observes the whole screen, which also works on the lock screen and UAC prompts (the agent is then reported `offline`). `max_size` shrinks the image.
+3. Act with the observation: `vm_click` with `observation_id` and `x`, `y` (pixels of that image) or `index` (a control of that tree); `vm_set_value` and `vm_invoke` with `index`; `vm_type` with `handle` or with `observation_id` and `index`; `vm_key` with `handle`. The host maps the pixels back to the screen and re-finds the control by its runtime ID, so a control that moved is still hit where it is now. It refuses a locked or non-console session (`session_unusable`) and an observation whose window moved, resized, minimized or closed (`stale_observation`), activates the window (`activate: true` by default), then refuses a disabled window (`target_disabled`), a point covered by another window (`covered`) or a window running at higher integrity than the agent (`integrity_mismatch`); each refusal names the window to act on next. A whole-screen observation clicked by pixels is not checked; an `index` from its tree targets the window the tree belongs to.
+4. Read the result: `window` is the window that received the input, and `after` is a new observation taken 300 ms later (`observe_after`: `screenshot` by default for mouse and control actions, `none` for `vm_type` and `vm_key`; `controls` or `both` include the tree; `settle_ms` changes the wait). Decide the next step from `after`; call `vm_observe` again only when you need more than it shows.
+
+Prefer control actions where the tree has the control: `vm_set_value` sets a text box through UI Automation and reports `verified`; `vm_invoke` presses buttons and menu items (`Invoke`), toggles check boxes (`Toggle`), opens and closes nodes (`Expand`, `Collapse`), selects list and tab items (`Select`) or scrolls an item into view. Custom-drawn surfaces such as a CAD drawing area expose no controls; click them by image pixels.
+
+Without `observation_id`, `handle` or `pid`, `vm_click`, `vm_drag`, `vm_scroll`, `vm_key` and ASCII `vm_type` send raw input to the VM console at screen pixels, with no checks and without the agent. Use that only for the sign-in screen and UAC prompts.
+
+### Other tools
+
+- `vm_type` types Unicode text as key events in the user's session (`\n` presses Enter, `\t` Tab) and never touches the clipboard. Without a target it falls back to the Hyper-V keyboard for ASCII text when the agent is absent or its session is locked or on the secure desktop. With `observation_id` and `index` it reads the control back afterwards: `verified` says whether its `value` contains the typed text. The result has `applied_chars` and `total_chars`; a stop midway is `partial_input` with the same counts. Inspect the window before retyping; never retry blindly.
+- `vm_key` takes either `keys`, such as `ctrl+s`, or `sequence`, such as `["ctrl+a", "backspace"]` (up to 256 combinations). Key names include the numeric keypad (`num0`, `numenter`, ...), `f1` to `f20` and X11-style aliases (`Return`, `Escape`, `KP_Enter`); use `plus` for the `+`/`=` key, for example `ctrl+plus`. With `handle` the sequence stops as soon as another window takes the foreground (`partial_input`).
+- `vm_exec` runs a command to completion as the logged-on user with `powershell` (default) or `cmd`; `timeout_ms` defaults to 60 seconds and `timed_out` says whether the process tree was killed. It is not for GUI programs: `vm_launch` starts one detached and waits up to `wait_window_ms` (60 seconds) for its window.
 - `vm_push` and `vm_pull` copy a file or a directory recursively. A single file pushed to a guest path ending in `\` goes into that directory under its own name; a single file pulled to an existing host directory, or to a path ending in `\`, goes into it under the guest file's name. `vm_push` skips files whose SHA-256 already matches the guest copy unless `force` is true. Files are written to unique `.hyperhand-*.hhpart` temporary files in the destination directory and renamed when complete.
-- `vm_start` returns once the desktop is usable; if it fails, the VM may still be running, and the error says why (no agent answer, locked without a stored password, wrong password). `vm_status` reports the state without changing anything; `vm_unlock` unlocks a session that was locked later.
-- `vm_status` returns `agent: busy` when another request holds this host's agent connection gate, without waiting for that request. It skips the session query in that case. `not answering` means the connection or response failed; it does not prove the guest agent is offline.
-- `vm_windows` lists the visible windows with their handles, PIDs and positions. Use a handle with `vm_focus_window`, `vm_click` or a window wait when several windows share a title.
-- `vm_focus_window` selects a unique window by `title`, `handle` or `pid`. Titles match a case-insensitive substring by default; `exact: true` matches the full title, still case-insensitively. A handle overrides the title and `exact`; a PID restricts either match and can be used alone when it has only one visible window. All window selectors reject multiple matches. Focus no longer picks the first matching title and requires an agent supporting `list_windows`.
-- `vm_click` uses the same selection rules, with `window` instead of `title`. With `window`, `handle` or `pid`, coordinates are relative to that window and the click proceeds only if it is enabled, it or one of its own windows is in the foreground, and the point is inside it, on screen and reaches it or one of its own windows. Own windows are windows of the same process that it owns, directly or through other owned windows: for AutoCAD, select the main window and click or type into its command line and command history popup directly. The result then gives the handle, PID, class, process and title of the window reached. Refusals name the window to act on next. Without a selector, coordinates are absolute screenshot pixels. A window can still appear between the check and click.
-- `vm_wait` waits for `process_exit` or `process_running` (with `name`, for example `notepad`), `file_exists` (with `path`, for example `C:\temp\app\done.txt`), or `window_exists`, `window_gone` or `window_foreground` (with `title`, `handle` or `pid`, and optional `exact`). The default timeout is 60 seconds; expiration returns `satisfied: false`, while cancellation returns an error.
-- `vm_restore` takes the exact checkpoint name (case-sensitive, no wildcards). If the VM is not running after the restore, it is started unless `start` is false. This flag skips HyperHand's additional start; it does not force the restored VM to stay Off or Saved. A running standard checkpoint may resume directly. Restore does not wait for desktop readiness; check `vm_status` and use `vm_start` when needed.
+- `vm_wait` waits for `process_exit` or `process_running` (with `name`, for example `notepad`) or `file_exists` (with `path`, for example `C:\temp\app\done.txt`). The default timeout is 60 seconds; expiration returns `satisfied: false`. For window changes, look at an action's `after` or call `vm_observe`.
+- `vm_start` returns once the desktop is usable; if it fails, the VM may still be running, and the error says why (`agent_required`: no agent answer; `agent_outdated`: run `vm_update_agent`; `session_unusable`: locked without a stored password, or the unlock failed). `vm_status` reports the state without changing anything (`agent.state` `busy` means another request of this host holds the agent connection; `not_answering` does not prove the agent is offline); `vm_unlock` unlocks a session that was locked later.
+- `vm_checkpoint` names the checkpoint `<run_id>-temp-<label>`, or `<run_id>-keep-<label>` with `keep: true`; `vm_checkpoints` lists `name`, `created_at`, `id`, `parent`, `type` (`temp`, `keep`, `manual`) and `label`. `vm_restore` takes the exact name. If the VM is not running after the restore, it is started unless `start` is false; this flag skips HyperHand's additional start and does not force the restored VM to stay Off or Saved. Restore does not wait for desktop readiness; check `vm_status` and use `vm_start` when needed.
+- `vm_doctor` runs read-only checks on the host (service, MCP listener, service pipe, Hyper-V socket registration, enhanced session mode) and the VM (power, agent version and protocol, session, agent integrity) and gives a suggestion for every `warn` or `fail`. Run it first when anything looks wrong.
 
-### Screenshot coordinates
+### Ending a turn: vm_end_turn and hooks
 
-The JSON text includes original dimensions, crop `x`, `y`, `width`, `height`, output dimensions, `origin_x`, `origin_y`, `scale_x`, `scale_y`, VM identity and `console_coordinates`. For a returned image pixel `(u, v)`, the sampled screen X coordinate is `origin_x + x + min(width - 1, floor((u + 0.5) / scale_x))`; use the corresponding Y fields for Y. Use each axis's actual scale because integer output dimensions can round differently. For a window-relative click, subtract the window's visible-frame origin from the resulting screen point.
-
-Uncropped, unscaled host screenshots retain the original coordinate mapping. Use agent captures for console input only when `console_coordinates` is true. Older agents lack capture metadata and are marked false; an enhanced or remote session is also incompatible. Recapture after a desktop resolution or session change. Metadata describes the capture and does not stop windows moving later.
-
-### Inspecting controls
-
-Use `vm_controls` with a window `title`, `handle` or `pid` (and optional `exact`) to read its UI Automation control-view tree. `max_depth` defaults to 4 (maximum 10, root depth 0); `max_nodes` defaults to 200 (maximum 1000). It returns node names, types, IDs, hierarchy, enabled/offscreen state and physical screen bounds, plus truncation information. This requires an updated agent and does not activate or modify controls.
-
-Password nodes omit name reads and descendant traversal. A helper timeout of 10 seconds bounds a stalled provider; failures are errors, not evidence that the window has no controls. Custom CAD drawing may not expose controls, and snapshot indices and bounds can become stale. Use the screenshot to verify the intended control before input; a tree entry does not establish keyboard focus.
-
-### Waiting for a window
-
-For example, after launching an application, use `vm_wait` with `{"kind":"window_exists","title":"Untitled - Notepad","exact":true}` (substitute the actual title shown by the application). On success, it returns `satisfied: true`, the handle and full title. Pass that handle to `vm_focus_window` to bring it forward, or to `vm_wait` with `kind: window_foreground` to wait without activating it. To wait for a specific dialog to disappear, take its handle from `vm_windows` and use `kind: window_gone`.
-
-Window waits check every 300 ms and allow other agent tools to run between checks. They use the existing `list_windows` operation, so an agent that already supports `vm_windows` needs no update. A disappearance wait succeeds immediately if no visible window matches, including when a window is hidden or cloaked; it does not prove that its process exited. A title change can stop a title selector matching, so use a handle to track a particular window. Multiple matches and query failures are errors, including for disappearance waits.
-
-An appearing window does not prove the application is ready for input. A foreground main window does not prove a command line or text box has keyboard focus; inspect and select the intended control before typing.
+`vm_end_turn` cancels this server's pending `vm_wait` calls and deletes the `temp` checkpoints created in this run (`run_id`, shown by `vm_list`); `keep` and manual checkpoints, programs and the VM's power state are untouched. Call it from your client's Stop hook so that every turn cleans up after itself. Ready-made examples are in [docs/hooks/](hooks/): `claude-code-settings.json` adds a `Stop` hook of type `mcp_tool` to Claude Code's `settings.json`, and `codex-plugin.json` registers `Stop`, `Interrupt` and `SubagentStop` hooks for a Codex plugin. Both call `vm_end_turn` on the `hyperhand` server with no arguments.
 
 ## Updating
 
@@ -245,7 +239,7 @@ An appearing window does not prove the application is ready for input. A foregro
 1. Download the new zip from [Releases](https://github.com/n2ns/hyper-hand/releases) and extract both executables together.
 2. Finish active VM tool requests, then run the extracted `hyperhand.exe install` and approve UAC. The installer updates the protected installation and restarts the host components. Existing highest-privilege tray tasks are migrated to the ordinary logon task.
 3. Reconnect the MCP client after the tray returns.
-4. Ask the AI to call `vm_update_agent` for each VM. It sends the installed `hyperhand-agent.exe` to the running agent, which replaces itself and restarts.
+4. Ask the AI to call `vm_update_agent` for each VM. It sends the installed `hyperhand-agent.exe` to the running agent, which replaces itself and restarts. Until then, tools refuse an agent that speaks an older protocol with `agent_outdated`.
 
 ### From source
 
@@ -312,25 +306,42 @@ On the host:
 
 ## Troubleshooting
 
+### Start with vm_doctor
+
+`vm_doctor` checks the host (`HyperHandService`, the MCP listener, the service pipe, the Hyper-V socket registration, enhanced session mode) and the VM (power, agent version and protocol, session, agent integrity) without changing anything. Every `warn` or `fail` comes with a suggestion: the command or tool call that fixes it. Run it before anything below; the sections name the checks that cover them.
+
 ### The agent does not answer
 
-Tools that need the agent fail, or `vm_install_agent` reports that the agent did not answer within 30 seconds.
+Tools that need the agent refuse with `agent_required`, or `vm_install_agent` reports that the agent did not answer within 30 seconds (`vm_doctor`: `guest.agent`, `host.hvsocket`).
 
 - Check that a user is logged on in the guest and that the HyperHand tray icon is present there. The agent runs only in a logged-on desktop session.
 - Check that the host tray and `HyperHandService` are running. Socket registration happens during installation, not normal tray startup; rerun `hyperhand.exe install` to repair an incomplete installation.
 - If the VM was restored to a checkpoint taken before the agent was installed, install it again with `vm_install_agent`.
-- Call `vm_screenshot` to see whether the install command reached the Run dialog intact.
+- Call `vm_observe` (without `handle`; it works without the agent) to see whether the install command reached the Run dialog intact.
+
+### Tools refuse with agent_outdated
+
+The guest agent speaks an older protocol than the host (`vm_doctor`: `guest.agent`). The host pings every new agent connection first and refuses every request except the ping and the agent update, so only `vm_status`, `vm_doctor` and `vm_update_agent` work until the agent is replaced. Call `vm_update_agent`; if the agent does not answer at all, `vm_install_agent`. There is no compatibility mode for older agents.
 
 ### Typed text is garbled or missing
 
-The host keyboard sends key strokes, and a non-English IME in the guest can swallow or convert them. This affects `vm_install_agent` and `vm_type` without the agent. Switch the guest IME to English mode, or set English as the default input method (see above). [Installing the agent manually](#install-the-guest-agent-manually) avoids the problem for the install. With the agent installed, `vm_type` pastes through the clipboard and is not affected.
+The host keyboard sends key strokes, and a non-English IME in the guest can swallow or convert them. This affects `vm_install_agent` and `vm_type` without the agent. Switch the guest IME to English mode, or set English as the default input method (see above). [Installing the agent manually](#install-the-guest-agent-manually) avoids the problem for the install. With the agent installed, `vm_type` injects Unicode key events in the user's session and is not affected.
+
+### An action is refused
+
+Read the error object: `next` says what to do and the fields name the window involved.
+
+- `stale_observation`: the window moved, resized, minimized or closed since the observation, or the `observation_id` is older than the 8 most recent ones. Call `vm_observe` again and use the new id.
+- `activate_failed`, `target_disabled`, `covered`: another window holds the foreground or covers the point, usually a dialog; `foreground`, `act_on` or `window` names it. Act on that handle first (or `vm_key esc` for a shell overlay), then observe again.
+- `session_unusable`: the session is locked (`vm_unlock`), is not the console session (see the next section) or shows a UAC prompt (answer it with `vm_key` or `vm_click` without `observation_id`).
+- `integrity_mismatch`: the program runs elevated and the agent does not. Start it without administrator rights, or with `vm_launch` and `admin: true`.
+- `partial_input`: some text or keys arrived. Observe the window before sending the rest; do not repeat the whole input.
 
 ### The screenshot is black or shows the lock screen
 
 - The VM must be running. A stopped or saved VM has no video output.
-- VMConnect must be in basic session mode. In an enhanced session, the host-side screenshot and input go to the console session, which is locked.
-- If the guest screen is locked, run `vm_unlock` with an unlock password stored in the tray (see [Get a usable desktop after `vm_start`](#get-a-usable-desktop-after-vm_start)), or unlock it in VMConnect. If the display is off, wake it with `vm_click` or `vm_key`.
-- `vm_screenshot` with `source: agent` captures inside the guest user's session.
+- VMConnect must be in basic session mode. In an enhanced session, the host-side screenshot and input go to the console session, which is locked, while the agent sees the user's desktop; actions then refuse with `session_unusable` (`vm_doctor`: `guest.session`, `host.enhanced_session`).
+- If the guest screen is locked, run `vm_unlock` with an unlock password stored in the tray (see [Get a usable desktop after `vm_start`](#get-a-usable-desktop-after-vm_start)), or unlock it in VMConnect. If the display is off, wake it with `vm_click` or `vm_key` without `observation_id`.
 
 ### Port 8770 is already in use
 
