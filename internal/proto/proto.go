@@ -126,7 +126,7 @@ type FocusResult struct {
 	Handle uint64 `json:"handle"`
 }
 
-// Rect is a window's visible frame in guest screen pixels (the coordinates of vm_screenshot and vm_click).
+// Rect is a window's visible frame in guest screen pixels (the coordinates of host screenshots and untargeted vm_click).
 type Rect struct {
 	Left   int32 `json:"left"`
 	Top    int32 `json:"top"`

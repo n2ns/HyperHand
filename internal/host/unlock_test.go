@@ -172,14 +172,3 @@ func TestReady(t *testing.T) {
 	}
 }
 
-func TestLockedHint(t *testing.T) {
-	base := errors.New("could not bring it to the foreground")
-	g := &fakeGuest{states: []proto.SessionStateResult{locked}}
-	if err := g.unlocker("", false).lockedHint(context.Background(), "", base); !errors.Is(err, base) || !strings.Contains(err.Error(), "vm_unlock") {
-		t.Errorf("locked: %v", err)
-	}
-	g = &fakeGuest{states: []proto.SessionStateResult{unlocked}}
-	if err := g.unlocker("", false).lockedHint(context.Background(), "", base); err != base {
-		t.Errorf("unlocked: %v", err)
-	}
-}

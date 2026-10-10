@@ -54,16 +54,6 @@ func (u unlocker) state(ctx context.Context, vm string) (proto.SessionStateResul
 	return s, nil
 }
 
-// lockedHint adds the reason to an error from an input-related tool when the guest session turns out to be locked.
-func (u unlocker) lockedHint(ctx context.Context, vm string, err error) error {
-	sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if s, e := u.state(sctx, vm); e == nil && s.Locked {
-		return fmt.Errorf("%w (the guest session is locked: run vm_unlock)", err)
-	}
-	return err
-}
-
 // waitAgent pings the agent until it answers or timeout passes.
 func (u unlocker) waitAgent(ctx context.Context, vm string, timeout time.Duration) (proto.PingResult, error) {
 	var err error
@@ -139,7 +129,7 @@ func (u unlocker) unlock(ctx context.Context, vm string) (string, error) {
 			return "", ctx.Err()
 		}
 	}
-	return "", errors.New("the session is still locked 15 s after the stored password was typed; it was not retried, so that the account is not locked out. Check the stored password (or PIN) and the screen with vm_screenshot")
+	return "", errors.New("the session is still locked 15 s after the stored password was typed; it was not retried, so that the account is not locked out. Check the stored password (or PIN) and the screen with vm_observe")
 }
 
 // typePassword types pw and Enter into the password box. It holds the input lock, so that no other HyperHand tool sends

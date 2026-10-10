@@ -2,7 +2,6 @@ package host
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -102,25 +101,6 @@ func NewServer(m *Manager) *mcp.Server {
 	registerTurn(d)
 	registerDoctor(d)
 	return s
-}
-
-// add registers a tool with the legacy text-result style; tools still using it are being converted to addToolIn.
-func add[In any](s *mcp.Server, name, desc string, f func(context.Context, In) (*mcp.CallToolResult, error)) {
-	mcp.AddTool(s, &mcp.Tool{Name: name, Description: desc}, func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
-		r, err := f(ctx, in)
-		return r, nil, err
-	})
-}
-
-func text(format string, a ...any) *mcp.CallToolResult {
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(format, a...)}}}
-}
-
-func done(err error) (*mcp.CallToolResult, error) {
-	if err != nil {
-		return nil, err
-	}
-	return text("ok"), nil
 }
 
 // notImplemented is the handler body of tools whose implementation is pending.
