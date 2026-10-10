@@ -76,13 +76,14 @@ type ControlActionArgs struct {
 }
 
 // ControlActionResult: after the action, Rect is the element's current bounding rectangle (physical screen pixels)
-// and Value/HasValue re-read its ValuePattern (when supported); for SetValue, Verified says whether the read-back
-// equals the requested value (nil when it could not be read).
+// and Value/HasValue re-read its ValuePattern (when supported). State contains the readable post-action state.
+// Verified reports whether read-back observed the action's target state, nil when unavailable or not applicable.
 type ControlActionResult struct {
-	Rect     *Rect  `json:"rect,omitempty"`
-	Value    string `json:"value,omitempty"`
-	HasValue bool   `json:"has_value,omitempty"`
-	Verified *bool  `json:"verified,omitempty"`
+	Rect     *Rect         `json:"rect,omitempty"`
+	Value    string        `json:"value,omitempty"`
+	HasValue bool          `json:"has_value,omitempty"`
+	Verified *bool         `json:"verified,omitempty"`
+	State    *ControlState `json:"state,omitempty"`
 }
 
 // ControlTypeName maps a UIA control type ID (UIA_*ControlTypeId) to its name without the "ControlType" suffix.

@@ -326,7 +326,7 @@ func performControlAction(a proto.ControlActionArgs) (proto.ControlActionResult,
 		return proto.ControlActionResult{}, err
 	}
 	if action == "Locate" {
-		return controlActionResult(e, available, action, a.Value)
+		return readControlActionResult(e, available, action, a.Value), nil
 	}
 	idx := patternFor(action)
 	if !available[idx] {
@@ -340,6 +340,10 @@ func performControlAction(a proto.ControlActionArgs) (proto.ControlActionResult,
 		return proto.ControlActionResult{}, unsupportedPattern(action, actionNames(available))
 	}
 	defer pattern.Release()
+	var before *proto.ControlState
+	if action == "Toggle" {
+		before = e.state(available)
+	}
 	switch action {
 	case "SetValue":
 		value := ole.SysAllocString(a.Value)
@@ -361,32 +365,39 @@ func performControlAction(a proto.ControlActionArgs) (proto.ControlActionResult,
 	if err != nil {
 		return proto.ControlActionResult{}, fmt.Errorf("%s failed: %w", action, err)
 	}
-	return controlActionResult(e, available, action, a.Value)
+	return readVerifiedControlAction(action, before, func() proto.ControlActionResult {
+		return readControlActionResult(e, available, action, a.Value)
+	}), nil
 }
 
-// controlActionResult reads the element's state after an action (or for Locate): its current rectangle and, when it
+// readControlActionResult reads the element's state after an action (or for Locate): its current rectangle and, when it
 // has a ValuePattern and is not a password control, its value; SetValue compares the value with the requested one.
-func controlActionResult(e *nativeControl, available []bool, action, requested string) (proto.ControlActionResult, error) {
-	var r proto.ControlActionResult
+func readControlActionResult(e *nativeControl, available []bool, action, requested string) proto.ControlActionResult {
+	r := proto.ControlActionResult{State: e.state(available)}
 	var rect proto.Rect
 	if err := uiaCall(e.element, uiaBounds, uintptr(unsafe.Pointer(&rect))); err == nil {
 		r.Rect = &rect
 	}
 	if !available[valuePatternIndex] {
-		return r, nil
+		return r
 	}
 	password, err := e.integer(uiaPassword)
 	if err != nil || password != 0 {
-		return r, nil
+		return r
 	}
-	if value, cut, err := e.propertyText(propValueValue); err == nil {
+	v, err := e.stateProperty(propValueValue)
+	defer v.Clear()
+	if err != nil || v.VT != ole.VT_BSTR {
+		return r
+	}
+	if value, cut, err := bstrText(*(**int16)(unsafe.Pointer(&v.Val))); err == nil {
 		r.Value, r.HasValue = value, true
 		if action == "SetValue" && !cut { // a truncated read-back cannot be compared
 			verified := value == requested
 			r.Verified = &verified
 		}
 	}
-	return r, nil
+	return r
 }
 
 // valuePatternIndex is the uiaPatterns entry of ValuePattern.

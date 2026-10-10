@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -412,6 +413,57 @@ func controlNodes() []proto.ControlInfo {
 	return []proto.ControlInfo{
 		{Index: 0, Parent: -1, PID: 100, Rect: options().Rect, RuntimeID: "42.1"},
 		{Index: 1, Parent: 0, PID: 100, Name: "Name", ControlType: 50004, Rect: proto.Rect{Left: 200, Top: 100, Right: 300, Bottom: 140}, RuntimeID: "42.7", Patterns: []string{"Invoke", "Expand"}},
+	}
+}
+
+func TestControlActionStateResult(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		action string
+		result proto.ControlActionResult
+		want   map[string]any
+	}{
+		{"toggle verified", "Toggle", proto.ControlActionResult{Verified: new(true), State: &proto.ControlState{Toggle: new("on"), Offscreen: new(false)}}, map[string]any{"toggle": "on", "offscreen": false}},
+		{"toggle unchanged", "Toggle", proto.ControlActionResult{Verified: new(false), State: &proto.ControlState{Toggle: new("off")}}, map[string]any{"toggle": "off"}},
+		{"invoke state without business verification", "Invoke", proto.ControlActionResult{State: &proto.ControlState{Selected: new(false)}}, map[string]any{"selected": false}},
+		{"unsupported state remains null", "Invoke", proto.ControlActionResult{}, nil},
+		{"set value carries read only false", "SetValue", proto.ControlActionResult{Verified: new(true), Value: "abc", HasValue: true, State: &proto.ControlState{ReadOnly: new(false)}}, map[string]any{"read_only": false}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := controlAgent(tt.result, nil)
+			td := newTestDeps(t, f)
+			id := td.put(options(), 1, controlNodes())
+			tool := "vm_invoke"
+			args := map[string]any{"observation_id": id, "index": 1, "observe_after": "none"}
+			if tt.action == "SetValue" {
+				tool, args["value"] = "vm_set_value", "abc"
+			} else {
+				args["action"] = tt.action
+			}
+			r, m := td.call(t, tool, args)
+			if r.IsError || m["ok"] != true {
+				t.Fatalf("action failed: %v", m)
+			}
+			if verified, exists := m["verified"]; !exists || (tt.result.Verified == nil && verified != nil) || (tt.result.Verified != nil && verified != *tt.result.Verified) {
+				t.Fatalf("verified changed or omitted: %v", m)
+			}
+			state, exists := m["state"]
+			if !exists || (tt.want == nil && state != nil) {
+				t.Fatalf("unknown state must remain explicit null: %v", m)
+			}
+			if tt.want != nil && !reflect.DeepEqual(state, tt.want) {
+				t.Fatalf("state = %#v, want %#v", state, tt.want)
+			}
+			actions := 0
+			for _, op := range f.ops {
+				if op == proto.OpControlAction {
+					actions++
+				}
+			}
+			if actions != 1 {
+				t.Fatalf("semantic action executed %d times", actions)
+			}
+		})
 	}
 }
 

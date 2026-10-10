@@ -217,6 +217,8 @@ Every tool accepts an optional `task_id`. A persistent MCP session uses its own 
 
 Prefer control actions where the tree has the control: `vm_set_value` sets a text box through UI Automation and reports `verified`; `vm_invoke` presses buttons and menu items (`Invoke`), toggles check boxes (`Toggle`), opens and closes nodes (`Expand`, `Collapse`), selects list and tab items (`Select`) or scrolls an item into view. Each control's `actions=[...]` lists its supported operations (`SetValue` uses `vm_set_value`); `state={...}` reports readable toggle, expansion, selection, read-only and offscreen state. Missing fields mean unknown, and capability lists do not override disabled/read-only state. Custom-drawn surfaces such as a CAD drawing area expose no controls; click them by image pixels.
 
+Control actions return the actual post-action `state`. `verified:true` means the read-back matches the action, `false` means a readable mismatch, and `null` means it could not be verified. Toggle compares before/after state; Expand, Collapse, Select and ScrollIntoView check their target states. The agent polls for up to 250 ms when needed without replaying the action. Invoke remains `null` because a button's business effect cannot be inferred generically; inspect its result with `observe_after` or another observation.
+
 Without `observation_id`, `handle` or `pid`, `vm_click`, `vm_drag`, `vm_scroll`, `vm_key` and ASCII `vm_type` send raw input to the VM console at screen pixels, with no checks and without the agent. Use that only for the sign-in screen and UAC prompts.
 
 ### Other tools

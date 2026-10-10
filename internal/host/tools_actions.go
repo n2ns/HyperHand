@@ -73,7 +73,7 @@ type invokeIn struct {
 	VM            string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
 	ObservationID string `json:"observation_id" jsonschema:"observation_id of a vm_observe call with controls: true"`
 	Index         int    `json:"index" jsonschema:"the control's index in that observation's tree"`
-	Action        string `json:"action" jsonschema:"Invoke, Toggle, Expand, Collapse, Select or ScrollIntoView (case-insensitive); the control must list the pattern in the tree"`
+	Action        string `json:"action" jsonschema:"Invoke, Toggle, Expand, Collapse, Select or ScrollIntoView (case-insensitive); choose from the control's actions in the tree"`
 	Activate      *bool  `json:"activate,omitempty" jsonschema:"bring the window to the foreground first when it is not; default true"`
 	afterIn
 }
@@ -185,12 +185,12 @@ func registerActions(d *deps) {
 			return a.out(nil, hit, o), nil
 		})
 	})
-	addToolIn(d, toolSpec{name: "vm_set_value", desc: "Set a control's value through UI Automation (ValuePattern), by its index in a vm_observe control tree. Refuses a control that no longer exists (stale_element) or has no ValuePattern (unsupported_pattern, with the patterns it supports). Result: {ok, verified: whether the read-back equals value (null when unreadable), value: the read-back, window, after}." + descUntrusted, idempotent: true}, func(ctx context.Context, in setValueIn) (*mcp.CallToolResult, error) {
+	addToolIn(d, toolSpec{name: "vm_set_value", desc: "Set a control's value through UI Automation (ValuePattern), by its index in a vm_observe control tree whose actions includes SetValue. Refuses a control that no longer exists (stale_element) or lacks support (unsupported_pattern, with supported action names). Result: {ok, verified, value: the read-back, state: readable control state or null, window, after}. verified is true when read-back equals value, false when readable but different, null when unknown. State fields omitted from state are unknown, not false. The action executes once; read-back may wait up to 250 ms for state to settle." + descUntrusted, idempotent: true}, func(ctx context.Context, in setValueIn) (*mcp.CallToolResult, error) {
 		return d.run(ctx, in.VM, in.afterIn, afterScreenshot, func(a *action) (*actionOut, error) {
 			return a.control(in.ObservationID, in.Index, "SetValue", in.Value, on(in.Activate))
 		})
 	})
-	addToolIn(d, toolSpec{name: "vm_invoke", desc: "Perform a UI Automation pattern action on a control by its index in a vm_observe control tree: Invoke (buttons, menu items), Toggle (check boxes), Expand, Collapse, Select (list and tab items) or ScrollIntoView. Refuses a control that no longer exists (stale_element) or lacks the pattern (unsupported_pattern, with the patterns it supports). Result: {ok, verified, value, window, after}." + descUntrusted}, func(ctx context.Context, in invokeIn) (*mcp.CallToolResult, error) {
+	addToolIn(d, toolSpec{name: "vm_invoke", desc: "Perform a semantic action from a control's actions in a vm_observe tree: Invoke (buttons, menu items), Toggle (check boxes), Expand, Collapse, Select (list and tab items) or ScrollIntoView. Refuses a control that no longer exists (stale_element) or lacks support (unsupported_pattern, with supported action names). Result: {ok, verified, value, state: readable control state or null, window, after}. verified is true when read-back confirms Toggle changed state, Expand expanded, Collapse collapsed, Select selected or ScrollIntoView is no longer offscreen; false when readable but not confirmed, null when unknown. Invoke always has verified:null because UIA cannot verify its business effect. Omitted state fields are unknown, not false. The action executes once; read-back may wait up to 250 ms for state to settle." + descUntrusted}, func(ctx context.Context, in invokeIn) (*mcp.CallToolResult, error) {
 		i := slices.IndexFunc(proto.ControlActions, func(s string) bool { return strings.EqualFold(s, in.Action) })
 		if i < 0 || proto.ControlActions[i] == "SetValue" {
 			return nil, refuse(codeInvalidArgument, "use action Invoke, Toggle, Expand, Collapse, Select or ScrollIntoView; vm_set_value sets values", nil, "unknown action %q", in.Action)
@@ -291,7 +291,7 @@ func (a *action) control(id string, index int, action, value string, activate bo
 	if err != nil {
 		return nil, err
 	}
-	fields := map[string]any{"ok": true, "verified": r.Verified, "value": nil}
+	fields := map[string]any{"ok": true, "verified": r.Verified, "value": nil, "state": r.State}
 	if r.HasValue {
 		fields["value"] = r.Value
 	}

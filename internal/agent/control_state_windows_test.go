@@ -29,9 +29,13 @@ func TestControlsNativeSemanticState(t *testing.T) {
 		return child
 	}
 	send := user32.NewProc("SendMessageW")
+	var toggleWindow uintptr
 	for i, state := range []string{"off", "on", "indeterminate"} {
 		check := create("BUTTON", "check-"+state, 6, i*25) // BS_AUTO3STATE
 		send.Call(check, 0x00F1, uintptr(i), 0)            // BM_SETCHECK
+		if i == 0 {
+			toggleWindow = check
+		}
 	}
 	create("EDIT", "read-only-value", 0x0800, 75) // ES_READONLY
 	create("EDIT", "editable-value", 0, 100)
@@ -84,6 +88,46 @@ func TestControlsNativeSemanticState(t *testing.T) {
 	for _, name := range []string{"check-off", "check-on", "check-indeterminate", "read-only-value", "editable-value", "selected-item", "unselected-item"} {
 		if !seen[name] {
 			t.Errorf("missing %s in snapshot: %s", name, data)
+		}
+	}
+	for _, node := range reply.Controls.Nodes {
+		act := proto.ControlActionArgs{Handle: a.Handle, PID: a.PID, RuntimeID: node.RuntimeID}
+		switch {
+		case node.Name == "check-off":
+			act.Action = "Toggle"
+			for i, want := range []string{"on", "indeterminate", "off"} {
+				r, err := pumpHelper(t, helperRequest{Action: &act})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if r.Action == nil || r.Action.Verified == nil || !*r.Action.Verified || r.Action.State == nil || r.Action.State.Toggle == nil || *r.Action.State.Toggle != want {
+					t.Fatalf("Toggle want %s, got %+v", want, r.Action)
+				}
+				if got, _, _ := send.Call(toggleWindow, 0x00F0, 0, 0); got != uintptr((i+1)%3) { // BM_GETCHECK
+					t.Fatalf("native toggle state=%d, want %d", got, (i+1)%3)
+				}
+			}
+		case node.Name == "unselected-item":
+			act.Action = "Select"
+			r, err := pumpHelper(t, helperRequest{Action: &act})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Action == nil || r.Action.Verified == nil || !*r.Action.Verified || r.Action.State == nil || r.Action.State.Selected == nil || !*r.Action.State.Selected {
+				t.Fatalf("Select result: %+v", r.Action)
+			}
+			if got, _, _ := send.Call(list, 0x0188, 0, 0); got != 1 { // LB_GETCURSEL
+				t.Fatalf("native selected index=%d, want 1", got)
+			}
+		case node.Value == "editable-value":
+			act.Action = "SetValue"
+			r, err := pumpHelper(t, helperRequest{Action: &act})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Action == nil || r.Action.Verified == nil || !*r.Action.Verified || !r.Action.HasValue || r.Action.Value != "" {
+				t.Fatalf("SetValue empty result: %+v", r.Action)
+			}
 		}
 	}
 }
