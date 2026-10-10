@@ -134,13 +134,19 @@ func snapshotSettings(s *session, o *ole.IDispatch, id string) (*ole.IDispatch, 
 	if err != nil {
 		return nil, err
 	}
+	var seen []string
 	for _, sd := range settings {
-		if strings.HasPrefix(fmt.Sprint(s.get(sd, "VirtualSystemType")), "Microsoft:Hyper-V:Snapshot:") &&
-			isSnapshotInstance(fmt.Sprint(s.get(sd, "InstanceID")), id) {
+		if !strings.HasPrefix(fmt.Sprint(s.get(sd, "VirtualSystemType")), "Microsoft:Hyper-V:Snapshot:") {
+			continue
+		}
+		instance, config := fmt.Sprint(s.get(sd, "InstanceID")), fmt.Sprint(s.get(sd, "ConfigurationID"))
+		// Get-VMSnapshot's Id is the snapshot's ConfigurationID; the InstanceID ends with the same GUID.
+		if isSnapshotInstance(instance, id) || strings.EqualFold(config, id) {
 			return sd, nil
 		}
+		seen = append(seen, fmt.Sprintf("%s (%s, %q)", config, instance, fmt.Sprint(s.get(sd, "ElementName"))))
 	}
-	return nil, fmt.Errorf("%w: %s", ErrCheckpointNotFound, id)
+	return nil, fmt.Errorf("%w: %s; snapshot settings of the VM: %s", ErrCheckpointNotFound, id, strings.Join(seen, "; "))
 }
 
 // DeleteCheckpoint removes the checkpoint with ID id through Msvm_VirtualSystemSnapshotService: DestroySnapshot
