@@ -342,6 +342,8 @@ Result fields (absent when empty):
 
 Control lines also include `actions=[SetValue,...]` and compact JSON `state={...}` when available. Actions name supported operations: use `vm_set_value` for `SetValue` and `vm_invoke` for the others. They describe UIA capabilities, not a guarantee that a disabled or read-only control accepts the action. State fields are `toggle` (`off`, `on`, `indeterminate`), `expand_collapse` (`collapsed`, `expanded`, `partially_expanded`, `leaf`), `selected`, `read_only` and `offscreen`. Unreadable or unsupported properties are omitted, never replaced by false; password text stays hidden. `controls_diff` also reports changed actions and semantic state. Older agents' pattern names are translated to actions when possible; update the agent for semantic state.
 
+Scrollable controls also expose readable axis support and scroll percentages in `state`; see 4.7 for field names and directional actions.
+
 Tree coverage depends on the application's UI Automation provider; custom-drawn controls (common in CAD programs) may be absent. See Microsoft's [UI Automation tree views](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-treeoverview), [UI Automation security boundaries](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-securityoverview) and [physical pixels and DPI awareness](https://learn.microsoft.com/en-us/windows/win32/hidpi/high-dpi-desktop-application-development-on-windows); the depth, node, text and timeout limits are HyperHand choices.
 
 ### 4.4 Actions: targets, check chain, activation and observe_after
