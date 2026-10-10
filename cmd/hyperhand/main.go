@@ -120,6 +120,7 @@ func main() {
 		info.listenErr = err.Error()
 		tr.SetTip("HyperHand: MCP server not running, see Settings")
 	} else {
+		host.MCPURL = url
 		srv := host.NewServer(&host.Manager{AfterStart: func(vm string) {
 			if settings.onStart(vm) {
 				go func() {

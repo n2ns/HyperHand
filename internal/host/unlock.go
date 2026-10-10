@@ -84,16 +84,22 @@ func (u unlocker) waitAgent(ctx context.Context, vm string, timeout time.Duratio
 	}
 }
 
-// unlock unlocks vm's session with the stored password. It types the password only while the agent reports the session
-// locked and no UAC prompt open, and types it once: a wrong password is reported, not retried, so that the account is
-// not locked out.
+// Session states unlock returns.
+const (
+	sessionUnlocked  = "unlocked"   // the session was locked and the stored password unlocked it
+	sessionNotLocked = "not_locked" // the session was not locked; nothing was typed
+)
+
+// unlock unlocks vm's session with the stored password and returns sessionUnlocked or sessionNotLocked. It types the
+// password only while the agent reports the session locked and no UAC prompt open, and types it once: a wrong password
+// is reported, not retried, so that the account is not locked out.
 func (u unlocker) unlock(ctx context.Context, vm string) (string, error) {
 	s, err := u.state(ctx, vm)
 	if err != nil {
 		return "", err
 	}
 	if !s.Locked {
-		return "the session is not locked", nil
+		return sessionNotLocked, nil
 	}
 	pw, ok, err := u.password(vm)
 	if err != nil {
@@ -119,7 +125,7 @@ func (u unlocker) unlock(ctx context.Context, vm string) (string, error) {
 		return "", err
 	}
 	if !s.Locked {
-		return "the session is not locked", nil
+		return sessionNotLocked, nil
 	}
 	if err := u.typePassword(ctx, vm, pw); err != nil {
 		return "", err
@@ -127,7 +133,7 @@ func (u unlocker) unlock(ctx context.Context, vm string) (string, error) {
 	for i := 0; i < 15; i++ {
 		u.sleep(time.Second)
 		if s, err = u.state(ctx, vm); err == nil && !s.Locked {
-			return "unlocked", nil
+			return sessionUnlocked, nil
 		}
 		if ctx.Err() != nil {
 			return "", ctx.Err()
@@ -185,34 +191,56 @@ func passwordBoxReady(s proto.SessionStateResult) error {
 // relockDelay: Windows can lock a session right after an automatic sign-in, after the agent already answered.
 const relockDelay = 3 * time.Second
 
+// readyResult describes a usable desktop: the agent that answered and whether ready had to unlock the session.
+type readyResult struct {
+	Agent    proto.PingResult
+	Unlocked bool // the session was locked and has been unlocked
+}
+
+// checkProtocol refuses an agent whose protocol is older than proto.Protocol.
+func checkProtocol(p proto.PingResult) error {
+	if p.Protocol < proto.Protocol {
+		return refuse(codeAgentOutdated, "call vm_update_agent", map[string]any{"agent_protocol": p.Protocol, "host_protocol": proto.Protocol},
+			"the guest agent %s speaks protocol %d; this host needs %d", p.Version, p.Protocol, proto.Protocol)
+	}
+	return nil
+}
+
 // ready waits for the agent of a running VM and unlocks its session if needed. The result describes a usable desktop;
-// an error says why the desktop is not usable.
-func (u unlocker) ready(ctx context.Context, vm string, agentTimeout time.Duration) (string, error) {
+// an error (agent_required, agent_outdated, session_unusable) says why the desktop is not usable.
+func (u unlocker) ready(ctx context.Context, vm string, agentTimeout time.Duration) (readyResult, error) {
+	var r readyResult
 	p, err := u.waitAgent(ctx, vm, agentTimeout)
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return r, ctx.Err()
 		}
-		return "", fmt.Errorf("the guest agent did not answer within %v: no user is signed in, or the agent is not installed. HyperHand can unlock a locked session only while the agent runs in it: %w", agentTimeout, err)
+		return r, refuse(codeAgentRequired, "call vm_install_agent if the agent is not installed, else call vm_status later", nil,
+			"the guest agent did not answer within %v: no user is signed in, or the agent is not installed. HyperHand can unlock a locked session only while the agent runs in it: %v", agentTimeout, err)
 	}
-	agent := fmt.Sprintf("agent %s running on %s as %s", p.Version, p.Hostname, p.User)
+	if err := checkProtocol(p); err != nil {
+		return r, err
+	}
+	r.Agent = p
 	s, err := u.state(ctx, vm)
 	if err != nil {
-		return "", fmt.Errorf("%s, but: %w", agent, err)
+		return r, err
 	}
 	if !s.Locked {
 		u.sleep(relockDelay)
 		if s, err = u.state(ctx, vm); err != nil {
-			return "", fmt.Errorf("%s, but: %w", agent, err)
+			return r, err
 		}
 	}
 	if !s.Locked {
-		return agent + "; desktop unlocked", nil
+		return r, nil
 	}
 	if _, err := u.unlock(ctx, vm); err != nil {
-		return "", fmt.Errorf("%s, but the session is locked: %w", agent, err)
+		return r, refuse(codeSessionUnusable, "fix the cause, then call vm_start again", map[string]any{"locked": true},
+			"the session is locked: %v", err)
 	}
-	return agent + "; session was locked and has been unlocked", nil
+	r.Unlocked = true
+	return r, nil
 }
 
 // lockedInput serializes the keyboard and mouse input of HyperHand tools with the unlock sequence.

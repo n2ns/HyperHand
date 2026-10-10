@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
@@ -41,7 +42,7 @@ func TestRestoreThroughBackend(t *testing.T) {
 		want []string
 	}{
 		{"default starts", map[string]any{"name": "baseline"}, false, []string{"find:", "restore:test:baseline", "find:test", "start:test"}},
-		{"stay off", map[string]any{"vm": "test", "name": "baseline", "start": false}, false, []string{"find:test", "restore:test:baseline"}},
+		{"stay off", map[string]any{"vm": "test", "name": "baseline", "start": false}, false, []string{"find:test", "restore:test:baseline", "find:test"}},
 		{"failure does not start", map[string]any{"name": "baseline"}, true, []string{"find:", "restore:test:baseline"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -72,6 +73,15 @@ func TestRestoreThroughBackend(t *testing.T) {
 			}
 			if !reflect.DeepEqual(b.calls, tc.want) {
 				t.Fatalf("backend calls=%v, want %v", b.calls, tc.want)
+			}
+			if !tc.fail {
+				var out struct{ VM, Restored, State string }
+				if err := json.Unmarshal([]byte(resultText(r)), &out); err != nil || out.VM != "test" || out.Restored != "baseline" {
+					t.Fatalf("result %s: %v", resultText(r), err)
+				}
+				if want := map[bool]string{true: "running", false: "off"}[tc.name == "default starts"]; out.State != want {
+					t.Fatalf("state %q, want %q", out.State, want)
+				}
 			}
 		})
 	}

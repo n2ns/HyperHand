@@ -320,13 +320,18 @@ Copy-VMFile -VM $vm -SourcePath `+psq(hostPath)+` -DestinationPath `+psq(guestPa
 	return err
 }
 
+// Checkpoint is one VM checkpoint. ID is the snapshot GUID (the second part of the Msvm_VirtualSystemSettingData
+// InstanceID "Microsoft:<vm id>\<snapshot id>"); Parent and ParentID name the parent checkpoint, empty for a root.
 type Checkpoint struct {
 	Name         string `json:"Name"`
 	CreationTime string `json:"CreationTime"`
+	ID           string `json:"Id"`
+	Parent       string `json:"ParentSnapshotName"`
+	ParentID     string `json:"ParentSnapshotId"`
 }
 
 func ListCheckpoints(vm string) ([]Checkpoint, error) {
-	out, err := vmScript(vm, `$c=@(Get-VMSnapshot -VM $vm | Sort-Object CreationTime | Select-Object Name,@{n='CreationTime';e={$_.CreationTime.ToString('yyyy-MM-dd HH:mm:ss')}})
+	out, err := vmScript(vm, `$c=@(Get-VMSnapshot -VM $vm | Sort-Object CreationTime | Select-Object Name,@{n='CreationTime';e={$_.CreationTime.ToString('yyyy-MM-dd HH:mm:ss')}},@{n='Id';e={[string]$_.Id}},@{n='ParentSnapshotName';e={[string]$_.ParentSnapshotName}},@{n='ParentSnapshotId';e={[string]$_.ParentSnapshotId}})
 if ($c.Count) { ConvertTo-Json -InputObject $c -Compress }`)
 	if err != nil {
 		return nil, err
@@ -346,6 +351,43 @@ func RestoreCheckpoint(vm, name string) error {
 if (-not $c) { throw ('checkpoint not found: ' + `+psq(name)+`) }
 $c | Restore-VMSnapshot -Confirm:$false`)
 	return err
+}
+
+// DeleteCheckpoint removes the checkpoint with the exact, case-sensitive name (not its children, which are
+// re-parented) through Msvm_VirtualSystemSnapshotService.DestroySnapshot and waits for the job.
+// https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/destroysnapshot-msvm-virtualsystemsnapshotservice
+func DeleteCheckpoint(vm, name string) error {
+	return withWMI(func(s *session) error {
+		o, err := s.find(vm)
+		if err != nil {
+			return err
+		}
+		settings, err := s.assoc(o, "Msvm_VirtualSystemSettingData")
+		if err != nil {
+			return err
+		}
+		var target *ole.IDispatch
+		for _, sd := range settings {
+			if strings.HasPrefix(fmt.Sprint(s.get(sd, "VirtualSystemType")), "Microsoft:Hyper-V:Snapshot:") && fmt.Sprint(s.get(sd, "ElementName")) == name {
+				if target != nil {
+					return fmt.Errorf("several checkpoints are named %q", name)
+				}
+				target = sd
+			}
+		}
+		if target == nil {
+			return fmt.Errorf("checkpoint not found: %s", name)
+		}
+		svc, err := s.one("SELECT * FROM Msvm_VirtualSystemSnapshotService")
+		if err != nil {
+			return err
+		}
+		out, err := s.call(svc, "DestroySnapshot", "AffectedSnapshot", s.path(target))
+		if err != nil {
+			return err
+		}
+		return s.awaitJob(out, "DestroySnapshot", 15*time.Minute)
+	})
 }
 
 // parseCheckpoints reads ConvertTo-Json output: an array, a single object, or nothing.
@@ -392,18 +434,24 @@ func requestState(vm string, state int32) error {
 		if err != nil {
 			return err
 		}
-		if toInt(s.get(out, "ReturnValue")) != 4096 {
-			return nil
-		}
-		path, _ := s.get(out, "Job").(string)
-		if path == "" {
-			return errors.New("RequestStateChange started asynchronously without a job reference")
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer cancel()
-		return waitStateJob(ctx, 500*time.Millisecond, func() (stateJob, error) {
-			return s.readStateJob(path)
-		})
+		return s.awaitJob(out, "RequestStateChange", 45*time.Second)
+	})
+}
+
+// awaitJob finishes a WMI method call from its out-parameters: ReturnValue 0 is done; 4096 means a job started, which
+// is polled until it completes (or timeout passes, in which case the operation may still be running).
+func (s *session) awaitJob(out *ole.IDispatch, method string, timeout time.Duration) error {
+	if toInt(s.get(out, "ReturnValue")) != 4096 {
+		return nil
+	}
+	path, _ := s.get(out, "Job").(string)
+	if path == "" {
+		return fmt.Errorf("%s started asynchronously without a job reference", method)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return waitStateJob(ctx, 500*time.Millisecond, func() (stateJob, error) {
+		return s.readStateJob(path)
 	})
 }
 
@@ -413,18 +461,18 @@ type stateJob struct {
 	Description string
 }
 
-// RequestStateChange's 4096 means only that a transition started. Never replay the
+// A method's ReturnValue 4096 means only that an operation started. Never replay the
 // request: poll its Msvm_ConcreteJob and require Completed with ErrorCode zero.
 // https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/msvm-concretejob
 func waitStateJob(ctx context.Context, interval time.Duration, poll func() (stateJob, error)) error {
 	var last stateJob
 	for {
 		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("RequestStateChange job wait ended (JobState=%d, ErrorCode=%d, ErrorDescription=%q); operation may still be running: %w", last.State, last.ErrorCode, last.Description, err)
+			return fmt.Errorf("Hyper-V job wait ended (JobState=%d, ErrorCode=%d, ErrorDescription=%q); operation may still be running: %w", last.State, last.ErrorCode, last.Description, err)
 		}
 		job, err := poll()
 		if err != nil {
-			return fmt.Errorf("read RequestStateChange job: %w", err)
+			return fmt.Errorf("read Hyper-V job: %w", err)
 		}
 		last = job
 		switch job.State {
@@ -434,10 +482,10 @@ func waitStateJob(ctx context.Context, interval time.Duration, poll func() (stat
 			}
 			fallthrough
 		case 8, 9, 10: // Terminated, Killed, Exception.
-			return fmt.Errorf("RequestStateChange job failed (JobState=%d, ErrorCode=%d, ErrorDescription=%q)", job.State, job.ErrorCode, job.Description)
+			return fmt.Errorf("Hyper-V job failed (JobState=%d, ErrorCode=%d, ErrorDescription=%q)", job.State, job.ErrorCode, job.Description)
 		case 2, 3, 4, 5, 6, 11: // New, Starting, Running, Suspended, Shutting Down, Service.
 		default:
-			return fmt.Errorf("RequestStateChange job has unexpected JobState=%d (ErrorCode=%d, ErrorDescription=%q)", job.State, job.ErrorCode, job.Description)
+			return fmt.Errorf("Hyper-V job has unexpected JobState=%d (ErrorCode=%d, ErrorDescription=%q)", job.State, job.ErrorCode, job.Description)
 		}
 		timer := time.NewTimer(interval)
 		select {
@@ -793,16 +841,29 @@ func rgb565ToRGBA(data []byte, w, h int) (*image.RGBA, error) {
 	return img, nil
 }
 
+// keyNames maps key names (lowercase; parseKeys lowercases its input) to Windows virtual-key codes. Besides the plain
+// names it accepts X11/Codex-style aliases (Return, Escape, Control_L, KP_0, period...). The Hyper-V keyboard's TypeKey
+// takes a virtual-key code without an extended flag, so numenter/KP_Enter is the same key as enter, and the left/right
+// modifier aliases are the plain modifier.
 var keyNames = map[string]int{
-	"ctrl": 0x11, "control": 0x11, "shift": 0x10, "alt": 0x12, "win": 0x5B,
+	"ctrl": 0x11, "control": 0x11, "control_l": 0x11, "control_r": 0x11,
+	"shift": 0x10, "shift_l": 0x10, "shift_r": 0x10,
+	"alt": 0x12, "alt_l": 0x12, "alt_r": 0x12,
+	"win": 0x5B, "super_l": 0x5B,
 	"enter": 0x0D, "return": 0x0D, "esc": 0x1B, "escape": 0x1B, "tab": 0x09, "space": 0x20,
 	"backspace": 0x08, "delete": 0x2E, "del": 0x2E, "insert": 0x2D, "home": 0x24, "end": 0x23,
-	"pageup": 0x21, "pagedown": 0x22, "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
-	";": 0xBA, "=": 0xBB, "plus": 0xBB, ",": 0xBC, "-": 0xBD, ".": 0xBE, "/": 0xBF, "`": 0xC0,
+	"pageup": 0x21, "prior": 0x21, "pagedown": 0x22, "next": 0x22, "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+	"printscreen": 0x2C, "scrolllock": 0x91, "pause": 0x13, "apps": 0x5D, "capslock": 0x14, "numlock": 0x90,
+	"num0": 0x60, "num1": 0x61, "num2": 0x62, "num3": 0x63, "num4": 0x64, "num5": 0x65, "num6": 0x66, "num7": 0x67, "num8": 0x68, "num9": 0x69,
+	"kp_0": 0x60, "kp_1": 0x61, "kp_2": 0x62, "kp_3": 0x63, "kp_4": 0x64, "kp_5": 0x65, "kp_6": 0x66, "kp_7": 0x67, "kp_8": 0x68, "kp_9": 0x69,
+	"numenter": 0x0D, "kp_enter": 0x0D, "numdot": 0x6E, "kp_decimal": 0x6E, "numplus": 0x6B, "kp_add": 0x6B,
+	"numminus": 0x6D, "kp_subtract": 0x6D, "nummul": 0x6A, "kp_multiply": 0x6A, "numdiv": 0x6F, "kp_divide": 0x6F,
+	";": 0xBA, "=": 0xBB, "plus": 0xBB, "equal": 0xBB, ",": 0xBC, "comma": 0xBC, "-": 0xBD, "minus": 0xBD,
+	".": 0xBE, "period": 0xBE, "/": 0xBF, "slash": 0xBF, "`": 0xC0,
 	"[": 0xDB, "\\": 0xDC, "]": 0xDD, "'": 0xDE,
 }
 
-// parseKeys turns "ctrl+shift+esc" into Windows virtual-key codes.
+// parseKeys turns "ctrl+shift+esc" into Windows virtual-key codes (case-insensitive; f1 to f20).
 func parseKeys(keys string) ([]int, error) {
 	var codes []int
 	for _, k := range strings.Split(strings.ToLower(strings.TrimSpace(keys)), "+") {
@@ -813,7 +874,7 @@ func parseKeys(keys string) ([]int, error) {
 		case len(k) == 1 && (k[0] >= 'a' && k[0] <= 'z' || k[0] >= '0' && k[0] <= '9'):
 			code = int(strings.ToUpper(k)[0])
 		case len(k) >= 2 && k[0] == 'f':
-			if n, err := strconv.Atoi(k[1:]); err == nil && n >= 1 && n <= 12 {
+			if n, err := strconv.Atoi(k[1:]); err == nil && n >= 1 && n <= 20 {
 				code = 0x6F + n
 			}
 		}
