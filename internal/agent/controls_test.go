@@ -323,9 +323,12 @@ func TestParseAction(t *testing.T) {
 		t.Errorf("unknown action: %v", err)
 	}
 	for _, a := range proto.ControlActions {
-		if patternFor(a) < 0 {
+		if patternFor(a) < 0 && a != "Locate" { // Locate needs no pattern: it only re-reads the element
 			t.Errorf("no pattern for %s", a)
 		}
+	}
+	if got, err := parseAction("locate"); err != nil || got != "Locate" {
+		t.Errorf("locate: %q %v", got, err)
 	}
 }
 

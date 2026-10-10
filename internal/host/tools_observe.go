@@ -37,7 +37,7 @@ const observeDesc = "Observe the whole screen (no handle) or one window (handle 
 func registerObserve(d *deps) {
 	addToolIn(d, toolSpec{name: "vm_windows", desc: windowsDesc, readOnly: true}, func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
 		var r proto.WindowsResult
-		if _, err := d.call(ctx, in.VM, proto.OpListWindows, nil, nil, &r); err != nil {
+		if _, err := d.call(ctx, in.VM, proto.OpListWindows, proto.ListWindowsArgs{Focused: true}, nil, &r); err != nil {
 			if agentUnreachable(err) {
 				return nil, agentRequired(err)
 			}

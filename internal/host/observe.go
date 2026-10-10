@@ -93,7 +93,7 @@ func (d *deps) observeVM(ctx context.Context, in observeIn) (*observeOut, []byte
 
 	var wr proto.WindowsResult
 	online := true
-	if _, err := d.call(ctx, vm, proto.OpListWindows, nil, nil, &wr); err != nil {
+	if _, err := d.call(ctx, vm, proto.OpListWindows, proto.ListWindowsArgs{Focused: true}, nil, &wr); err != nil {
 		if !agentUnreachable(err) {
 			return nil, nil, err
 		}
@@ -156,7 +156,7 @@ func (d *deps) observeVM(ctx context.Context, in observeIn) (*observeOut, []byte
 		}
 		png = img
 		obs.Crop = screenshotRegion{X: g.X, Y: g.Y, Width: g.Width, Height: g.Height}
-		obs.Scale = g.ScaleX
+		obs.Scale, obs.ScaleY = g.ScaleX, g.ScaleY
 		obs.OutputWidth, obs.OutputHgt = g.OutputWidth, g.OutputHeight
 		obs.HasImage = true
 		out.Screenshot = &observeScreenshot{Width: g.OutputWidth, Height: g.OutputHeight, OriginX: g.X, OriginY: g.Y, Scale: g.ScaleX}
@@ -183,7 +183,7 @@ func (d *deps) observeVM(ctx context.Context, in observeIn) (*observeOut, []byte
 				cr.Nodes = []proto.ControlInfo{}
 			}
 			obs.Nodes = cr.Nodes
-			obs.Window = target // for a whole-screen observation: the foreground window the indexes belong to
+			obs.TreeWindow = target // for a whole-screen observation: the foreground window the indexes belong to
 			out.ControlsTruncated = cr.Truncated
 			out.SelectedText = cr.SelectedText
 		}

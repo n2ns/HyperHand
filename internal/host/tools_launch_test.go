@@ -37,6 +37,9 @@ func (b *fakeAgentBackend) Dial(_ context.Context, id string) (net.Conn, error) 
 				return
 			}
 			result, err := b.respond(req)
+			if err != nil && req.Op == proto.OpPing { // the client's protocol check on a new connection
+				result, err = proto.PingResult{Version: "test", Protocol: proto.Protocol}, nil
+			}
 			resp := proto.Response{}
 			if err != nil {
 				resp.Error = err.Error()
@@ -122,7 +125,7 @@ func TestLaunchTimeoutLeavesProcessRunning(t *testing.T) {
 		t.Errorf("timeout refusal %v", e)
 	}
 	for _, op := range ops {
-		if op != proto.OpLaunch && op != proto.OpListWindows {
+		if op != proto.OpLaunch && op != proto.OpListWindows && op != proto.OpPing {
 			t.Errorf("unexpected op %s (the process must be left alone)", op)
 		}
 	}

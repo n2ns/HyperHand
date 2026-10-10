@@ -125,10 +125,20 @@ func windowInfo(h, fg windows.HWND, names map[uint32]string) proto.WindowInfo {
 	}
 }
 
-func listWindows(ctx context.Context, _ json.RawMessage, _ []byte) (any, []byte, error) {
+func listWindows(ctx context.Context, args json.RawMessage, _ []byte) (any, []byte, error) {
+	var a proto.ListWindowsArgs
+	if len(args) > 0 {
+		if err := decode(args, &a); err != nil {
+			return nil, nil, err
+		}
+	}
 	// The focused element comes from a helper process; start it first so it overlaps the window enumeration.
 	focused := make(chan *proto.FocusedControl, 1)
-	go func() { focused <- focusedControl(ctx) }()
+	if a.Focused {
+		go func() { focused <- focusedControl(ctx) }()
+	} else {
+		focused <- nil
+	}
 	fg := windows.GetForegroundWindow()
 	names := map[uint32]string{}
 	levels := map[uint32]string{}

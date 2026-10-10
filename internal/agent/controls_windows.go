@@ -319,6 +319,9 @@ func performControlAction(a proto.ControlActionArgs) (proto.ControlActionResult,
 	if err != nil {
 		return proto.ControlActionResult{}, err
 	}
+	if action == "Locate" {
+		return controlActionResult(e, available, action, a.Value)
+	}
 	idx := patternFor(action)
 	if !available[idx] {
 		return proto.ControlActionResult{}, unsupportedPattern(action, actionNames(available))
@@ -352,7 +355,17 @@ func performControlAction(a proto.ControlActionArgs) (proto.ControlActionResult,
 	if err != nil {
 		return proto.ControlActionResult{}, fmt.Errorf("%s failed: %w", action, err)
 	}
+	return controlActionResult(e, available, action, a.Value)
+}
+
+// controlActionResult reads the element's state after an action (or for Locate): its current rectangle and, when it
+// has a ValuePattern and is not a password control, its value; SetValue compares the value with the requested one.
+func controlActionResult(e *nativeControl, available []bool, action, requested string) (proto.ControlActionResult, error) {
 	var r proto.ControlActionResult
+	var rect proto.Rect
+	if err := uiaCall(e.element, uiaBounds, uintptr(unsafe.Pointer(&rect))); err == nil {
+		r.Rect = &rect
+	}
 	if !available[valuePatternIndex] {
 		return r, nil
 	}
@@ -360,10 +373,10 @@ func performControlAction(a proto.ControlActionArgs) (proto.ControlActionResult,
 	if err != nil || password != 0 {
 		return r, nil
 	}
-	if value, _, err := e.propertyText(propValueValue); err == nil {
+	if value, cut, err := e.propertyText(propValueValue); err == nil {
 		r.Value, r.HasValue = value, true
-		if action == "SetValue" {
-			verified := value == a.Value
+		if action == "SetValue" && !cut { // a truncated read-back cannot be compared
+			verified := value == requested
 			r.Verified = &verified
 		}
 	}

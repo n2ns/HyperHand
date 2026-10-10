@@ -33,7 +33,7 @@ const (
 	OpClipboardGet = "clipboard_get" // -> TextResult
 	OpClipboardSet = "clipboard_set" // TextArgs
 	OpFocusWindow  = "focus_window"  // TitleArgs -> FocusResult (the matched title and handle)
-	OpListWindows  = "list_windows"  // -> WindowsResult (windows, foreground, focused control, session)
+	OpListWindows  = "list_windows"  // ListWindowsArgs (optional) -> WindowsResult (windows, foreground, focused control, session)
 	OpWindowAt     = "window_at"     // PointArgs -> HandleResult
 	OpLaunch       = "launch"        // LaunchArgs -> LaunchResult: start a detached process
 	OpHScroll      = "hscroll"       // HScrollArgs: horizontal wheel at a screen point (SendInput; the Hyper-V mouse has none)
@@ -199,6 +199,12 @@ type HandleResult struct {
 	Class   string `json:"class,omitempty"`
 	PID     uint32 `json:"pid,omitempty"`
 	Process string `json:"process,omitempty"`
+}
+
+// ListWindowsArgs: Focused asks for WindowsResult.Focused, which costs a UI Automation helper process (up to 2 s);
+// callers that only check windows leave it false.
+type ListWindowsArgs struct {
+	Focused bool `json:"focused,omitempty"`
 }
 
 // WindowsResult lists the windows from the top of the Z order down. Foreground is the foreground window's handle (0

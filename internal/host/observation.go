@@ -97,12 +97,22 @@ type observation struct {
 	Window  *proto.WindowInfo  // the observed window; nil for a whole-screen observation
 	Windows []proto.WindowInfo // the window list at capture time
 	// Output image geometry: Crop is the captured region in guest screen pixels (host screenshots are at the guest's
-	// screen resolution, so screenshot pixels are screen pixels) and Scale is output pixels per screen pixel.
+	// screen resolution, so screenshot pixels are screen pixels) and Scale/ScaleY are output pixels per screen pixel
+	// on each axis (ScaleY 0 means Scale).
 	Crop                   screenshotRegion
-	Scale                  float64
+	Scale, ScaleY          float64
 	OutputWidth, OutputHgt int
 	HasImage               bool
 	Nodes                  []proto.ControlInfo // the control tree, nil when not captured
+	TreeWindow             *proto.WindowInfo   // the window Nodes belong to: Window, or the foreground window of a whole-screen observation
+}
+
+// treeWindow returns the window the control tree belongs to, nil when there is none.
+func (o *observation) treeWindow() *proto.WindowInfo {
+	if o.TreeWindow != nil {
+		return o.TreeWindow
+	}
+	return o.Window
 }
 
 // toScreen maps a pixel of the output image to guest screen pixels (the coordinates of Backend.Click).
@@ -113,8 +123,12 @@ func (o *observation) toScreen(u, v int) (int, int, error) {
 	if u < 0 || v < 0 || u >= o.OutputWidth || v >= o.OutputHgt {
 		return 0, 0, refuse(codeInvalidArgument, "use coordinates inside the observation image", nil, "(%d, %d) is outside the %dx%d image of observation %s", u, v, o.OutputWidth, o.OutputHgt, o.ID)
 	}
+	sy := o.ScaleY
+	if sy == 0 {
+		sy = o.Scale
+	}
 	x := o.Crop.X + min(o.Crop.Width-1, int((float64(u)+0.5)/o.Scale))
-	y := o.Crop.Y + min(o.Crop.Height-1, int((float64(v)+0.5)/o.Scale))
+	y := o.Crop.Y + min(o.Crop.Height-1, int((float64(v)+0.5)/sy))
 	return x, y, nil
 }
 

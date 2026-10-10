@@ -36,6 +36,9 @@ func (b *windowMCPBackend) Dial(_ context.Context, id string) (net.Conn, error) 
 				return
 			}
 			result, err := b.respond(id, req)
+			if err != nil && req.Op == proto.OpPing { // the client's protocol check on a new connection
+				result, err = proto.PingResult{Version: "test", Protocol: proto.Protocol}, nil
+			}
 			response := proto.Response{}
 			if err != nil {
 				response.Error = err.Error()

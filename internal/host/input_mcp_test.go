@@ -90,6 +90,8 @@ func TestInputMCPTypePinsTargetAndActivates(t *testing.T) {
 							return nil, fmt.Errorf("unknown op type_keys")
 						}
 						return proto.TypeKeysResult{Events: 8}, nil
+					case proto.OpPing:
+						return proto.PingResult{Version: "test", Protocol: proto.Protocol}, nil
 					default:
 						forbidden.Add(1)
 						return nil, fmt.Errorf("unexpected operation %s", req.Op)

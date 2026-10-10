@@ -64,7 +64,7 @@ func asToolError(err error) *toolError {
 	if strings.HasPrefix(err.Error(), "unknown op") {
 		return refuse(codeAgentOutdated, "call vm_update_agent", nil, "the guest agent is too old: %v", err)
 	}
-	return &toolError{Code: codeFailed, Reason: err.Error()}
+	return &toolError{Code: codeFailed, Reason: err.Error(), Next: "call vm_status, then vm_doctor if the VM is running; the action may or may not have happened, so observe before repeating it"}
 }
 
 // errorResult renders a toolError as the isError MCP result described on toolError.

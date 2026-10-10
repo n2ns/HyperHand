@@ -134,6 +134,8 @@ func fakeAgent(t *testing.T, conn net.Conn, written *[]byte) {
 		var resp proto.Response
 		var out []byte
 		switch req.Op {
+		case proto.OpPing: // the client's protocol check on a new connection
+			resp.Result, _ = json.Marshal(proto.PingResult{Version: "test", Protocol: proto.Protocol})
 		case proto.OpExec:
 			var a proto.ExecArgs
 			json.Unmarshal(req.Args, &a)
@@ -361,6 +363,15 @@ func TestCallIOCancel(t *testing.T) {
 			var req proto.Request
 			if _, err := proto.ReadFrame(b, &req); err != nil {
 				return
+			}
+			if req.Op == proto.OpPing { // the protocol check on the new connection
+				ping, _ := json.Marshal(proto.PingResult{Version: "test", Protocol: proto.Protocol})
+				if err := proto.WriteFrame(b, proto.Response{Result: ping}, nil); err != nil {
+					return
+				}
+				if _, err := proto.ReadFrame(b, &req); err != nil {
+					return
+				}
 			}
 			// Announce 100 MB, send 1 KB, then stall until the client drops the connection.
 			proto.WriteFrameFrom(b, proto.Response{}, 100<<20, io.MultiReader(bytes.NewReader(make([]byte, 1024)), b))

@@ -344,7 +344,7 @@ func registerVM(d *deps) {
 		} else {
 			d.turn.addTempCheckpoint(v.Name, name)
 		}
-		return jsonResult(map[string]any{"name": name, "type": typ})
+		return jsonResult(map[string]any{"name": name, "type": typ, "created_at": time.Now().UTC().Format(time.RFC3339)})
 	})
 	addToolIn(d, toolSpec{name: "vm_restore", desc: "Restore a checkpoint (exact name from vm_checkpoints), then start the VM if it is not running (unless start is false). The guest's current state is replaced by the checkpoint's.", destructive: true}, func(ctx context.Context, in restoreIn) (*mcp.CallToolResult, error) {
 		if in.Name == "" {

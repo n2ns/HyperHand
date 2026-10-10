@@ -143,10 +143,17 @@ func (a *action) relist() error {
 	return err
 }
 
-// answered reports whether the agent answered the window list; untargeted actions check the session only then.
-func (a *action) answered() bool {
-	_, err := a.list()
-	return err == nil
+// offline reports whether the agent is unreachable (untargeted input then takes the console path). Any other failure
+// of the window list, such as agent_outdated, is returned as the error.
+func (a *action) offline() (bool, error) {
+	if _, err := a.list(); err != nil {
+		te := asToolError(agentRequired(err))
+		if te.Code == codeAgentRequired {
+			return true, nil
+		}
+		return false, te
+	}
+	return false, nil
 }
 
 // windows returns the window list for an action that cannot proceed without the agent.
@@ -301,8 +308,8 @@ func checkIntegrity(ws *proto.WindowsResult, w proto.WindowInfo) error {
 	return refuse(codeIntegrityMismatch, "launch the application without admin, or use vm_launch with admin:true", map[string]any{"integrity": w.Integrity, "agent_integrity": ws.AgentIntegrity}, "window %s runs at %s integrity, above the agent's %s", describe(w), w.Integrity, ws.AgentIntegrity)
 }
 
-// windowTarget runs steps 3, 4 and 6 for the group root w (an observation's window): activation, enabled and
-// foreground (checkUsable) and integrity, all on w's current entry, which it returns.
+// windowTarget runs steps 3 and 4 for the group root w (an observation's window): activation, then enabled and
+// foreground (checkUsable), on w's current entry, which it returns. Callers run step 5 (hit) and 6 (integrity).
 func (a *action) windowTarget(w proto.WindowInfo, activate bool) (proto.WindowInfo, error) {
 	w, err := a.current(w.Handle)
 	if err != nil {
@@ -311,15 +318,38 @@ func (a *action) windowTarget(w proto.WindowInfo, activate bool) (proto.WindowIn
 	if w, err = a.activate(w, activate); err != nil {
 		return w, err
 	}
-	if err := checkUsable(a.ws.Windows, w); err != nil {
-		return w, err
+	return w, checkUsable(a.ws.Windows, w)
+}
+
+// treeTarget returns the window the observation's control tree belongs to, for index actions.
+func (a *action) treeTarget(o *observation) (proto.WindowInfo, error) {
+	tw := o.treeWindow()
+	if tw == nil {
+		return proto.WindowInfo{}, refuse(codeInvalidArgument, "call vm_observe with controls: true and use its observation_id and an index from its tree", nil, "observation %s has no control tree", o.ID)
 	}
-	return w, checkIntegrity(a.ws, w)
+	return *tw, nil
+}
+
+// locate re-finds node by its runtime ID in its window and returns its current rectangle, so that a control that moved
+// (scrolled list, re-laid-out dialog) is clicked where it is now; a vanished control is stale_element. Nodes without a
+// runtime ID keep the rectangle of the observation.
+func (a *action) locate(o *observation, w proto.WindowInfo, node proto.ControlInfo) (proto.Rect, error) {
+	if node.RuntimeID == "" {
+		return node.Rect, nil
+	}
+	r, err := a.controlAction(o, w, node, "Locate", "")
+	if err != nil {
+		return proto.Rect{}, err
+	}
+	if r.Rect == nil {
+		return node.Rect, nil
+	}
+	return *r.Rect, nil
 }
 
 // pointTarget runs steps 1 to 6 for a pointer action at image pixel (u, v) of observation id, or at the centre of node
-// index when index is set. It returns the screen point, the window the pointer reaches (zero when the observation is
-// of the whole screen) and the observation.
+// index when index is set (the node is re-located first). It returns the screen point, the window the pointer reaches
+// (zero when a whole-screen observation is clicked by coordinates, which has no window checks) and the observation.
 func (a *action) pointTarget(id string, u, v int, index *int, activate bool) (x, y int, hit proto.WindowInfo, o *observation, err error) {
 	if _, err = a.windows(); err != nil {
 		return
@@ -330,33 +360,38 @@ func (a *action) pointTarget(id string, u, v int, index *int, activate bool) (x,
 	if o, err = a.observation(id); err != nil {
 		return
 	}
+	var window proto.WindowInfo
 	if index != nil {
 		n, e := o.node(*index)
 		if e != nil {
 			return 0, 0, hit, o, e
 		}
-		x, y = int(n.Rect.Left+n.Rect.Right)/2, int(n.Rect.Top+n.Rect.Bottom)/2
-	} else if x, y, err = o.toScreen(u, v); err != nil {
-		return
+		if window, err = a.treeTarget(o); err != nil {
+			return
+		}
+		if window, err = a.windowTarget(window, activate); err != nil {
+			return 0, 0, hit, o, err
+		}
+		r, e := a.locate(o, window, n)
+		if e != nil {
+			return 0, 0, hit, o, e
+		}
+		x, y = int(r.Left+r.Right)/2, int(r.Top+r.Bottom)/2
+	} else {
+		if x, y, err = o.toScreen(u, v); err != nil {
+			return
+		}
+		if o.Window == nil {
+			return x, y, hit, o, nil // whole screen by coordinates: no window to check
+		}
+		if window, err = a.windowTarget(*o.Window, activate); err != nil {
+			return 0, 0, hit, o, err
+		}
 	}
-	if o.Window == nil {
-		return x, y, hit, o, nil
-	}
-	target, err := a.windowTarget(*o.Window, activate)
-	if err != nil {
+	if hit, err = a.hit(window, x, y); err != nil {
 		return 0, 0, hit, o, err
 	}
-	hit, err = a.hit(target, x, y)
-	return x, y, hit, o, err
-}
-
-// rawPoint prepares an untargeted pointer action at screen point (x, y): only the session check, and only when the
-// agent answers (the console path must keep working on the sign-in screen).
-func (a *action) rawPoint() error {
-	if a.answered() {
-		return a.checkSession(false)
-	}
-	return nil
+	return x, y, hit, o, checkIntegrity(a.ws, hit)
 }
 
 // inputTarget runs steps 1 to 6 for keyboard input to the window sel selects: the input goes to the window of its
@@ -391,7 +426,11 @@ func (a *action) typeKeys(text string, target proto.WindowInfo) (applied, total 
 			return 0, total, te
 		}
 		applied = appliedChars(text, injectedEvents(err))
-		return applied, total, refuse(codePartialInput, "call vm_observe with controls: true to see what arrived; do not retype blindly", map[string]any{"applied_chars": applied, "total_chars": total}, "typing stopped after %d of %d characters: %v", applied, total, err)
+		fields := map[string]any{"applied_chars": applied, "total_chars": total}
+		if applied == 0 {
+			return 0, total, refuse(codeFailed, "call vm_observe with controls: true to confirm the focused control, then retry", fields, "nothing was typed: %v", err)
+		}
+		return applied, total, refuse(codePartialInput, "call vm_observe with controls: true to see what arrived; do not retype blindly", fields, "typing stopped after %d of %d characters: %v", applied, total, err)
 	}
 	return total, total, nil
 }
@@ -426,24 +465,26 @@ func appliedChars(text string, events int) int {
 	return n
 }
 
-// controlAction performs action on node of observation o through the agent with a hard timeout, mapping the agent's
-// errors to stale_element, unsupported_pattern and target_not_responding.
-func (a *action) controlAction(o *observation, node proto.ControlInfo, action, value string) (proto.ControlActionResult, error) {
+// controlAction performs action on node (of observation o, in window w) through the agent with a hard timeout, mapping
+// the agent's errors to stale_element, unsupported_pattern and target_not_responding (the agent's own UI Automation
+// timeout included).
+func (a *action) controlAction(o *observation, w proto.WindowInfo, node proto.ControlInfo, action, value string) (proto.ControlActionResult, error) {
 	var r proto.ControlActionResult
 	ctx, cancel := context.WithTimeout(a.ctx, controlActionTimeout)
 	defer cancel()
 	pid := node.PID
 	if pid == 0 {
-		pid = o.Window.PID
+		pid = w.PID
 	}
-	_, err := a.d.call(ctx, a.vm, proto.OpControlAction, proto.ControlActionArgs{Handle: o.Window.Handle, PID: pid, RuntimeID: node.RuntimeID, Action: action, Value: value}, nil, &r)
+	_, err := a.d.call(ctx, a.vm, proto.OpControlAction, proto.ControlActionArgs{Handle: w.Handle, PID: pid, RuntimeID: node.RuntimeID, Action: action, Value: value}, nil, &r)
 	if err == nil {
 		return r, nil
 	}
 	msg := err.Error()
 	switch {
-	case errors.Is(err, context.DeadlineExceeded) || (ctx.Err() != nil && a.ctx.Err() == nil):
-		return r, refuse(codeTargetNotResponding, "call vm_observe on the window to see whether it answers; close it with vm_key alt+f4 or vm_exec if it hangs", nil, "window %s did not perform %s within %v", describe(*o.Window), action, controlActionTimeout)
+	case errors.Is(err, context.DeadlineExceeded) || (ctx.Err() != nil && a.ctx.Err() == nil) ||
+		strings.Contains(msg, "UI Automation interrupted") || strings.Contains(msg, "timed out"):
+		return r, refuse(codeTargetNotResponding, "call vm_observe on the window to see whether it answers; close it with vm_key alt+f4 or vm_exec if it hangs", nil, "window %s did not perform %s within %v", describe(w), action, controlActionTimeout)
 	case strings.HasPrefix(msg, "element not found"):
 		return r, refuse(codeStaleElement, "call vm_observe with controls: true and use an index from its tree", nil, "control [%d] %s %q of observation %s no longer exists: %v", node.Index, proto.ControlTypeName(node.ControlType), node.Name, o.ID, err)
 	case strings.HasPrefix(msg, "unsupported pattern"):

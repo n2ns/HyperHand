@@ -49,18 +49,22 @@ func (b *observeBackend) Dial(_ context.Context, _ string) (net.Conn, error) {
 			if _, err := proto.ReadFrame(guest, &req); err != nil {
 				return
 			}
-			b.ops = append(b.ops, req)
 			var result any
 			var err error
 			switch req.Op {
+			case proto.OpPing: // the client's protocol check on a new connection
+				result = proto.PingResult{Version: "test", Protocol: proto.Protocol}
 			case proto.OpListWindows:
+				b.ops = append(b.ops, req)
 				result = b.windows()
 			case proto.OpListControls:
+				b.ops = append(b.ops, req)
 				var args proto.ControlsArgs
 				if err = json.Unmarshal(req.Args, &args); err == nil {
 					result, err = b.controls(args)
 				}
 			default:
+				b.ops = append(b.ops, req)
 				err = fmt.Errorf("unexpected guest op %q", req.Op)
 			}
 			response := proto.Response{}

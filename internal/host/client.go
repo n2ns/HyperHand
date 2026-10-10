@@ -19,9 +19,13 @@ import (
 // connection it probes it and redials if it is dead (e.g. after the agent restarted). If the request could not be sent
 // it reconnects and sends it once more; a request that was sent is never resent, so a command cannot run twice.
 type Client struct {
-	dial func(context.Context) (net.Conn, error)
-	gate chan struct{} // serializes calls and Close; waiting calls can be canceled
-	conn net.Conn
+	dial     func(context.Context) (net.Conn, error)
+	gate     chan struct{} // serializes calls and Close; waiting calls can be canceled
+	conn     net.Conn
+	verified bool // conn's agent answered a ping with a protocol this host accepts (checked once per connection)
+	// CheckProtocol makes every new connection ping the agent first and refuse an older protocol with agent_outdated
+	// (Manager sets it; unit tests of the client itself leave it off).
+	CheckProtocol bool
 }
 
 func NewClient(dial func(context.Context) (net.Conn, error)) *Client {
@@ -107,6 +111,33 @@ func (c *Client) callIO(ctx context.Context, op string, args any, src io.Reader,
 			if err != nil {
 				c.conn = nil
 				return 0, fmt.Errorf("connect to agent: %w", err)
+			}
+			c.verified = false
+		}
+		// Every new connection is checked once: an agent speaking an older protocol is refused with agent_outdated
+		// for every op but ping, so that vm_status and vm_update_agent can still report and replace it.
+		if c.CheckProtocol && !c.verified && op != proto.OpPing {
+			var p proto.PingResult
+			var resp proto.Response
+			if _, _, err = c.roundtrip(ctx, &proto.Request{Op: proto.OpPing}, nil, 0, io.Discard, &resp); err == nil {
+				if resp.Error != "" {
+					err = errors.New(resp.Error)
+				} else if err = json.Unmarshal(resp.Result, &p); err == nil {
+					if perr := checkProtocol(p); perr != nil {
+						return 0, perr
+					}
+					c.verified = true
+				}
+			}
+			if err != nil {
+				if c.conn != nil {
+					c.conn.Close()
+					c.conn = nil
+				}
+				if ctx.Err() != nil {
+					return 0, ctx.Err()
+				}
+				continue
 			}
 		}
 		var resp proto.Response
@@ -202,6 +233,7 @@ func (m *Manager) Client(vm string) (*Client, error) {
 	if c == nil {
 		id := v.ID
 		c = NewClient(func(ctx context.Context) (net.Conn, error) { return b.Dial(ctx, id) })
+		c.CheckProtocol = true
 		m.clients[v.ID] = c
 	}
 	return c, nil

@@ -49,8 +49,9 @@ type ControlsResult struct {
 
 // ControlActions are the Action values control_action accepts (case-insensitive). SetValue uses ValuePattern and
 // takes Value; the others take no value. Invoke: InvokePattern; Toggle: TogglePattern; Expand/Collapse:
-// ExpandCollapsePattern; Select: SelectionItemPattern; ScrollIntoView: ScrollItemPattern.
-var ControlActions = []string{"SetValue", "Invoke", "Toggle", "Expand", "Collapse", "Select", "ScrollIntoView"}
+// ExpandCollapsePattern; Select: SelectionItemPattern; ScrollIntoView: ScrollItemPattern. Locate performs nothing:
+// it re-finds the element and returns its current Rect and value, so the host can act on fresh coordinates.
+var ControlActions = []string{"SetValue", "Invoke", "Toggle", "Expand", "Collapse", "Select", "ScrollIntoView", "Locate"}
 
 // ControlActionArgs: the element RuntimeID inside the top-level window Handle of process PID. The agent re-finds the
 // element by runtime ID; a missing element is the error "element not found" (host code stale_element); an action the
@@ -63,9 +64,11 @@ type ControlActionArgs struct {
 	Value     string `json:"value,omitempty"`
 }
 
-// ControlActionResult: after the action, Value/HasValue re-read the element's ValuePattern (when supported); for
-// SetValue, Verified says whether the read-back equals the requested value (nil when it could not be read).
+// ControlActionResult: after the action, Rect is the element's current bounding rectangle (physical screen pixels)
+// and Value/HasValue re-read its ValuePattern (when supported); for SetValue, Verified says whether the read-back
+// equals the requested value (nil when it could not be read).
 type ControlActionResult struct {
+	Rect     *Rect  `json:"rect,omitempty"`
 	Value    string `json:"value,omitempty"`
 	HasValue bool   `json:"has_value,omitempty"`
 	Verified *bool  `json:"verified,omitempty"`

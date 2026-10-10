@@ -19,15 +19,16 @@ import (
 // fakeInput is the Hyper-V side of an action test: it records every input event as one line.
 type fakeInput struct {
 	Backend
-	mu   sync.Mutex
-	log  []string
-	fail error // returned by every input op when set
+	mu     sync.Mutex
+	log    []string
+	fail   error  // returned by every input op when set
+	failOn string // when set, the input op whose line equals it fails with fail (others succeed)
 }
 
 func (b *fakeInput) record(s string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.fail != nil {
+	if b.fail != nil && (b.failOn == "" || b.failOn == s) {
 		return b.fail
 	}
 	b.log = append(b.log, s)
@@ -109,7 +110,7 @@ func (td *testDeps) call(t *testing.T, name string, args map[string]any) (*mcp.C
 // put stores an observation of w (nil: the whole screen) scaled by scale, with nodes as its control tree, and
 // returns its ID. The crop is w's rect (the screen for nil).
 func (td *testDeps) put(w *proto.WindowInfo, scale float64, nodes []proto.ControlInfo) string {
-	o := &observation{VM: "A", Window: w, Scale: scale, HasImage: true, Nodes: nodes, Crop: screenshotRegion{Width: 1920, Height: 1080}}
+	o := &observation{VM: "A", Window: w, TreeWindow: w, Scale: scale, HasImage: true, Nodes: nodes, Crop: screenshotRegion{Width: 1920, Height: 1080}}
 	if w != nil {
 		o.Crop = screenshotRegion{X: int(w.Rect.Left), Y: int(w.Rect.Top), Width: int(w.Rect.Right - w.Rect.Left), Height: int(w.Rect.Bottom - w.Rect.Top)}
 	}
@@ -310,10 +311,21 @@ func TestSessionUnusable(t *testing.T) {
 	if r, m := td.call(t, "vm_click", map[string]any{"observation_id": id, "x": 1, "y": 1}); !r.IsError || m["error"] != codeSessionUnusable || m["next"] != "call vm_unlock" || td.b.events() != "" {
 		t.Errorf("locked: %v", m)
 	}
-	// Raw screen input is checked too while the agent answers.
+	// Raw screen input is never checked: it is how the sign-in screen is operated while the agent answers from the
+	// locked session.
 	td = newTestDeps(t, session(proto.SessionStateResult{Locked: true, Console: true}))
-	if r, m := td.call(t, "vm_key", map[string]any{"keys": "enter"}); !r.IsError || m["error"] != codeSessionUnusable || td.b.events() != "" {
-		t.Errorf("raw key, locked: %v", m)
+	if r, m := td.call(t, "vm_key", map[string]any{"keys": "enter"}); r.IsError || td.b.events() != "press enter" {
+		t.Errorf("raw key, locked: %v %q", m, td.b.events())
+	}
+	if r, m := td.call(t, "vm_click", map[string]any{"x": 5, "y": 6, "observe_after": "none"}); r.IsError || td.b.events() != "press enter,click 5,6 b1 c1 []" {
+		t.Errorf("raw click, locked: %v %q", m, td.b.events())
+	}
+	// Untargeted ASCII text goes through the Hyper-V keyboard while the session is locked; other text needs vm_unlock.
+	if r, m := td.call(t, "vm_type", map[string]any{"text": "pass1"}); r.IsError || td.b.events() != "press enter,click 5,6 b1 c1 [],type pass1" {
+		t.Errorf("raw type, locked: %v %q", m, td.b.events())
+	}
+	if r, m := td.call(t, "vm_type", map[string]any{"text": "密码"}); !r.IsError || m["error"] != codeSessionUnusable {
+		t.Errorf("raw non-ASCII type, locked: %v", m)
 	}
 	// A UAC prompt holds the secure desktop: raw input may answer it, targeted input may not.
 	td = newTestDeps(t, session(proto.SessionStateResult{Console: true, SecureDesktop: true, Consent: true}))
@@ -509,7 +521,7 @@ func TestObserveAfter(t *testing.T) {
 		return nil, nil, errors.New("screenshot failed")
 	}
 	id = td.put(options(), 1, nil)
-	if r, m := td.call(t, "vm_click", map[string]any{"observation_id": id, "x": 1, "y": 1, "settle_ms": 1}); r.IsError || m["ok"] != true || m["after_error"] != "failed: screenshot failed" || td.b.events() == "" {
+	if r, m := td.call(t, "vm_click", map[string]any{"observation_id": id, "x": 1, "y": 1, "settle_ms": 1}); r.IsError || m["ok"] != true || !strings.HasPrefix(m["after_error"].(string), "failed: screenshot failed") || td.b.events() == "" {
 		t.Errorf("observe failure: %v", m)
 	}
 }
@@ -620,10 +632,92 @@ func TestKeyPartialSequence(t *testing.T) {
 	if r.IsError || m["ok"] != true || m["combinations"] != float64(2) || m["window"].(map[string]any)["handle"] != float64(10) || td.b.events() != "press ctrl+a,press x" {
 		t.Fatalf("sequence: %v %q", m, td.b.events())
 	}
-	// The Hyper-V keyboard fails on the second combination.
+	// The Hyper-V keyboard fails on the first combination: nothing was sent, so the error is the plain failure.
 	td = newTestDeps(t, newAgent(10))
 	td.b.fail = errors.New("WMI: device busy")
-	if r, m := td.call(t, "vm_key", map[string]any{"keys": "enter"}); !r.IsError || m["error"] != codePartialInput || m["applied"] != float64(0) || m["total"] != float64(1) {
+	if r, m := td.call(t, "vm_key", map[string]any{"keys": "enter"}); !r.IsError || m["error"] != codeFailed || m["applied"] != nil {
 		t.Errorf("first fails: %v", m)
+	}
+	// It fails on the second combination: partial_input with what was sent.
+	td = newTestDeps(t, newAgent(10))
+	td.b.fail, td.b.failOn = errors.New("WMI: device busy"), "press x"
+	if r, m := td.call(t, "vm_key", map[string]any{"handle": 10, "sequence": []string{"ctrl+a", "x", "enter"}}); !r.IsError || m["error"] != codePartialInput || m["applied"] != float64(1) || m["total"] != float64(3) || td.b.events() != "press ctrl+a" {
+		t.Errorf("second fails: %v %q", m, td.b.events())
+	}
+}
+
+// screenObservation stores a whole-screen observation whose control tree (nodes) belongs to tree, as vm_observe does
+// for controls: true without a handle.
+func (td *testDeps) screenObservation(tree *proto.WindowInfo, nodes []proto.ControlInfo) string {
+	o := &observation{VM: "A", Scale: 1, HasImage: true, Nodes: nodes, TreeWindow: tree, Crop: screenshotRegion{Width: 1920, Height: 1080}, OutputWidth: 1920, OutputHgt: 1080}
+	td.obs.put(o)
+	return o.ID
+}
+
+func TestScreenObservationWithControls(t *testing.T) {
+	// Clicking by coordinates on a whole-screen observation has no window checks, even when its tree belongs to the
+	// foreground window: another window on the screenshot is simply clicked.
+	f := controlAgent(proto.ControlActionResult{Rect: &proto.Rect{Left: 300, Top: 200, Right: 400, Bottom: 240}}, nil)
+	f.results[proto.OpWindowAt] = proto.HandleResult{Handle: 30}
+	td := newTestDeps(t, f)
+	id := td.screenObservation(options(), controlNodes())
+	if r, m := td.call(t, "vm_click", map[string]any{"observation_id": id, "x": 700, "y": 700, "observe_after": "none"}); r.IsError || td.b.events() != "click 700,700 b1 c1 []" || m["window"] != nil || slices.Contains(td.f.ops, proto.OpWindowAt) {
+		t.Errorf("screen click: %v %q", m, td.b.events())
+	}
+	// By index the tree's window is the target: it is checked, the control re-located (Locate), and the click lands on
+	// the control's current rectangle, not the one of the observation.
+	f = controlAgent(proto.ControlActionResult{Rect: &proto.Rect{Left: 300, Top: 200, Right: 400, Bottom: 240}}, nil)
+	td = newTestDeps(t, f)
+	id = td.screenObservation(options(), controlNodes())
+	r, m := td.call(t, "vm_click", map[string]any{"observation_id": id, "index": 1, "observe_after": "none"})
+	if r.IsError || td.b.events() != "click 350,220 b1 c1 []" || m["window"].(map[string]any)["handle"] != float64(10) {
+		t.Errorf("index click: %v %q", m, td.b.events())
+	}
+	if i := slices.Index(f.ops, proto.OpControlAction); i < 0 || f.args[i].(proto.ControlActionArgs) != (proto.ControlActionArgs{Handle: 10, PID: 100, RuntimeID: "42.7", Action: "Locate"}) {
+		t.Errorf("locate args: %v", f.args)
+	}
+	// A control that vanished since the observation is stale_element, nothing is clicked.
+	td = newTestDeps(t, controlAgent(proto.ControlActionResult{}, errors.New("element not found: runtime id 42.7")))
+	id = td.screenObservation(options(), controlNodes())
+	if r, m := td.call(t, "vm_click", map[string]any{"observation_id": id, "index": 1}); !r.IsError || m["error"] != codeStaleElement || td.b.events() != "" {
+		t.Errorf("vanished: %v", m)
+	}
+	// Control actions work on a whole-screen observation through its tree window.
+	td = newTestDeps(t, controlAgent(proto.ControlActionResult{Value: "v", HasValue: true}, nil))
+	id = td.screenObservation(options(), controlNodes())
+	if r, m := td.call(t, "vm_invoke", map[string]any{"observation_id": id, "index": 1, "action": "invoke", "observe_after": "none"}); r.IsError || m["value"] != "v" || m["window"].(map[string]any)["handle"] != float64(10) {
+		t.Errorf("invoke on screen observation: %v", m)
+	}
+	// The agent's own UI Automation timeout is target_not_responding, not agent_required.
+	td = newTestDeps(t, controlAgent(proto.ControlActionResult{}, errors.New("UI Automation interrupted: context deadline exceeded")))
+	id = td.screenObservation(options(), controlNodes())
+	if r, m := td.call(t, "vm_set_value", map[string]any{"observation_id": id, "index": 1, "value": "x"}); !r.IsError || m["error"] != codeTargetNotResponding {
+		t.Errorf("agent UIA timeout: %v", m)
+	}
+}
+
+func TestTypeByIndexReadsBack(t *testing.T) {
+	f := controlAgent(proto.ControlActionResult{Value: "LINE", HasValue: true}, nil)
+	f.results[proto.OpTypeKeys] = proto.TypeKeysResult{Events: 10}
+	td := newTestDeps(t, f)
+	id := td.put(options(), 1, controlNodes())
+	r, m := td.call(t, "vm_type", map[string]any{"text": "LINE\n", "observation_id": id, "index": 1})
+	if r.IsError || m["verified"] != true || m["value"] != "LINE" || m["applied_chars"] != float64(5) {
+		t.Errorf("verified: %v", m)
+	}
+	// The application dropped the text: verified is false and the value tells what is there.
+	f = controlAgent(proto.ControlActionResult{Value: "", HasValue: true}, nil)
+	f.results[proto.OpTypeKeys] = proto.TypeKeysResult{Events: 8}
+	td = newTestDeps(t, f)
+	id = td.put(options(), 1, controlNodes())
+	if r, m := td.call(t, "vm_type", map[string]any{"text": "LINE", "observation_id": id, "index": 1}); r.IsError || m["verified"] != false || m["value"] != "" {
+		t.Errorf("dropped: %v", m)
+	}
+	// Nothing typed at all is a plain failure, not partial_input.
+	f = newAgent(10)
+	f.errs = map[string]error{proto.OpTypeKeys: errors.New("keyboard input stopped after 0 injected events; text may be partial: key 0x10 is already held")}
+	td = newTestDeps(t, f)
+	if r, m := td.call(t, "vm_type", map[string]any{"text": "abc", "handle": 10}); !r.IsError || m["error"] != codeFailed || m["applied_chars"] != float64(0) {
+		t.Errorf("nothing typed: %v", m)
 	}
 }

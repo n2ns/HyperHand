@@ -236,7 +236,7 @@ func (a *action) out(fields map[string]any, hit proto.WindowInfo, o *observation
 // without one.
 func (a *action) point(id string, u, v int, activate bool) (x, y int, hit proto.WindowInfo, o *observation, err error) {
 	if id == "" {
-		return u, v, hit, nil, a.rawPoint()
+		return u, v, hit, nil, nil // raw screen pixels: no checks, so that the sign-in screen and UAC prompts stay reachable
 	}
 	return a.pointTarget(id, u, v, nil, activate)
 }
@@ -245,13 +245,10 @@ func (a *action) point(id string, u, v int, activate bool) (x, y int, hit proto.
 // point without id) and performs it.
 func (a *action) click(id string, u, v int, index *int, activate bool, button, count int, modifiers []string) (hit proto.WindowInfo, o *observation, err error) {
 	x, y := u, v
-	if id == "" {
-		err = a.rawPoint()
-	} else {
-		x, y, hit, o, err = a.pointTarget(id, u, v, index, activate)
-	}
-	if err != nil {
-		return
+	if id != "" {
+		if x, y, hit, o, err = a.pointTarget(id, u, v, index, activate); err != nil {
+			return
+		}
 	}
 	return hit, o, a.d.raw.Click(a.vm, x, y, button, count, modifiers)
 }
@@ -272,14 +269,18 @@ func (a *action) control(id string, index int, action, value string, activate bo
 	if err != nil {
 		return nil, err
 	}
-	if o.Window == nil {
-		return nil, refuse(codeInvalidArgument, "call vm_observe with handle and controls: true and use its observation_id", nil, "observation %s is of the whole screen; control actions need a window observation", o.ID)
-	}
-	target, err := a.windowTarget(*o.Window, activate)
+	window, err := a.treeTarget(o)
 	if err != nil {
 		return nil, err
 	}
-	r, err := a.controlAction(o, node, action, value)
+	target, err := a.windowTarget(window, activate)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkIntegrity(a.ws, target); err != nil {
+		return nil, err
+	}
+	r, err := a.controlAction(o, target, node, action, value)
 	if err != nil {
 		return nil, err
 	}
@@ -295,37 +296,45 @@ func (a *action) control(id string, index int, action, value string, activate bo
 func (a *action) typeText(in typeTextIn) (*actionOut, error) {
 	var target proto.WindowInfo
 	var o *observation
+	var node *proto.ControlInfo
 	switch {
 	case in.Index != nil:
 		var err error
 		if target, o, err = a.click(in.ObservationID, 0, 0, in.Index, on(in.Activate), 1, 1, nil); err != nil {
 			return nil, err
 		}
-		if target.Handle == 0 {
-			return nil, refuse(codeInvalidArgument, "call vm_observe with handle and controls: true and use its observation_id", nil, "observation %s is of the whole screen; typing by index needs a window observation", o.ID)
-		}
+		n, _ := o.node(*in.Index) // validated by the click
+		node = &n
 	case in.Handle != 0 || in.PID != 0:
 		var err error
 		if _, target, err = a.inputTarget(windowSelector{Handle: in.Handle, PID: in.PID}, on(in.Activate)); err != nil {
 			return nil, err
 		}
-	case a.answered():
-		if err := a.checkSession(false); err != nil {
-			return nil, err
-		}
-		var err error
-		if _, target, err = inputWindow(a.ws.Windows, windowSelector{}); err != nil {
-			return nil, err
-		}
-		if err := checkIntegrity(a.ws, target); err != nil {
-			return nil, err
-		}
 	default:
-		// No agent: the Hyper-V keyboard types ASCII into whatever has the focus.
+		offline, err := a.offline()
+		if err != nil {
+			return nil, err
+		}
+		if !offline && a.checkSession(false) == nil {
+			// Untargeted text goes to whatever has the focus in the agent's session.
+			if _, target, err = inputWindow(a.ws.Windows, windowSelector{}); err != nil {
+				return nil, err
+			}
+			if err := checkIntegrity(a.ws, target); err != nil {
+				return nil, err
+			}
+			break
+		}
+		// No agent, or its session cannot receive injected input (locked, sign-in screen, UAC prompt): the Hyper-V
+		// keyboard types ASCII into whatever has the focus on the console.
 		for _, r := range in.Text {
-			if r >= 128 {
+			if r < 128 {
+				continue
+			}
+			if offline {
 				return nil, refuse(codeAgentRequired, "call vm_status; install the agent with vm_install_agent, or type ASCII text", nil, "the Hyper-V keyboard cannot type %q and the guest agent did not answer", r)
 			}
+			return nil, refuse(codeSessionUnusable, "call vm_unlock, or type ASCII text", map[string]any{"session": a.ws.Session}, "the Hyper-V keyboard cannot type %q and the agent's session cannot receive injected input", r)
 		}
 		if err := a.d.raw.TypeText(a.vm, in.Text); err != nil {
 			return nil, err
@@ -337,7 +346,16 @@ func (a *action) typeText(in typeTextIn) (*actionOut, error) {
 	if err != nil {
 		return nil, err
 	}
-	return a.out(map[string]any{"applied_chars": applied, "total_chars": total}, target, o), nil
+	fields := map[string]any{"applied_chars": applied, "total_chars": total}
+	if node != nil {
+		// Read the control back: a value without the typed text means the application dropped it (design 4.3, step 8).
+		fields["verified"], fields["value"] = nil, nil
+		if r, err := a.controlAction(o, target, *node, "Locate", ""); err == nil && r.HasValue {
+			typed := strings.TrimRight(strings.ReplaceAll(in.Text, "\r\n", "\n"), "\n\t")
+			fields["verified"], fields["value"] = strings.Contains(r.Value, typed), r.Value
+		}
+	}
+	return a.out(fields, target, o), nil
 }
 
 // pressKeys implements vm_key: each combination goes through the Hyper-V keyboard; with a selector the window list is
@@ -345,12 +363,11 @@ func (a *action) typeText(in typeTextIn) (*actionOut, error) {
 func (a *action) pressKeys(combos []string, sel windowSelector, activate bool) (*actionOut, error) {
 	var target proto.WindowInfo
 	targeted := sel != (windowSelector{})
-	if !targeted && a.answered() {
-		if err := a.checkSession(false); err != nil {
-			return nil, err
-		}
-	}
+	// A failure before any combination was sent is the underlying error; after some were sent it is partial_input.
 	partial := func(i int, err error) error {
+		if i == 0 {
+			return err
+		}
 		return refuse(codePartialInput, "call vm_observe to see the state before sending the rest", map[string]any{"applied": i, "total": len(combos)}, "stopped after %d of %d combinations: %v", i, len(combos), asToolError(err).Error())
 	}
 	for i, keys := range combos {
@@ -366,9 +383,6 @@ func (a *action) pressKeys(combos []string, sel windowSelector, activate bool) (
 				root, target, err = inputWindow(a.ws.Windows, sel)
 			}
 			if err != nil {
-				if i == 0 {
-					return nil, err
-				}
 				return nil, partial(i, err)
 			}
 			sel = windowSelector{Handle: root.Handle, PID: root.PID} // pinned: later combinations go to this group only

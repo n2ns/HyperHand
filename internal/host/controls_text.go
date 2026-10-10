@@ -73,9 +73,10 @@ func controlKeys(nodes []proto.ControlInfo) []string {
 	return keys
 }
 
-// controlChanged reports whether the facts an agent acts on differ between two snapshots of one element.
+// controlChanged reports whether the facts an agent acts on differ between two snapshots of one element, including
+// its index: the caller must learn the new index before acting on the element in the new observation.
 func controlChanged(a, b proto.ControlInfo) bool {
-	return a.Name != b.Name || a.Rect != b.Rect || a.Enabled != b.Enabled || a.Offscreen != b.Offscreen ||
+	return a.Index != b.Index || a.Name != b.Name || a.Rect != b.Rect || a.Enabled != b.Enabled || a.Offscreen != b.Offscreen ||
 		a.HasValue != b.HasValue || a.Value != b.Value || a.Focused != b.Focused
 }
 

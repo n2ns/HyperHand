@@ -79,10 +79,11 @@ func TestDiffControlsFallbackPath(t *testing.T) {
 	}
 	cur[3].Enabled = false // OK, now at index 3
 	d := diffControls(old, cur)
+	// Every node after the insertion changed index, which the caller must learn before acting on it.
 	want := &controlsDiff{
 		Added:   []string{`  [1] ToolBar "Ribbon" (0,0 0x0)`},
 		Removed: []int{},
-		Changed: []string{`  [3] Button "OK" (10,10 40x20) disabled`},
+		Changed: []string{`  [2] Edit "" id=cmdline (0,380 500x20) value=""`, `  [3] Button "OK" (10,10 40x20) disabled`, `  [4] Button "Cancel" (60,10 40x20)`},
 	}
 	if !reflect.DeepEqual(d, want) {
 		t.Errorf("diff = %+v, want %+v", d, want)
