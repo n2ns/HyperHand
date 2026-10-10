@@ -54,45 +54,46 @@ func TestInGroup(t *testing.T) {
 	}
 }
 
-func TestClickTargetGroupForeground(t *testing.T) {
-	// The command line is foreground: clicks in the main window are allowed.
+func TestCheckUsableGroupForeground(t *testing.T) {
+	// The command line is foreground: the main window is usable.
 	ws := groupWindows(21)
-	if x, y, err := clickTarget(ws, ws[2], 500, 500); err != nil || x != 500 || y != 500 {
-		t.Errorf("group foreground: %d %d %v", x, y, err)
+	if err := checkUsable(ws, ws[2]); err != nil {
+		t.Errorf("group foreground: %v", err)
 	}
-	// Another process's window is foreground: refused, naming it and the next step.
+	// Another process's window is foreground: refused, naming it.
 	ws = groupWindows(50)
-	_, _, err := clickTarget(ws, ws[2], 500, 500)
-	if err == nil || !strings.Contains(err.Error(), "LMU.exe") || !strings.Contains(err.Error(), "vm_focus_window with handle 20") {
+	err := checkUsable(ws, ws[2])
+	if code(err) != codeActivateFailed || field(err, "foreground").(*windowRef).Process != "LMU.exe" {
 		t.Errorf("other foreground: %v", err)
 	}
 	// A same-process window that the main window does not own does not count either.
 	ws = groupWindows(25)
-	if _, _, err := clickTarget(ws, ws[2], 500, 500); err == nil {
+	if err := checkUsable(ws, ws[2]); err == nil {
 		t.Error("unowned same-process foreground accepted")
 	}
 }
 
 func TestDisabledTarget(t *testing.T) {
-	ctx := context.Background()
 	main := windowSelector{Handle: 20, PID: 100}
+	actOn := func(err error) uint64 {
+		h, _ := field(err, "act_on").(uint64)
+		return h
+	}
 	// AutoCAD's licensing dialog (another process, unowned) disables the main window: click and input name it as the
 	// window to act on, not the disabled main window.
 	ws := groupWindows(50)
 	ws[2].Enabled = false
-	_, _, err := clickTarget(ws, ws[2], 1, 1)
-	if err == nil || !strings.Contains(err.Error(), "probably blocks it; act on handle 50 first") {
+	err := checkUsable(ws, ws[2])
+	if code(err) != codeTargetDisabled || actOn(err) != 50 || !strings.Contains(asToolError(err).Reason, "probably blocks it") {
 		t.Errorf("click, other process: %v", err)
 	}
-	f := groupAgent(50, 0)
-	f.results[proto.OpListWindows] = proto.WindowsResult{Windows: ws}
-	if _, _, err := inputWindow(ctx, f.call, "", main); err == nil || !strings.Contains(err.Error(), "act on handle 50 first") {
+	if _, _, err := inputWindow(ws, main); code(err) != codeTargetDisabled || actOn(err) != 50 {
 		t.Errorf("input, other process: %v", err)
 	}
 	// As observed live: the disabled main window also disables its command line, which list_windows then reports as
 	// modal (its owner is disabled). That is not a dialog; the other process's window is still the one to act on.
 	ws[1].Enabled, ws[1].Modal = false, true
-	if _, _, err := clickTarget(ws, ws[2], 1, 1); err == nil || !strings.Contains(err.Error(), "act on handle 50 first") {
+	if err := checkUsable(ws, ws[2]); actOn(err) != 50 {
 		t.Errorf("click, disabled command line: %v", err)
 	}
 	// Its own modal dialog in the foreground: named, and input is refused rather than sent to the dialog.
@@ -100,29 +101,29 @@ func TestDisabledTarget(t *testing.T) {
 	for i := range ws {
 		ws[i].Foreground = ws[i].Handle == 30
 	}
-	if _, _, err := clickTarget(ws, ws[2], 1, 1); err == nil || !strings.Contains(err.Error(), "probably a modal dialog; act on handle 30 first") {
+	err = checkUsable(ws, ws[2])
+	if actOn(err) != 30 || !strings.Contains(asToolError(err).Reason, "probably a modal dialog") {
 		t.Errorf("click, own dialog: %v", err)
 	}
 	// As observed live: with the Options dialog open, the history popup is enabled and flagged modal (its owner, the
 	// command line, is disabled). Only the foreground dialog is named.
 	ws[0].Modal = true
-	if _, _, err := clickTarget(ws, ws[2], 1, 1); err == nil || strings.Contains(err.Error(), "handle 22") {
+	if err := checkUsable(ws, ws[2]); actOn(err) != 30 {
 		t.Errorf("click, own dialog with flagged popup: %v", err)
 	}
 	// Nested dialogs: the inner one in the foreground is named, not the disabled outer one.
 	ws[len(ws)-1].Enabled, ws[len(ws)-1].Foreground = false, false
 	ws = append(ws, proto.WindowInfo{Handle: 31, PID: 100, Title: "Inner", Process: "acad.exe", Owner: 30, Modal: true, Enabled: true, Foreground: true})
-	if _, _, err := clickTarget(ws, ws[2], 1, 1); err == nil || !strings.Contains(err.Error(), "act on handle 31 first") {
+	if err := checkUsable(ws, ws[2]); actOn(err) != 31 {
 		t.Errorf("click, nested dialogs: %v", err)
 	}
 	ws = ws[:len(ws)-1]
 	ws[len(ws)-1].Enabled, ws[len(ws)-1].Foreground = true, true
-	f.results[proto.OpListWindows] = proto.WindowsResult{Windows: ws}
-	if _, _, err := inputWindow(ctx, f.call, "", main); err == nil || !strings.Contains(err.Error(), "handle 30") {
+	if _, _, err := inputWindow(ws, main); actOn(err) != 30 {
 		t.Errorf("input, own dialog: %v", err)
 	}
 	// The dialog itself, selected by its handle, takes input.
-	if _, target, err := inputWindow(ctx, f.call, "", windowSelector{Handle: 30, PID: 100}); err != nil || target.Handle != 30 {
+	if _, target, err := inputWindow(ws, windowSelector{Handle: 30, PID: 100}); err != nil || target.Handle != 30 {
 		t.Errorf("input to dialog: %+v %v", target, err)
 	}
 }
@@ -150,51 +151,46 @@ func TestCheckHitGroup(t *testing.T) {
 		}
 	}
 	for _, h := range []uint64{24, 25, 50} {
-		if _, err := checkHit(ws, main, 900, 997, proto.HandleResult{Handle: h}); err == nil || !strings.Contains(err.Error(), "covered by window") {
+		if _, err := checkHit(ws, main, 900, 997, proto.HandleResult{Handle: h}); code(err) != codeCovered {
 			t.Errorf("foreign window %d: %v", h, err)
 		}
 	}
 	// A window list_windows does not show is described from window_at.
 	_, err := checkHit(ws, main, 900, 997, proto.HandleResult{Handle: 131160, Class: "Shell_LightDismissOverlay", PID: 5488, Process: "explorer.exe"})
-	if err == nil || !strings.Contains(err.Error(), "class Shell_LightDismissOverlay, explorer.exe") || !strings.Contains(err.Error(), "dismiss or close it") {
-		t.Errorf("unlisted overlay: %v", err)
-	}
-	// Older agents only give the handle.
-	if _, err := checkHit(ws, main, 900, 997, proto.HandleResult{Handle: 131160}); err == nil || !strings.Contains(err.Error(), "covered by window handle 131160") {
-		t.Errorf("old agent: %v", err)
+	w, _ := field(err, "window").(map[string]any)
+	if code(err) != codeCovered || w["class"] != "Shell_LightDismissOverlay" || w["process"] != "explorer.exe" || !strings.Contains(asToolError(err).Next, "dismiss it") {
+		t.Errorf("unlisted overlay: %v %v", err, w)
 	}
 }
 
 func groupAgent(fg, at uint64) *fakeCall {
 	return &fakeCall{results: map[string]any{
-		proto.OpListWindows: proto.WindowsResult{Windows: groupWindows(fg)},
+		proto.OpListWindows: proto.WindowsResult{Windows: groupWindows(fg), Foreground: fg, Session: &proto.SessionStateResult{Console: true}},
 		proto.OpWindowAt:    proto.HandleResult{Handle: at},
 	}}
 }
 
-func TestClickPointGroup(t *testing.T) {
-	// Main window selector, point on the command line: allowed, and the command line is returned.
-	x, y, hit, err := clickPoint(context.Background(), groupAgent(20, 21).call, clickIn{Handle: 20, PID: 100, X: 900, Y: 997})
-	if err != nil || x != 900 || y != 997 || hit.Handle != 21 {
-		t.Fatalf("command line: %d %d %+v %v", x, y, hit, err)
+func TestClickGroup(t *testing.T) {
+	// Observation of the main window, point on the command line: allowed, and the command line is returned.
+	td := newTestDeps(t, groupAgent(20, 21))
+	main := groupWindows(20)[2]
+	id := td.put(&main, 0.5, nil)
+	_, m := td.call(t, "vm_click", map[string]any{"observation_id": id, "x": 450, "y": 498, "observe_after": "none"})
+	w, _ := m["window"].(map[string]any)
+	if td.b.events() != "click 901,997 b1 c1 []" || w["handle"] != float64(21) || w["class"] != "HwndWrapper[cmd]" || w["process"] != "acad.exe" {
+		t.Fatalf("command line: %v %q", m, td.b.events())
 	}
-	if !strings.Contains(windowLines(hit), "handle: 21\npid: 100\nclass: HwndWrapper[cmd]\nprocess: acad.exe") {
-		t.Errorf("lines: %q", windowLines(hit))
-	}
-	// A new agent describes the hit window; the listed description wins for own windows, and window_at's is used for
-	// a window list_windows does not show.
+	// The listed description wins for own windows over window_at's.
 	f := groupAgent(20, 21)
 	f.results[proto.OpWindowAt] = proto.HandleResult{Handle: 21, Class: "ignored", PID: 100, Process: "acad.exe"}
-	if _, _, hit, err := clickPoint(context.Background(), f.call, clickIn{Handle: 20, X: 900, Y: 997}); err != nil || hit.Class != "HwndWrapper[cmd]" {
-		t.Errorf("listed hit: %+v %v", hit, err)
-	}
-	f.results[proto.OpWindowAt] = proto.HandleResult{Handle: 131160, Class: "Shell_LightDismissOverlay", PID: 5488, Process: "explorer.exe"}
-	if _, _, _, err := clickPoint(context.Background(), f.call, clickIn{Handle: 20, X: 900, Y: 997}); err == nil || !strings.Contains(err.Error(), "class Shell_LightDismissOverlay, explorer.exe") {
-		t.Errorf("unlisted hit: %v", err)
+	td = newTestDeps(t, f)
+	id = td.put(&main, 1, nil)
+	if _, m := td.call(t, "vm_click", map[string]any{"observation_id": id, "x": 900, "y": 997, "observe_after": "none"}); m["window"].(map[string]any)["class"] != "HwndWrapper[cmd]" {
+		t.Errorf("listed hit: %v", m)
 	}
 }
 
-// inputMCP serves list_windows from windows(n), n counting list_windows calls, records keys and type_keys and pastes.
+// inputMCP serves list_windows from windows(n), n counting list_windows calls, and records keys and type_keys.
 func inputMCP(t *testing.T, windows func(n int32) []proto.WindowInfo) (*mcp.ClientSession, *[]string, context.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
@@ -207,17 +203,16 @@ func inputMCP(t *testing.T, windows func(n int32) []proto.WindowInfo) (*mcp.Clie
 		respond: func(_ string, req proto.Request) (any, error) {
 			switch req.Op {
 			case proto.OpListWindows:
-				return proto.WindowsResult{Windows: windows(lists.Add(1))}, nil
+				ws := windows(lists.Add(1))
+				fg, _ := foreground(ws)
+				return proto.WindowsResult{Windows: ws, Foreground: fg.Handle, Session: &proto.SessionStateResult{Console: true}}, nil
 			case proto.OpTypeKeys:
 				var a proto.TypeKeysArgs
 				if err := json.Unmarshal(req.Args, &a); err != nil {
 					return nil, err
 				}
 				record(fmt.Sprintf("type_keys %d", a.Handle))
-				return proto.TypeKeysResult{Events: 14}, nil
-			case proto.OpClipboardSet:
-				record("clipboard")
-				return nil, nil
+				return proto.TypeKeysResult{Events: 2 * len([]rune(a.Text))}, nil
 			}
 			return nil, fmt.Errorf("unexpected operation %s", req.Op)
 		},
@@ -225,12 +220,15 @@ func inputMCP(t *testing.T, windows func(n int32) []proto.WindowInfo) (*mcp.Clie
 	return connectInputMCP(t, ctx, b), &log, ctx
 }
 
-func TestKeyAndPasteGroupTarget(t *testing.T) {
+func TestKeyAndTypeGroupTarget(t *testing.T) {
 	// vm_key with the main window selector while the command line is foreground: sent, and the command line reported.
 	cs, log, ctx := inputMCP(t, func(int32) []proto.WindowInfo { return groupWindows(21) })
 	r, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "vm_key", Arguments: map[string]any{"handle": 20, "pid": 100, "sequence": []string{"a", "enter"}}})
-	if err != nil || r.IsError || !strings.HasPrefix(resultText(r), "ok\nhandle: 21\n") || strings.Join(*log, ",") != "press a,press enter" {
-		t.Errorf("vm_key: %v %v %v", r, err, *log)
+	if err != nil || r.IsError || strings.Join(*log, ",") != "press a,press enter" {
+		t.Fatalf("vm_key: %v %v %v", r, err, *log)
+	}
+	if m := resultJSON(t, r); m["combinations"] != float64(2) || m["window"].(map[string]any)["handle"] != float64(21) {
+		t.Errorf("vm_key result: %v", m)
 	}
 	// The foreground leaves the group mid-sequence: stopped before the second combination.
 	cs, log, ctx = inputMCP(t, func(n int32) []proto.WindowInfo {
@@ -240,91 +238,46 @@ func TestKeyAndPasteGroupTarget(t *testing.T) {
 		return groupWindows(21)
 	})
 	r, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "vm_key", Arguments: map[string]any{"handle": 20, "pid": 100, "sequence": []string{"a", "enter"}}})
-	if err != nil || !r.IsError || !strings.Contains(resultText(r), "after 1 combinations") || strings.Join(*log, ",") != "press a" {
-		t.Errorf("vm_key left group: %v %v %v", r, err, *log)
+	if err != nil || !r.IsError || strings.Join(*log, ",") != "press a" {
+		t.Fatalf("vm_key left group: %v %v %v", r, err, *log)
 	}
-	// Paste: rechecked after setting the clipboard, and the window foreground at the recheck is reported.
-	cs, log, ctx = inputMCP(t, func(n int32) []proto.WindowInfo {
-		if n > 1 {
-			return groupWindows(22) // the history popup came up in between
-		}
-		return groupWindows(21)
-	})
-	r, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "vm_type", Arguments: map[string]any{"handle": 20, "pid": 100, "text": "x"}})
-	if err != nil || r.IsError || !strings.HasPrefix(resultText(r), "ok\nhandle: 22\n") || strings.Join(*log, ",") != "clipboard,press ctrl+v" {
-		t.Errorf("paste: %v %v %v", r, err, *log)
+	if m := resultJSON(t, r); m["error"] != codePartialInput || m["applied"] != float64(1) || m["total"] != float64(2) {
+		t.Errorf("partial: %v", m)
 	}
-	// Paste when the group lost the foreground after the clipboard was set: no paste.
-	cs, log, ctx = inputMCP(t, func(n int32) []proto.WindowInfo {
-		if n > 1 {
-			return groupWindows(50)
-		}
-		return groupWindows(21)
-	})
-	r, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "vm_type", Arguments: map[string]any{"handle": 20, "pid": 100, "text": "x"}})
-	if err != nil || !r.IsError || strings.Join(*log, ",") != "clipboard" {
-		t.Errorf("paste after losing foreground: %v %v %v", r, err, *log)
+	// vm_type with the main window selector goes to the command line through the agent.
+	cs, log, ctx = inputMCP(t, func(int32) []proto.WindowInfo { return groupWindows(21) })
+	r, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "vm_type", Arguments: map[string]any{"handle": 20, "pid": 100, "text": "(+ 1 2)"}})
+	if err != nil || r.IsError || strings.Join(*log, ",") != "type_keys 21" {
+		t.Fatalf("type: %v %v %v", r, err, *log)
+	}
+	if m := resultJSON(t, r); m["applied_chars"] != float64(7) || m["window"].(map[string]any)["handle"] != float64(21) || m["window"].(map[string]any)["pid"] != float64(100) {
+		t.Errorf("type result: %v", m)
 	}
 }
 
 func TestInputWindowGroup(t *testing.T) {
-	ctx := context.Background()
 	main := windowSelector{Handle: 20, PID: 100}
 	// The command line is foreground: input for the main window goes to it.
-	root, target, err := inputWindow(ctx, groupAgent(21, 0).call, "", main)
+	root, target, err := inputWindow(groupWindows(21), main)
 	if err != nil || root.Handle != 20 || target.Handle != 21 {
 		t.Errorf("group: %+v %+v %v", root, target, err)
 	}
 	// The selected window itself is foreground.
-	if _, target, err := inputWindow(ctx, groupAgent(20, 0).call, "", main); err != nil || target.Handle != 20 {
+	if _, target, err := inputWindow(groupWindows(20), main); err != nil || target.Handle != 20 {
 		t.Errorf("self: %+v %v", target, err)
 	}
 	// Without a selector, the foreground window.
-	if root, target, err := inputWindow(ctx, groupAgent(50, 0).call, "", windowSelector{}); err != nil || root.Handle != 50 || target.Handle != 50 {
+	if root, target, err := inputWindow(groupWindows(50), windowSelector{}); err != nil || root.Handle != 50 || target.Handle != 50 {
 		t.Errorf("no selector: %+v %+v %v", root, target, err)
 	}
-	// Another process in the foreground: refused with the next step.
-	if _, _, err := inputWindow(ctx, groupAgent(50, 0).call, "", main); err == nil || !strings.Contains(err.Error(), "vm_focus_window") {
+	// Another process in the foreground: refused with it named.
+	if _, _, err := inputWindow(groupWindows(50), main); code(err) != codeActivateFailed {
 		t.Errorf("foreign foreground: %v", err)
 	}
-	// A minimized or disabled receiving window is refused.
-	f := groupAgent(21, 0)
+	// A disabled receiving window is refused.
 	ws := groupWindows(21)
 	ws[1].Enabled = false
-	f.results[proto.OpListWindows] = proto.WindowsResult{Windows: ws}
-	if _, _, err := inputWindow(ctx, f.call, "", main); err == nil || !strings.Contains(err.Error(), "handle 21") {
+	if _, _, err := inputWindow(ws, main); code(err) != codeTargetDisabled || field(err, "act_on") != uint64(21) {
 		t.Errorf("disabled command line: %v", err)
-	}
-}
-
-func TestTypeKeysReportsReceivingWindow(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var sent proto.TypeKeysArgs
-	b := &inputMCPBackend{windowMCPBackend: &windowMCPBackend{
-		find: func(string) (hyperv.VM, error) { return hyperv.VM{ID: "A", Name: "A"}, nil },
-		respond: func(_ string, req proto.Request) (any, error) {
-			switch req.Op {
-			case proto.OpListWindows:
-				return proto.WindowsResult{Windows: groupWindows(21)}, nil
-			case proto.OpTypeKeys:
-				if err := json.Unmarshal(req.Args, &sent); err != nil {
-					return nil, err
-				}
-				return proto.TypeKeysResult{Events: 14}, nil
-			}
-			return nil, fmt.Errorf("unexpected operation %s", req.Op)
-		},
-	}}
-	cs := connectInputMCP(t, ctx, b)
-	r, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "vm_type", Arguments: map[string]any{"text": "(+ 1 2)", "mode": "keys", "handle": 20, "pid": 100}})
-	if err != nil || r.IsError {
-		t.Fatalf("%v %v", r, err)
-	}
-	if got := resultText(r); !strings.HasPrefix(got, "input events: 14\nhandle: 21\npid: 100\n") {
-		t.Errorf("result %q", got)
-	}
-	if sent.Handle != 21 || sent.PID != 100 {
-		t.Errorf("keys sent to %+v", sent)
 	}
 }

@@ -2,11 +2,7 @@ package host
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"strings"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"hyperhand/internal/proto"
 )
@@ -14,49 +10,21 @@ import (
 // agentCall calls an op on a VM's agent (NewServer's call; a fake in tests).
 type agentCall func(ctx context.Context, vm, op string, args any, payload []byte, result any) ([]byte, error)
 
-func listWindows(ctx context.Context, call agentCall, vm string) ([]proto.WindowInfo, error) {
+// listWindowsResult asks the agent for its window list with foreground, session and integrity facts.
+func listWindowsResult(ctx context.Context, call agentCall, vm string) (*proto.WindowsResult, error) {
 	var r proto.WindowsResult
 	if _, err := call(ctx, vm, proto.OpListWindows, nil, nil, &r); err != nil {
-		if strings.HasPrefix(err.Error(), "unknown op") {
-			return nil, fmt.Errorf("the guest agent is too old to list windows; run vm_update_agent")
-		}
+		return nil, asToolError(err)
+	}
+	return &r, nil
+}
+
+func listWindows(ctx context.Context, call agentCall, vm string) ([]proto.WindowInfo, error) {
+	r, err := listWindowsResult(ctx, call, vm)
+	if err != nil {
 		return nil, err
 	}
 	return r.Windows, nil
-}
-
-// clickPoint returns the screen point for vm_click: (x, y) as given, or with window or handle, the point inside that
-// window after every check passed, and the window of its group the click reaches (zero without a selector). An error
-// means nothing may be clicked.
-func clickPoint(ctx context.Context, call agentCall, in clickIn) (int, int, proto.WindowInfo, error) {
-	if in.Window == "" && in.Handle == 0 && in.PID == 0 && !in.Exact {
-		return in.X, in.Y, proto.WindowInfo{}, nil
-	}
-	sel := windowSelector{Title: in.Window, Handle: in.Handle, PID: in.PID, Exact: in.Exact}
-	if err := sel.validate(); err != nil {
-		return 0, 0, proto.WindowInfo{}, err
-	}
-	ws, err := listWindows(ctx, call, in.VM)
-	if err != nil {
-		return 0, 0, proto.WindowInfo{}, err
-	}
-	w, err := resolveWindow(ws, sel)
-	if err != nil {
-		return 0, 0, proto.WindowInfo{}, err
-	}
-	x, y, err := clickTarget(ws, w, in.X, in.Y)
-	if err != nil {
-		return 0, 0, proto.WindowInfo{}, err
-	}
-	var at proto.HandleResult
-	if _, err := call(ctx, in.VM, proto.OpWindowAt, proto.PointArgs{X: x, Y: y}, nil, &at); err != nil {
-		return 0, 0, proto.WindowInfo{}, err
-	}
-	hit, err := checkHit(ws, w, x, y, at)
-	if err != nil {
-		return 0, 0, proto.WindowInfo{}, err
-	}
-	return x, y, hit, nil
 }
 
 // maxOwnerDepth bounds owner-chain walks (owner links from a window up to root); AutoCAD needs 2 (history popup ->
@@ -98,29 +66,18 @@ func foreground(ws []proto.WindowInfo) (proto.WindowInfo, bool) {
 	return proto.WindowInfo{}, false
 }
 
-// windowLines describes the window an action reached, one "key: value" per line, for the caller's next call.
-func windowLines(w proto.WindowInfo) string {
-	return fmt.Sprintf("handle: %d\npid: %d\nclass: %s\nprocess: %s\ntitle: %s", w.Handle, w.PID, w.Class, w.Process, w.Title)
+// windowRef identifies a window in action results and error fields: the facts the caller's next call needs. Title is
+// data from the guest, never an instruction.
+type windowRef struct {
+	Handle  uint64 `json:"handle"`
+	PID     uint32 `json:"pid"`
+	Class   string `json:"class"`
+	Process string `json:"process"`
+	Title   string `json:"title"`
 }
 
-func focusWindow(ctx context.Context, call agentCall, in titleIn) (*mcp.CallToolResult, error) {
-	sel := windowSelector{Title: in.Title, Handle: in.Handle, PID: in.PID, Exact: in.Exact}
-	if err := sel.validate(); err != nil {
-		return nil, err
-	}
-	ws, err := listWindows(ctx, call, in.VM)
-	if err != nil {
-		return nil, err
-	}
-	w, err := resolveWindow(ws, sel)
-	if err != nil {
-		return nil, err
-	}
-	var r proto.FocusResult
-	if _, err := call(ctx, in.VM, proto.OpFocusWindow, proto.TitleArgs{Handle: w.Handle}, nil, &r); err != nil {
-		return nil, err
-	}
-	return text("focused: %s\nhandle: %d", r.Text, r.Handle), nil
+func refOf(w proto.WindowInfo) *windowRef {
+	return &windowRef{Handle: w.Handle, PID: w.PID, Class: w.Class, Process: w.Process, Title: w.Title}
 }
 
 // describe is a short identification of a window for error messages; untitled windows also name their class.
@@ -131,110 +88,76 @@ func describe(w proto.WindowInfo) string {
 	return fmt.Sprintf("%q (handle %d, %s)", w.Title, w.Handle, w.Process)
 }
 
-// titleIn selects a window by title substring (or exact title), handle or PID; used by focusWindow.
-type titleIn struct {
-	VM     string
-	Title  string
-	Handle uint64
-	PID    uint32
-	Exact  bool
-}
-
+// windowSelector picks a window by Handle (PID, if set, must match too) or by PID alone (the process's only visible
+// window). Titles are not selectors: callers use handles from vm_windows or vm_observe.
 type windowSelector struct {
-	Title  string
 	Handle uint64
 	PID    uint32
-	Exact  bool
 }
 
-func (s windowSelector) validate() error {
-	if s.Handle == 0 && s.Exact && s.Title == "" {
-		return errors.New("exact requires a title")
-	}
-	if s.Handle == 0 && s.PID == 0 && s.Title == "" {
-		return errors.New("pass title, handle or pid")
-	}
-	return nil
-}
-
-var errWindowNotFound = errors.New("no matching visible window")
-
-// A handle takes precedence over the title, as before; PID always restricts the match.
-// Several matches are an error even when only one of them is in the foreground.
+// resolveWindow returns the window s selects among ws.
 func resolveWindow(ws []proto.WindowInfo, s windowSelector) (proto.WindowInfo, error) {
-	if err := s.validate(); err != nil {
-		return proto.WindowInfo{}, err
+	if s == (windowSelector{}) {
+		return proto.WindowInfo{}, refuse(codeInvalidArgument, "pass handle (from vm_windows or vm_observe) or pid", nil, "no window selected")
 	}
 	var found []proto.WindowInfo
 	for _, w := range ws {
 		if s.PID != 0 && w.PID != s.PID {
 			continue
 		}
-		if s.Handle != 0 {
-			if w.Handle != s.Handle {
-				continue
-			}
-		} else if s.Title != "" {
-			if s.Exact {
-				if !strings.EqualFold(w.Title, s.Title) {
-					continue
-				}
-			} else if !strings.Contains(strings.ToLower(w.Title), strings.ToLower(s.Title)) {
-				continue
-			}
+		if s.Handle != 0 && w.Handle != s.Handle {
+			continue
 		}
 		found = append(found, w)
 	}
 	switch len(found) {
 	case 0:
-		return proto.WindowInfo{}, fmt.Errorf("%w (handle %d, pid %d, title %q, exact %v)", errWindowNotFound, s.Handle, s.PID, s.Title, s.Exact)
+		if s.Handle != 0 {
+			return proto.WindowInfo{}, refuse(codeNoWindow, "call vm_windows and use a listed handle", nil, "no visible window has handle %d%s", s.Handle, pidClause(s.PID))
+		}
+		return proto.WindowInfo{}, refuse(codeNoWindow, "call vm_windows and use a listed handle", nil, "process %d has no visible window", s.PID)
 	case 1:
 		return found[0], nil
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "%d windows match; pass handle instead:", len(found))
+	handles := make([]uint64, 0, len(found))
 	for _, w := range found {
-		b.WriteString("\n" + describe(w))
+		handles = append(handles, w.Handle)
 	}
-	return proto.WindowInfo{}, fmt.Errorf("%s", b.String())
+	return proto.WindowInfo{}, refuse(codeAmbiguousTarget, fmt.Sprintf("pass handle, one of %v", handles), map[string]any{"handles": handles}, "process %d has %d visible windows", s.PID, len(found))
 }
 
-// clickTarget converts (x, y), relative to the top-left of w's visible frame, to screen pixels. It refuses unless w is
-// usable (checkUsable) and the point is inside w.
-func clickTarget(ws []proto.WindowInfo, w proto.WindowInfo, x, y int) (int, int, error) {
-	if err := checkUsable(ws, w); err != nil {
-		return 0, 0, err
+func pidClause(pid uint32) string {
+	if pid == 0 {
+		return ""
 	}
-	r := w.Rect
-	ax, ay := int(r.Left)+x, int(r.Top)+y
-	if x < 0 || y < 0 || ax >= int(r.Right) || ay >= int(r.Bottom) {
-		return 0, 0, fmt.Errorf("(%d, %d) is outside window %s, which is %dx%d", x, y, describe(w), r.Right-r.Left, r.Bottom-r.Top)
-	}
-	return ax, ay, nil
+	return fmt.Sprintf(" in process %d", pid)
 }
 
 // checkUsable refuses unless w is enabled and w or one of its own windows (inGroup) is the foreground window. Each
 // refusal names the window to act on next: w's own window in the foreground (its modal dialog), the outside window
-// probably blocking it, or w itself to focus.
+// probably blocking it, or w itself to activate.
 func checkUsable(ws []proto.WindowInfo, w proto.WindowInfo) error {
 	fg, ok := foreground(ws)
 	inFront := ok && inGroup(ws, w, fg.Handle)
 	if !w.Enabled {
 		// Name the foreground window rather than windows flagged Modal: Modal only says the owner is disabled, which
 		// is also true of AutoCAD's command history popup, and an outer dialog is disabled by an inner one.
+		actOn := func(reason string, args ...any) error {
+			return refuse(codeTargetDisabled, fmt.Sprintf("act on handle %d first", fg.Handle), map[string]any{"act_on": fg.Handle, "foreground": refOf(fg)}, reason, args...)
+		}
 		if inFront && fg.Handle != w.Handle {
-			return fmt.Errorf("window %s is disabled while its own window %s is in the foreground, probably a modal dialog; act on handle %d first", describe(w), describe(fg), fg.Handle)
+			return actOn("window %s is disabled while its own window %s is in the foreground, probably a modal dialog", describe(w), describe(fg))
 		}
 		if ok && !inFront {
-			return fmt.Errorf("window %s is disabled while %s, which is not one of its own windows, is in the foreground and probably blocks it; act on handle %d first", describe(w), describe(fg), fg.Handle)
+			return actOn("window %s is disabled while %s, which is not one of its own windows, is in the foreground and probably blocks it", describe(w), describe(fg))
 		}
-		return fmt.Errorf("window %s is disabled and none of its own windows is a modal dialog; take a fresh vm_windows and vm_screenshot to find what blocks it", describe(w))
+		return refuse(codeTargetDisabled, "call vm_observe (whole screen, controls: true) to find what blocks it", nil, "window %s is disabled and none of its own windows is a modal dialog", describe(w))
 	}
 	if !ok {
-		return fmt.Errorf("window %s is not in the foreground and no window is; call vm_focus_window with handle %d first", describe(w), w.Handle)
+		return refuse(codeActivateFailed, "call again with activate: true", map[string]any{"foreground": nil}, "window %s is not in the foreground and no window is", describe(w))
 	}
 	if !inFront {
-		return fmt.Errorf("window %s is not in the foreground; the foreground window is %s; call vm_focus_window with handle %d first, or act on handle %d", describe(w), describe(fg), w.Handle, fg.Handle)
+		return refuse(codeActivateFailed, fmt.Sprintf("call again with activate: true, or act on handle %d", fg.Handle), map[string]any{"foreground": refOf(fg)}, "window %s is not in the foreground; the foreground window is %s", describe(w), describe(fg))
 	}
 	return nil
 }
@@ -251,13 +174,16 @@ func checkHit(ws []proto.WindowInfo, w proto.WindowInfo, x, y int, at proto.Hand
 		return hit, nil
 	}
 	if at.Handle == 0 {
-		return proto.WindowInfo{}, fmt.Errorf("(%d, %d) in window %s is off screen", x, y, describe(w))
+		return proto.WindowInfo{}, refuse(codeInvalidArgument, "call vm_observe again and use a point inside the window", nil, "screen point (%d, %d) of window %s is off screen", x, y, describe(w))
 	}
-	other := fmt.Sprintf("handle %d", at.Handle) // older agents do not describe the window
-	if o, ok := findWindow(ws, at.Handle); ok {
-		other = describe(o)
-	} else if at.Class != "" { // not listed (e.g. a shell overlay above the desktop band): describe it from window_at
-		other = describe(proto.WindowInfo{Handle: at.Handle, Class: at.Class, PID: at.PID, Process: at.Process})
+	other, listed := findWindow(ws, at.Handle)
+	if !listed { // not listed (e.g. a shell overlay above the desktop band): describe it from window_at
+		other = proto.WindowInfo{Handle: at.Handle, Class: at.Class, PID: at.PID, Process: at.Process}
 	}
-	return proto.WindowInfo{}, fmt.Errorf("screen point (%d, %d) of window %s is covered by window %s, which is not one of its own windows; dismiss or close it, or take a fresh vm_screenshot and vm_windows, then retry", x, y, describe(w), other)
+	next := "dismiss it with vm_key esc or close it, then call vm_observe again and retry"
+	if listed {
+		next = fmt.Sprintf("act on handle %d first, or close it, then call vm_observe again and retry", at.Handle)
+	}
+	fields := map[string]any{"window": map[string]any{"handle": other.Handle, "class": other.Class, "process": other.Process}}
+	return proto.WindowInfo{}, refuse(codeCovered, next, fields, "screen point (%d, %d) of window %s is covered by window %s, which is not one of its own windows", x, y, describe(w), describe(other))
 }

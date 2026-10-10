@@ -68,66 +68,50 @@ func connectWindowMCP(t *testing.T, ctx context.Context, b *windowMCPBackend) *m
 	return client
 }
 
-func TestWindowMCPSelectorSchema(t *testing.T) {
+// A raw click (no observation_id) through the full server goes straight to the Hyper-V mouse at screen pixels, with
+// the session check as the only agent call.
+func TestWindowMCPRawClick(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var clicks atomic.Int32
 	b := &windowMCPBackend{
 		find: func(string) (hyperv.VM, error) { return hyperv.VM{ID: "A", Name: "CAD"}, nil },
 		respond: func(_ string, req proto.Request) (any, error) {
-			switch req.Op {
-			case proto.OpListWindows:
-				return proto.WindowsResult{Windows: testWindows()}, nil
-			case proto.OpFocusWindow:
-				var args proto.TitleArgs
-				if err := json.Unmarshal(req.Args, &args); err != nil {
-					return nil, err
-				}
-				if args != (proto.TitleArgs{Handle: 10}) {
-					return nil, fmt.Errorf("unexpected focus args: %+v", args)
-				}
-				return proto.FocusResult{Handle: 10, Text: "Options"}, nil
-			case proto.OpWindowAt:
-				return proto.HandleResult{Handle: 10}, nil
-			default:
+			if req.Op != proto.OpListWindows {
 				return nil, fmt.Errorf("unexpected guest op %q", req.Op)
 			}
+			return proto.WindowsResult{Windows: testWindows(), Session: &proto.SessionStateResult{Console: true}}, nil
 		},
-		click: func(_ string, x, y, button, count int, _ []string) error {
-			if x != 101 || y != 52 || button != 1 || count != 1 {
-				return fmt.Errorf("unexpected click: %d %d %d %d", x, y, button, count)
+		click: func(_ string, x, y, button, count int, mods []string) error {
+			if x != 101 || y != 52 || button != 3 || count != 1 || len(mods) != 0 {
+				return fmt.Errorf("unexpected click: %d %d %d %d %v", x, y, button, count, mods)
 			}
 			clicks.Add(1)
 			return nil
 		},
 	}
 	cs := connectWindowMCP(t, ctx, b)
-	for _, tt := range []struct {
-		name string
-		args map[string]any
-	}{
-		{"vm_click", map[string]any{"window": "OPTIONS", "pid": 100, "exact": true, "x": 1, "y": 2}},
-	} {
-		r, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: tt.name, Arguments: tt.args})
-		if err != nil {
-			t.Fatalf("%s: %v", tt.name, err)
-		}
-		if r.IsError {
-			t.Fatalf("%s: %s", tt.name, resultText(r))
-		}
+	r, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "vm_click", Arguments: map[string]any{"x": 101, "y": 52, "button": "middle", "observe_after": "none"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := resultJSON(t, r); r.IsError || m["ok"] != true || m["window"] != nil {
+		t.Fatalf("result: %v", m)
 	}
 	if clicks.Load() != 1 {
 		t.Errorf("click count: %d", clicks.Load())
 	}
 }
 
+// Every agent check and the final input of one action go to the VM resolved once at the start, even when the default
+// VM changes meanwhile.
 func TestWindowMCPActionsPinVM(t *testing.T) {
-	for _, tool := range []string{"vm_click"} {
+	for _, tool := range []string{"vm_type", "vm_key"} {
 		t.Run(tool, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			var defaultFinds, actions atomic.Int32
-			b := &windowMCPBackend{
+			b := &inputMCPBackend{windowMCPBackend: &windowMCPBackend{
 				find: func(name string) (hyperv.VM, error) {
 					id := name
 					if name == "" {
@@ -144,30 +128,27 @@ func TestWindowMCPActionsPinVM(t *testing.T) {
 					}
 					switch req.Op {
 					case proto.OpListWindows:
-						return proto.WindowsResult{Windows: testWindows()}, nil
-					case proto.OpWindowAt:
-						return proto.HandleResult{Handle: 10}, nil
-					case proto.OpFocusWindow:
+						return proto.WindowsResult{Windows: testWindows(), Foreground: 10, Session: &proto.SessionStateResult{Console: true}}, nil
+					case proto.OpTypeKeys:
 						actions.Add(1)
-						return proto.FocusResult{Handle: 10, Text: "Options"}, nil
+						return proto.TypeKeysResult{Events: 2}, nil
 					default:
 						return nil, fmt.Errorf("unexpected op %q", req.Op)
 					}
 				},
-				click: func(vm string, x, y, button, count int, _ []string) error {
-					if vm != "A" {
-						return fmt.Errorf("click did not pin VM: %q", vm)
-					}
-					actions.Add(1)
-					return nil
-				},
-			}
-			cs := connectWindowMCP(t, ctx, b)
-			args := map[string]any{"pid": 100, "exact": true}
-			if tool == "vm_click" {
-				args["window"], args["x"], args["y"] = "Options", 1, 2
+			}, press: func(vm, _ string) error {
+				if vm != "A" {
+					return fmt.Errorf("keys did not pin VM: %q", vm)
+				}
+				actions.Add(1)
+				return nil
+			}}
+			cs := connectInputMCP(t, ctx, b)
+			args := map[string]any{"handle": 10, "pid": 100}
+			if tool == "vm_type" {
+				args["text"] = "x"
 			} else {
-				args["title"] = "Options"
+				args["keys"] = "enter"
 			}
 			r, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: args})
 			if err != nil {
