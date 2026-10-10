@@ -75,6 +75,7 @@ type action struct {
 	ws      *proto.WindowsResult // nil until listed, and when the agent did not answer (see listErr)
 	listErr error
 	obs     *observation
+	mutated bool // a mutating call was dispatched, even if its result is an error
 }
 
 // run pins the VM, holds d.input while body checks and performs the action, then releases it and adds the
@@ -94,7 +95,13 @@ func (d *deps) run(ctx context.Context, vm string, after afterIn, defaultAfter s
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		return body(&action{d: d, ctx: ctx, vm: v.Name})
+		a := &action{d: d, ctx: ctx, vm: v.Name}
+		defer func() {
+			if a.mutated {
+				d.taskObs(ctx).revise(v.Name)
+			}
+		}()
+		return body(a)
 	}()
 	if err != nil {
 		return nil, err
@@ -198,7 +205,7 @@ func (a *action) checkSession(targeted bool) error {
 
 // observation is step 2: it loads id, checks that it belongs to this VM and that its window is unchanged (fresh).
 func (a *action) observation(id string) (*observation, error) {
-	o, err := a.d.obs.get(id)
+	o, err := a.d.taskObs(a.ctx).get(id)
 	if err != nil {
 		return nil, err
 	}
@@ -212,18 +219,29 @@ func (a *action) observation(id string) (*observation, error) {
 	return o, nil
 }
 
-// fresh refuses when the observed window no longer exists, is minimized or has another rect than at capture time.
-// Whole-screen observations are always fresh.
+// fresh validates the VM lifecycle and the observed window's identity and geometry.
 func (a *action) fresh() error {
 	o := a.obs
-	if o == nil || o.Window == nil {
+	if o == nil {
 		return nil
 	}
 	const next = "call vm_observe again and use its observation_id"
+	version := a.d.taskObs(a.ctx).version(a.vm)
+	if version.Busy != 0 {
+		return refuse(codeStaleObservation, "wait for the running VM operation to finish, then call vm_observe again", nil, "VM %q has a mutating operation in progress", a.vm)
+	}
+	if o.Epoch != version.Epoch {
+		return refuse(codeStaleObservation, next, nil, "VM %q restarted, was restored or changed agent since observation %s", a.vm, o.ID)
+	}
+	if o.Window == nil {
+		return nil
+	}
 	cur, ok := findWindow(a.ws.Windows, o.Window.Handle)
 	switch {
 	case !ok:
 		return refuse(codeStaleObservation, next, nil, "window %s of observation %s no longer exists", describe(*o.Window), o.ID)
+	case !sameWindowIdentity(cur, *o.Window):
+		return refuse(codeStaleObservation, next, nil, "window handle %d now identifies a different window than observation %s", cur.Handle, o.ID)
 	case cur.Minimized:
 		return refuse(codeStaleObservation, next, nil, "window %s of observation %s is minimized", describe(*o.Window), o.ID)
 	case cur.Rect != o.Window.Rect:
@@ -252,6 +270,7 @@ func (a *action) activate(target proto.WindowInfo, activate bool) (proto.WindowI
 		return target, nil
 	}
 	var r proto.FocusResult
+	a.mutated = true
 	if _, err := a.d.call(a.ctx, a.vm, proto.OpFocusWindow, proto.TitleArgs{Handle: target.Handle}, nil, &r); err != nil {
 		if te := asToolError(err); te.Code != codeFailed {
 			return target, te
@@ -327,6 +346,10 @@ func (a *action) treeTarget(o *observation) (proto.WindowInfo, error) {
 	if tw == nil {
 		return proto.WindowInfo{}, refuse(codeInvalidArgument, "call vm_observe with controls: true and use its observation_id and an index from its tree", nil, "observation %s has no control tree", o.ID)
 	}
+	cur, ok := findWindow(a.ws.Windows, tw.Handle)
+	if !ok || !sameWindowIdentity(cur, *tw) {
+		return proto.WindowInfo{}, refuse(codeStaleObservation, "call vm_observe again and use its observation_id", nil, "the control tree window of observation %s no longer has the same identity", o.ID)
+	}
 	return *tw, nil
 }
 
@@ -335,6 +358,9 @@ func (a *action) treeTarget(o *observation) (proto.WindowInfo, error) {
 // runtime ID keep the rectangle of the observation.
 func (a *action) locate(o *observation, w proto.WindowInfo, node proto.ControlInfo) (proto.Rect, error) {
 	if node.RuntimeID == "" {
+		if err := a.freshCoordinates(o, int(node.Rect.Left+node.Rect.Right)/2, int(node.Rect.Top+node.Rect.Bottom)/2); err != nil {
+			return proto.Rect{}, err
+		}
 		return node.Rect, nil
 	}
 	r, err := a.controlAction(o, w, node, "Locate", "")
@@ -382,9 +408,12 @@ func (a *action) pointTarget(id string, u, v int, index *int, activate bool) (x,
 			return
 		}
 		if o.Window == nil {
-			return x, y, hit, o, nil // whole screen by coordinates: no window to check
+			return x, y, hit, o, a.freshCoordinates(o, x, y)
 		}
 		if window, err = a.windowTarget(*o.Window, activate); err != nil {
+			return 0, 0, hit, o, err
+		}
+		if err = a.freshCoordinates(o, x, y); err != nil {
 			return 0, 0, hit, o, err
 		}
 	}
@@ -421,6 +450,7 @@ func (a *action) typeKeys(text string, target proto.WindowInfo) (applied, total 
 	text = strings.ReplaceAll(text, "\r\n", "\n") // as the agent counts it
 	total = len([]rune(text))
 	var r proto.TypeKeysResult
+	a.mutated = true
 	if _, err := a.d.call(a.ctx, a.vm, proto.OpTypeKeys, proto.TypeKeysArgs{Text: text, Handle: target.Handle, PID: target.PID}, nil, &r); err != nil {
 		if te := asToolError(err); te.Code != codeFailed {
 			return 0, total, te
@@ -470,8 +500,14 @@ func appliedChars(text string, events int) int {
 // timeout included).
 func (a *action) controlAction(o *observation, w proto.WindowInfo, node proto.ControlInfo, action, value string) (proto.ControlActionResult, error) {
 	var r proto.ControlActionResult
+	if node.RuntimeID == "" && o.Revision != a.d.taskObs(a.ctx).version(a.vm).Revision {
+		return r, refuse(codeStaleObservation, "call vm_observe again and use its observation_id", nil, "control [%d] has no stable runtime ID and observation %s predates a VM mutation", node.Index, o.ID)
+	}
 	ctx, cancel := context.WithTimeout(a.ctx, controlActionTimeout)
 	defer cancel()
+	if action != "Locate" {
+		a.mutated = true
+	}
 	pid := node.PID
 	if pid == 0 {
 		pid = w.PID

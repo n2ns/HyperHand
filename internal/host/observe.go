@@ -87,9 +87,19 @@ func (d *deps) observeVM(ctx context.Context, in observeIn) (*observeOut, []byte
 		return nil, nil, refuse(codeFailed, "call vm_list and pass vm", nil, "%v", err)
 	}
 	vm := v.Name
+	// Keep local input from interleaving the window metadata, image and tree.
+	// External mutation tools also advance versions; the final check below
+	// catches those that do not use the input lock.
+	d.input.Lock()
+	defer d.input.Unlock()
+	store := d.taskObs(ctx)
+	version := store.version(vm)
 	out := &observeOut{VM: vm, CapturedAt: time.Now().UTC().Format(time.RFC3339)}
-	obs := &observation{VM: vm, Scale: 1}
+	obs := &observation{VM: vm, Scale: 1, Revision: version.Revision, Epoch: version.Epoch}
 	var risks []string
+	if version.Busy != 0 {
+		risks = append(risks, "mutating operation in progress: wait for it to finish, then observe again before acting")
+	}
 
 	var wr proto.WindowsResult
 	online := true
@@ -155,6 +165,7 @@ func (d *deps) observeVM(ctx context.Context, in observeIn) (*observeOut, []byte
 			return nil, nil, refuse(codeFailed, "call vm_observe again", nil, "screenshot: %v", err)
 		}
 		png = img
+		obs.SourcePNG = data
 		obs.Crop = screenshotRegion{X: g.X, Y: g.Y, Width: g.Width, Height: g.Height}
 		obs.Scale, obs.ScaleY = g.ScaleX, g.ScaleY
 		obs.OutputWidth, obs.OutputHgt = g.OutputWidth, g.OutputHeight
@@ -200,7 +211,7 @@ func (d *deps) observeVM(ctx context.Context, in observeIn) (*observeOut, []byte
 		text := renderControls(cr.Nodes)
 		out.Controls = &text
 		if in.DiffFrom != "" {
-			if prev, reason := d.diffBase(in.DiffFrom, vm, target.Handle); prev != nil {
+			if prev, reason := d.diffBase(ctx, in.DiffFrom, vm, target.Handle); prev != nil {
 				out.Controls = nil
 				out.ControlsDiff = diffControls(prev.Nodes, cr.Nodes)
 			} else {
@@ -211,23 +222,38 @@ func (d *deps) observeVM(ctx context.Context, in observeIn) (*observeOut, []byte
 		risks = append(risks, "diff_from ignored: no control tree in this observation")
 	}
 	out.StaleRisk = strings.Join(risks, "; ")
+	if target != nil {
+		latest, err := listWindowsResult(ctx, d.call, vm)
+		if err != nil {
+			return nil, nil, agentRequired(err)
+		}
+		current, ok := findWindow(latest.Windows, target.Handle)
+		if !ok || !sameWindowIdentity(current, *target) || current.Rect != target.Rect || current.Minimized != target.Minimized {
+			return nil, nil, refuse(codeStaleObservation, "call vm_observe again and use its observation_id", nil, "window changed while its observation was being captured")
+		}
+	}
+	if store.version(vm) != version {
+		return nil, nil, refuse(codeStaleObservation, "call vm_observe again and use its observation_id", nil, "VM changed while its observation was being captured")
+	}
 
 	obs.ID = newID()
 	obs.At = time.Now()
-	d.obs.put(obs)
+	store.put(obs)
 	out.ObservationID = obs.ID
 	return out, png, nil
 }
 
 // diffBase returns the observation diff_from names when it can be diffed against the current one (same VM, same
 // window, has a control tree); otherwise nil and the reason to report in stale_risk.
-func (d *deps) diffBase(id, vm string, handle uint64) (*observation, string) {
-	prev, err := d.obs.get(id)
+func (d *deps) diffBase(ctx context.Context, id, vm string, handle uint64) (*observation, string) {
+	prev, err := d.taskObs(ctx).get(id)
 	switch {
 	case err != nil:
 		return nil, fmt.Sprintf("observation %q is unknown (expired or never issued)", id)
 	case prev.VM != vm:
 		return nil, fmt.Sprintf("observation %s is of VM %s", id, prev.VM)
+	case prev.Epoch != d.taskObs(ctx).version(vm).Epoch:
+		return nil, fmt.Sprintf("observation %s predates a VM lifecycle change", id)
 	case prev.Window == nil || prev.Window.Handle != handle:
 		return nil, fmt.Sprintf("observation %s is of a different window", id)
 	case prev.Nodes == nil:

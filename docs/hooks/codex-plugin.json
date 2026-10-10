@@ -26,18 +26,6 @@
             }
           ]
         }
-      ],
-      "SubagentStop": [
-        {
-          "hooks": [
-            {
-              "type": "mcp_tool",
-              "server": "hyperhand",
-              "tool": "vm_end_turn",
-              "input": {}
-            }
-          ]
-        }
       ]
     }
   }

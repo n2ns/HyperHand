@@ -1,9 +1,12 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"slices"
 	"strings"
 	"sync"
@@ -42,6 +45,18 @@ func (b *fakeInput) events() string {
 }
 
 func (b *fakeInput) Find(string) (hyperv.VM, error) { return hyperv.VM{ID: "A", Name: "A"}, nil }
+
+var actionScreenshot = sync.OnceValue(func() []byte {
+	var b bytes.Buffer
+	if err := png.Encode(&b, image.NewGray(image.Rect(0, 0, 1920, 1080))); err != nil {
+		panic(err)
+	}
+	return b.Bytes()
+})
+
+func (b *fakeInput) Screenshot(string) ([]byte, int, int, error) {
+	return actionScreenshot(), 1920, 1080, nil
+}
 func (b *fakeInput) Click(_ string, x, y, button, count int, mods []string) error {
 	return b.record(fmt.Sprintf("click %d,%d b%d c%d %v", x, y, button, count, mods))
 }
@@ -110,7 +125,7 @@ func (td *testDeps) call(t *testing.T, name string, args map[string]any) (*mcp.C
 // put stores an observation of w (nil: the whole screen) scaled by scale, with nodes as its control tree, and
 // returns its ID. The crop is w's rect (the screen for nil).
 func (td *testDeps) put(w *proto.WindowInfo, scale float64, nodes []proto.ControlInfo) string {
-	o := &observation{VM: "A", Window: w, TreeWindow: w, Scale: scale, HasImage: true, Nodes: nodes, Crop: screenshotRegion{Width: 1920, Height: 1080}}
+	o := &observation{VM: "A", Window: w, TreeWindow: w, Scale: scale, HasImage: true, SourcePNG: actionScreenshot(), Nodes: nodes, Crop: screenshotRegion{Width: 1920, Height: 1080}}
 	if w != nil {
 		o.Crop = screenshotRegion{X: int(w.Rect.Left), Y: int(w.Rect.Top), Width: int(w.Rect.Right - w.Rect.Left), Height: int(w.Rect.Bottom - w.Rect.Top)}
 	}
@@ -253,7 +268,7 @@ func TestClickAutoActivation(t *testing.T) {
 	if r.IsError || td.b.events() != "click 101,51 b1 c1 []" {
 		t.Fatalf("activated: %v %q", m, td.b.events())
 	}
-	if want := []string{proto.OpListWindows, proto.OpFocusWindow, proto.OpListWindows, proto.OpWindowAt}; !slices.Equal(f.ops, want) || f.args[1].(proto.TitleArgs) != (proto.TitleArgs{Handle: 10}) {
+	if want := []string{proto.OpListWindows, proto.OpFocusWindow, proto.OpListWindows, proto.OpListWindows, proto.OpWindowAt}; !slices.Equal(f.ops, want) || f.args[1].(proto.TitleArgs) != (proto.TitleArgs{Handle: 10}) {
 		t.Errorf("ops %v args %+v", f.ops, f.args)
 	}
 	// Failure: the other process's window keeps the foreground and is named as the one to act on.
@@ -649,7 +664,7 @@ func TestKeyPartialSequence(t *testing.T) {
 // screenObservation stores a whole-screen observation whose control tree (nodes) belongs to tree, as vm_observe does
 // for controls: true without a handle.
 func (td *testDeps) screenObservation(tree *proto.WindowInfo, nodes []proto.ControlInfo) string {
-	o := &observation{VM: "A", Scale: 1, HasImage: true, Nodes: nodes, TreeWindow: tree, Crop: screenshotRegion{Width: 1920, Height: 1080}, OutputWidth: 1920, OutputHgt: 1080}
+	o := &observation{VM: "A", Scale: 1, HasImage: true, SourcePNG: actionScreenshot(), Nodes: nodes, TreeWindow: tree, Crop: screenshotRegion{Width: 1920, Height: 1080}, OutputWidth: 1920, OutputHgt: 1080}
 	td.obs.put(o)
 	return o.ID
 }

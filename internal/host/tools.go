@@ -23,6 +23,7 @@ type vmIn struct {
 //	tools_actions.go  vm_click, vm_drag, vm_scroll, vm_type, vm_key, vm_set_value, vm_invoke
 //	tools_checkpoint.go vm_checkpoint_delete, vm_checkpoint_keep (registered from registerVM)
 //	tools_launch.go   vm_launch
+//	tools_apps.go     vm_apps
 //	tools_turn.go     vm_end_turn
 //	tools_doctor.go   vm_doctor
 type deps struct {
@@ -38,7 +39,8 @@ type deps struct {
 	// observe is vm_observe's implementation, set by registerObserve; actions call it for observe_after.
 	observe observeFunc
 	// turn records state vm_end_turn cleans up: pending waits to cancel and temporary checkpoints by VM.
-	turn *turnState
+	turn  *turnState
+	tasks *taskRegistry
 }
 
 // turnState is what vm_end_turn cleans up. Tools register cancellable waits with addWait and temporary checkpoints
@@ -46,6 +48,7 @@ type deps struct {
 type turnState struct {
 	mu          sync.Mutex
 	waits       map[int]context.CancelFunc
+	waitVMs     map[int]string
 	nextWait    int
 	checkpoints map[string][]tempCheckpoint // VM name -> temporary checkpoints created in this run
 }
@@ -57,17 +60,22 @@ type tempCheckpoint struct {
 }
 
 func newTurnState() *turnState {
-	return &turnState{waits: map[int]context.CancelFunc{}, checkpoints: map[string][]tempCheckpoint{}}
+	return &turnState{waits: map[int]context.CancelFunc{}, waitVMs: map[int]string{}, checkpoints: map[string][]tempCheckpoint{}}
 }
 
 // addWait registers a wait's cancel function; the returned function unregisters it.
 func (t *turnState) addWait(cancel context.CancelFunc) func() {
+	return t.addVMWait("", cancel)
+}
+
+func (t *turnState) addVMWait(vm string, cancel context.CancelFunc) func() {
 	t.mu.Lock()
 	id := t.nextWait
 	t.nextWait++
 	t.waits[id] = cancel
+	t.waitVMs[id] = vm
 	t.mu.Unlock()
-	return func() { t.mu.Lock(); delete(t.waits, id); t.mu.Unlock() }
+	return func() { t.mu.Lock(); delete(t.waits, id); delete(t.waitVMs, id); t.mu.Unlock() }
 }
 
 // addTempCheckpoint remembers a temporary checkpoint created for vm.
@@ -113,11 +121,13 @@ func NewServer(m *Manager) *mcp.Server {
 		obs:     newObservationStore(),
 		runID:   newRunID(),
 		turn:    newTurnState(),
+		tasks:   newTaskRegistry(),
 	}
 	registerVM(d)
 	registerObserve(d)
 	registerActions(d)
 	registerLaunch(d)
+	registerApps(d)
 	registerTurn(d)
 	registerDoctor(d)
 	return s

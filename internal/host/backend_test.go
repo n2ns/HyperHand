@@ -45,9 +45,9 @@ func TestRestoreThroughBackend(t *testing.T) {
 		fail bool
 		want []string
 	}{
-		{"default starts", map[string]any{"id": "cp-1"}, false, []string{"find:", "list:test", "restore:test:cp-1", "find:test", "start:test"}},
-		{"stay off", map[string]any{"vm": "test", "id": "cp-1", "start": false}, false, []string{"find:test", "list:test", "restore:test:cp-1", "find:test"}},
-		{"failure does not start", map[string]any{"id": "cp-1"}, true, []string{"find:", "list:test", "restore:test:cp-1"}},
+		{"default starts", map[string]any{"id": "cp-1"}, false, []string{"find:", "find:test", "list:test", "restore:test:cp-1", "find:test", "start:test"}},
+		{"stay off", map[string]any{"vm": "test", "id": "cp-1", "start": false}, false, []string{"find:test", "find:test", "list:test", "restore:test:cp-1", "find:test"}},
+		{"failure does not start", map[string]any{"id": "cp-1"}, true, []string{"find:", "find:test", "list:test", "restore:test:cp-1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := &lifecycleBackend{state: "Running"}

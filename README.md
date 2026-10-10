@@ -82,7 +82,7 @@ Every tool takes an optional `vm` (VM name). Without it, the only running VM is 
 
 | Tool | What it does |
 |---|---|
-| `vm_list`, `vm_start` | List VMs with their state and the server's `run_id`; start and wait until the desktop is usable (unlocking it with the stored password) |
+| `vm_list`, `vm_start` | List VMs with their state and the task's `run_id`; start and wait until the desktop is usable (unlocking it with the stored password) |
 | `vm_shutdown`, `vm_turn_off` | Shut the guest down normally and wait until the VM is off (fails, without turning it off, if a program blocks shutdown); turn the VM off immediately, like pulling the plug |
 | `vm_status`, `vm_unlock`, `vm_doctor` | Report power state, agent, session lock state and whether an unlock password is stored; unlock a locked session with the stored password; run read-only host and guest checks with a suggestion per problem |
 | `vm_checkpoints`, `vm_checkpoint` | List the checkpoint tree (`id`, `name`, `parent`, `type`, `kind`, `state`, `current`, `children`, plus the VM's `checkpoint_type` and `current_parent`); create one named `<run_id>-temp-<label>` (or `-keep-` with `keep: true`) and return its `id` |
@@ -93,21 +93,24 @@ Every tool takes an optional `vm` (VM name). Without it, the only running VM is 
 | `vm_click`, `vm_drag`, `vm_scroll` | Mouse at image pixels of an `observation_id`, or at a control `index` (`vm_click`); `button`, `count`, `modifiers`, `delta_y`/`delta_x`; without an observation, raw screen pixels |
 | `vm_set_value`, `vm_invoke` | Set a control's value, or Invoke, Toggle, Expand, Collapse, Select or ScrollIntoView it, by its `index` in an observation's tree; the value is read back (`verified`) |
 | `vm_type`, `vm_key` | Type Unicode text into a window (`handle`/`pid`, or an observation `index` to focus first) as key events, never through the clipboard; press one key combination or a `sequence` (numeric keypad and X11-style names included) |
+| `vm_apps` | Find launchable desktop applications by name or executable path; return stable IDs, `launch` arguments for `vm_launch`, running state and visible window handles |
 | `vm_launch` | Start a program detached and return its `pid` and first window's `handle`, `title` and `class` |
 | `vm_exec` | Run a command to completion in the guest; `shell`, `cwd`, `timeout_ms`, `admin` |
 | `vm_push`, `vm_pull` | Copy files or directories host to guest and back; `vm_push` skips unchanged files unless `force` is true |
 | `vm_clipboard_get`, `vm_clipboard_set` | Read or write the guest clipboard |
 | `vm_wait` | Wait until a process exits or runs, or a file exists |
-| `vm_end_turn` | Cancel pending waits and delete this run's temporary checkpoints (`all_temp: true`: every run's); meant for a Stop hook |
+| `vm_end_turn` | End this task's work: cancel its waits, clean up its temporary checkpoints and release its VM ownership; `vm` limits cleanup to one VM |
 | `vm_install_agent`, `vm_update_agent` | Install or replace the guest agent |
 
 The host screenshot, raw mouse and keyboard input (actions without `observation_id`, `handle` or `pid`), VM and checkpoint tools work without the agent; window lists, control trees, targeted actions, Unicode text, launching, commands and files need it. Without the agent, `vm_start` still starts the VM but reports that the desktop is not usable.
 
 Actions take `observation_id` from `vm_observe` and either image pixels of that observation's screenshot or a control `index` of its tree; the host converts and checks them. By default they activate the target window, refuse a disabled, covered or stale target, and return the window that received the input plus an `after` observation (`observe_after`: `none`, `screenshot`, `controls`, `both`). Titles are not selectors: pass a `handle` from `vm_windows`, `vm_observe` or `vm_launch`. Every result is one JSON object; every refusal is an `isError` result whose text is `{"error": <code>, "reason": "...", "next": "...", "run_id": "...", ...}`, where `next` names the call that makes progress (for example `stale_observation`: call `vm_observe` again; `agent_outdated`: call `vm_update_agent`). See the [tool guide](docs/user-guide.md#using-the-tools) and [precise behavior](docs/features.md).
 
+Every tool accepts `task_id`; resolved results return it with the task's `run_id`. A dedicated persistent MCP session gets a default task. Reconnecting scripts and agents sharing a session must pass a consistent explicit ID, including on `vm_end_turn`. Old coordinates are refused after tracked VM mutations, window changes or significant visual changes near the target. Use an action's `after` observation or call `vm_observe` again; stable UI Automation runtime IDs can still be re-located after ordinary input.
+
 ## Known limitations
 
-- One AI client per VM at a time: several clients can connect, but requests to a VM's agent are handled one after another and their mouse and keyboard actions would interleave.
+- One writing task per VM at a time: other tasks may observe, but cannot write until the owner calls `vm_end_turn`. Task ownership prevents accidental interleaving; it is not authentication. Use distinct `task_id` values for agents sharing an MCP session, and reuse the same ID across short-lived connections.
 - `vm_install_agent` types its command on the keyboard; the guest input method must be in English mode. Installing the agent manually avoids this.
 - `admin` commands elevate without a prompt only if the guest's UAC is set to elevate administrators without prompting; otherwise the UAC wait counts toward the command timeout. A late approval cannot execute a cancelled or expired request.
 - Host-side screenshots and input act on the VM console; they do not reach a remote desktop or enhanced session. Actions refuse such a session with `session_unusable`.

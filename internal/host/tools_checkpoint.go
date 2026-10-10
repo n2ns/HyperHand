@@ -68,7 +68,7 @@ func registerCheckpoint(d *deps) {
 		}
 		out.ElapsedMs = time.Since(start).Milliseconds()
 		for _, c := range out.Deleted {
-			d.turn.removeTempCheckpoint(v.Name, c.ID)
+			d.taskTurn(ctx).removeTempCheckpoint(v.Name, c.ID)
 		}
 		return jsonResult(out)
 	})
@@ -104,7 +104,7 @@ func registerCheckpoint(d *deps) {
 		if err := backend.RenameCheckpoint(v.Name, target.ID, name); err != nil {
 			return nil, checkpointErr(err, target.ID)
 		}
-		d.turn.removeTempCheckpoint(v.Name, target.ID)
+		d.taskTurn(ctx).removeTempCheckpoint(v.Name, target.ID)
 		return jsonResult(checkpointRef{ID: target.ID, Name: name, Type: checkpointKeep})
 	})
 }

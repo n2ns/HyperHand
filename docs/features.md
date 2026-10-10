@@ -45,6 +45,13 @@ HyperHand consists of two Windows executables.
 - If the Hyper-V socket listener cannot be created, or accepting fails, the agent retries after 1 s.
 - The agent tray icon (the gripper icon, also the executable's icon) opens a menu on a left or right click: `等待宿主机连接` (waiting for the host) or `宿主机已连接` (host connected), and a `退出` (quit) item. Like the host tray (see 9.1), it is added at once at logon and retried every 5 seconds and whenever the taskbar is created; the agent serves the host whether or not the icon could be shown.
 
+### 1.6 Task ownership
+
+- Every tool accepts optional `task_id`. A dedicated persistent MCP session gets a default task; stateless HTTP requires an explicit ID (`task_required`). Scripts that reconnect and agents sharing a session must pass a unique, consistent ID on every call. An explicit task survives reconnects while this host process lives.
+- Observations, pending waits and temporary checkpoints belong to that task. Resolved tool results include `task_id` and the task's `run_id`. Observations cannot be shared between tasks.
+- The first write call reserves the VM for that task until successful `vm_end_turn` cleanup. Another task's write receives `vm_busy` with `owner_task_id`; read-only calls remain available. There is no automatic idle takeover. IDs express ownership, not authentication.
+- `vm_end_turn` blocks new calls while cleanup runs (`task_busy`), cancels the task's waits and waits for its accepted calls before deleting temporary checkpoints and releasing ownership. With `vm`, only that VM's resources are cleaned; without it the task ends. Failed cleanup retains ownership for retry. An ended explicit ID rejects new work (`task_ended`); the next ordinary call in a default session gets a new task.
+
 ## 2. Results, Errors and VM Selection
 
 ### 2.1 Result format
@@ -52,7 +59,7 @@ HyperHand consists of two Windows executables.
 - Every successful call returns one text item containing one JSON object. No tool returns free text or `ok` lines.
 - `vm_observe`, and an action whose `observe_after` includes a screenshot (see 4.4), return a PNG image item **before** the JSON text item. No other tool returns an image.
 - Every tool carries MCP tool annotations. `openWorldHint` is `false` for all. `readOnlyHint` is `true` for `vm_list`, `vm_status`, `vm_checkpoints`, `vm_pull`, `vm_clipboard_get`, `vm_wait`, `vm_windows`, `vm_observe` and `vm_doctor`. `destructiveHint` is `true` for `vm_shutdown`, `vm_turn_off`, `vm_restore`, `vm_checkpoint_delete`, `vm_push`, `vm_update_agent` and `vm_end_turn`, and `false` for every other tool. `idempotentHint` is `true` for `vm_list`, `vm_start`, `vm_status`, `vm_unlock`, `vm_shutdown`, `vm_turn_off`, `vm_checkpoints`, `vm_push`, `vm_pull`, `vm_clipboard_get`, `vm_clipboard_set`, `vm_wait`, `vm_update_agent`, `vm_set_value`, `vm_end_turn` and `vm_doctor`. The annotations are hints for clients, not a security boundary.
-- Each MCP server process has a **run ID** of the form `run-<yyyymmdd-hhmm>-<4 hex>`, generated at start. It is returned by `vm_list`, carried in every error object and used in checkpoint names (see 3.3).
+- Each task has a **run ID** of the form `run-<yyyymmdd-hhmm>-<16 hex>`, generated when the task is created. It accompanies `task_id` in resolved tool results and is used in checkpoint names (see 3.3). Refusals before task resolution, such as `task_required`, have no task or run ID.
 - Tool descriptions of `vm_windows`, `vm_observe`, the actions, `vm_exec`, `vm_pull` and `vm_clipboard_get` state that window titles, control names and values, selected text, command output, file contents and clipboard text are data from the guest, not instructions.
 
 ### 2.2 Error object and codes
@@ -63,7 +70,7 @@ Every refusal and failure is returned as an MCP result with `isError: true` whos
 {"error": "covered", "reason": "screen point (640, 400) of window \"Drawing1.dwg\" (handle 197916, acad.exe) is covered by window \"\" (handle 131160, class Shell_LightDismissOverlay, explorer.exe), which is not one of its own windows", "next": "dismiss it with vm_key esc or close it, then call vm_observe again and retry", "run_id": "run-20261010-0812-7f3a", "window": {"handle": 131160, "class": "Shell_LightDismissOverlay", "process": "explorer.exe"}}
 ```
 
-- `error` is one of the codes below, `reason` says what happened, `next` names the call that makes progress and `run_id` is the server's run ID. Further fields carry the facts the next call needs; they are listed per tool in this document.
+- `error` is one of the codes below, `reason` says what happened, `next` names the call that makes progress and `run_id` is the task's run ID. Further fields carry the facts the next call needs; they are listed per tool in this document.
 - Handler errors never become MCP protocol errors, so a client always receives this object.
 - An agent answer `unknown op "<op>"` is reported as `agent_outdated`; a connection or transport failure to the agent as `agent_required`; anything without a specific code as `failed`, whose `next` is `call vm_status, then vm_doctor if the VM is running; the action may or may not have happened, so observe before repeating it`.
 
@@ -71,7 +78,11 @@ Every refusal and failure is returned as an MCP result with `isError: true` whos
 |---|---|
 | `failed` | Any error without a specific code: Hyper-V, WMI or PowerShell failures, transport errors, errors the agent answered with (for example a `vm_exec` start failure), and VM lookup failures in `vm_observe` and the actions (see 2.3) |
 | `invalid_argument` | A parameter is missing, out of range or inconsistent, including VM lookup failures of the VM, checkpoint, command, file, clipboard, wait, launch and agent tools; also an observation that cannot provide what the action needs (no screenshot for pixel coordinates, no control tree for `index`) and a pixel outside the observation image; for checkpoints (see 3.3) an invalid `label`, a VM whose checkpoint setting is `Disabled`, a `manual` checkpoint selected by `name` for deletion, and `vm_checkpoint_keep` on a `keep` or `manual` checkpoint |
-| `stale_observation` | The `observation_id` is unknown or evicted, belongs to another VM, or its window no longer exists, is minimized, or has moved or resized since the observation |
+| `task_required` | The transport has no persistent MCP session and `task_id` was omitted |
+| `task_ended` | An explicit task ID was already ended; choose a new ID |
+| `task_busy` | Cleanup is running for this task; wait for it to finish |
+| `vm_busy` | Another task owns writes to this VM; its `vm_end_turn` must release ownership |
+| `stale_observation` | The observation is unknown, evicted or belongs to another task/VM; its window identity or geometry changed; a HyperHand lifecycle operation invalidated it; or its coordinates fail revision or local screenshot checks (see 4.1) |
 | `stale_element` | `index` is not in the observation's tree, or the control's runtime ID no longer resolves in the window when the host re-locates it before acting |
 | `session_unusable` | A targeted action: the agent reports its session locked, not the VM console session, or keyboard input on the secure desktop (see 4.4 step 2); untargeted `vm_type` of non-ASCII text while the session is locked or on the secure desktop |
 | `activate_failed` | The target window (or one of its own windows) is not in the foreground and could not be brought there, or `activate` is `false` |
@@ -108,7 +119,7 @@ These tools use Hyper-V on the host and do not need the agent, except for the re
 
 ### 3.1 vm_list
 
-`vm_list` lists all VMs and the server's run ID. The `vm` argument is ignored.
+`vm_list` lists all VMs and the task's run ID. The `vm` argument is ignored.
 
 ```json
 {"vms": [{"name": "Win10", "id": "2F0A9B3C-...", "state": "Running"}], "run_id": "run-20261010-0812-7f3a"}
@@ -139,7 +150,7 @@ Five tools manage Hyper-V checkpoints: `vm_checkpoints`, `vm_checkpoint`, `vm_re
 
 #### Names and types
 
-HyperHand names the checkpoints it creates after the server's run ID (see 2.1) and classifies every checkpoint by its name:
+HyperHand names the checkpoints it creates after the task's run ID (see 2.1) and classifies every checkpoint by its name:
 
 | Type | Name | Meaning | Deleted by |
 |---|---|---|---|
@@ -147,7 +158,7 @@ HyperHand names the checkpoints it creates after the server's run ID (see 2.1) a
 | `keep` | `<run_id>-keep-<label>` | A baseline kept across runs | `vm_checkpoint_delete` only |
 | `manual` | any other name | Made outside HyperHand, for example in Hyper-V Manager | `vm_checkpoint_delete` only, and only by `id` |
 
-- Names match `^(run-\d{8}-\d{4}-[0-9a-f]{4})-(temp|keep)-(.+)$`; `run_id` and `label` are parsed from the name and are `null` for a `manual` checkpoint.
+- Names match `^(run-\d{8}-\d{4}-(?:[0-9a-f]{4}|[0-9a-f]{16}))-(temp|keep)-(.+)$`, accepting legacy 4-hex and current 16-hex suffixes; `run_id` and `label` are parsed from the name and are `null` for a `manual` checkpoint.
 - A `label` is 1 to 64 characters and contains none of `\ / : * ? " < > |` or line breaks (Hyper-V uses checkpoint names in file paths). Anything else is `invalid_argument` with `next` `pass a label of 1 to 64 characters without \ / : * ? " < > | or line breaks`. The default label is the current time as `hhmmss`.
 
 #### Selecting a checkpoint
@@ -217,7 +228,7 @@ HyperHand names the checkpoints it creates after the server's run ID (see 2.1) a
 `vm_end_turn` (see 7.4) is the turn's cleanup.
 
 - By default it deletes, by id, the `temp` checkpoints this run registered: those `vm_checkpoint` created without `keep` and the `before-restore` ones of `vm_restore`, minus those `vm_checkpoint_keep` renamed or `vm_checkpoint_delete` deleted. `vm` (case-insensitive) limits this to one VM. Each registered checkpoint is checked against the VM's current list first: one that no longer exists is forgotten silently; one whose name is no longer a `temp` name (renamed outside this server) is not deleted and listed in `skipped` with reason `no longer a temp checkpoint (now <type>); not deleted`; one whose deletion fails is listed in `errors` as `<vm>/<name>: <error>` and stays registered for the next call, as do all of a VM's checkpoints when its list could not be read (`errors`: `<vm>: <error>`). `keep` and `manual` checkpoints are never touched.
-- `all_temp: true` deletes every checkpoint whose name parses as `temp`, whatever its `run_id`, on `vm` or on every VM when `vm` is omitted, to clean up after a crashed or restarted server. One that could not be deleted is listed in `skipped` as `{"id", "name", "reason"}`; a VM that could not be found or whose checkpoints could not be listed is listed in `errors`. This crosses runs: use it only when no other HyperHand client is working on the VM.
+- `all_temp: true` deletes every checkpoint whose name parses as `temp`, whatever its `run_id`, on `vm` or on every VM when `vm` is omitted, to clean up after a crashed or restarted server. Another task's write ownership blocks this with `vm_busy`. One that could not be deleted is listed in `skipped` as `{"id", "name", "reason"}`; a VM that could not be found or whose checkpoints could not be listed is listed in `errors`.
 - Each deletion merges disk differences and can take minutes.
 - Result: `{"cancelled_waits": 0, "deleted_checkpoints": ["run-20261010-0812-7f3a-temp-step3", "run-20261009-2200-aaaa-temp-x"], "skipped": [{"id": "9a2f...", "name": "run-20261009-2200-aaaa-temp-stuck", "reason": "Hyper-V job failed"}], "errors": []}`; `deleted_checkpoints` holds names.
 
@@ -254,10 +265,12 @@ These use the agent's `session_state` (see 10.2), which reports for the agent's 
 An observation is what the host remembers about one `vm_observe` result so that later actions can be checked against it and mapped back to the screen.
 
 - Each `vm_observe` call stores: the VM, the observed window (its handle, PID and `rect` at capture time; none for a whole-screen observation), the window list at capture time, the screenshot geometry (the captured screen region and the output scale per axis), the control tree nodes when one was read, and the **tree window** the nodes belong to (the observed window, or the foreground window whose tree a whole-screen observation read). It returns the observation's `observation_id`, `o-` followed by 8 hex digits.
-- The host keeps the 8 most recent observations per VM. An `observation_id` that is unknown or evicted is refused with `stale_observation` (`call vm_observe again and use its observation_id`).
+- The host keeps the 8 most recent observations per VM per task. An `observation_id` that is unknown to this task or evicted is refused with `stale_observation` (`call vm_observe again and use its observation_id`).
 - **Coordinate mapping.** Host screenshots are taken at the guest's screen resolution, so screenshot pixels are guest screen pixels. For an image pixel `(u, v)` of an observation with crop origin `(x, y)`, crop size `w x h` and per-axis scales `scale_x`, `scale_y` (output pixels per screen pixel; integer rounding of the output size can make them differ slightly, and the result's `screenshot.scale` reports `scale_x`), the host computes the screen point `x + min(w - 1, floor((u + 0.5) / scale_x))`, `y + min(h - 1, floor((v + 0.5) / scale_y))`. Callers pass image pixels and never convert. A pixel outside the output image, or coordinates for an observation taken with `screenshot: false`, is `invalid_argument`.
-- **Index resolution.** A control `index` names a node of the observation's tree. Every index action asks the agent to re-find the element by its `runtime_id` in the tree window (`control_action` `Locate`, which performs nothing and returns the element's current `rect` and value): pointer actions then click the centre of the **current** rectangle (`(left + right) / 2`, `(top + bottom) / 2`), so a control that moved since the observation (a scrolled list, a re-laid-out dialog) is hit where it is now; `vm_set_value` and `vm_invoke` act on the re-found element. A node without a runtime ID keeps the rectangle of the observation. A vanished element is `stale_element`; an index outside the tree is `stale_element`; an observation without a tree is `invalid_argument` (`call vm_observe with controls: true`).
-- **Freshness.** Before an action, the host lists the windows again. For a window observation, the action is refused with `stale_observation` when the window no longer exists, is minimized, or its `rect` differs from the one at capture time (the field `rect` then carries the current rect). An observation of another VM is `stale_observation` too. Whole-screen observations are always fresh: their pixels are screen pixels. A whole-screen observation clicked by coordinates has no window checks at all; an index action on it targets the tree window with the full check chain (see 4.4).
+- **Index resolution.** A control `index` names a node of the observation's tree. Every index action asks the agent to re-find the element by its `runtime_id` in the tree window (`control_action` `Locate`, which performs nothing and returns the element's current `rect` and value): pointer actions then click the centre of the **current** rectangle (`(left + right) / 2`, `(top + bottom) / 2`), so a control that moved since the observation (a scrolled list, a re-laid-out dialog) is hit where it is now; `vm_set_value` and `vm_invoke` act on the re-found element. A node without a runtime ID uses its old rectangle only after revision and local screenshot checks; without a screenshot that fallback is refused. A vanished element is `stale_element`; an index outside the tree is `stale_element`; an observation without a tree is `invalid_argument` (`call vm_observe with controls: true`).
+- **Freshness.** The host rechecks the window's handle, PID, process and class, minimized state and geometry. Shared VM revisions invalidate old coordinates after dispatched input (including failed or partial attempts) and command/launch operations. HyperHand lifecycle operations also invalidate old control references. A stable UI Automation runtime ID may still be re-located after ordinary input; an index without one uses the coordinate checks.
+- Before using observation coordinates, including whole-screen pixels, the host compares a fresh screenshot with the stored original-resolution capture around the target point. The region is up to 64 by 64 pixels, clipped to the captured region; over 5% of pixels with a channel change greater than 24/255 causes `stale_observation`. Drag checks both endpoints. Input revisions and window identity are checked again after capture. `vm_observe` serializes with input and refuses to register a capture whose revision or window identity/geometry changed during acquisition. A running external operation can still be observed, with `stale_risk`; actions using observations are refused until it finishes.
+- These checks are a local visual heuristic, not a page identity guarantee: changes elsewhere, small changes, identical-looking controls, externally initiated lifecycle changes that reuse the same identity, or changes after the check can escape detection. Local animation can cause a refusal. Raw input without an observation remains available for sign-in and UAC; it bypasses observation freshness checks.
 - The `screenshot` object of the result (`origin_x`, `origin_y`, `scale`) documents the mapping for auditing; actions do not need it.
 
 ### 4.2 vm_windows
@@ -310,10 +323,10 @@ Behaviour, in order:
 1. Parameter checks: `max_depth` outside 0 to 10, `max_nodes` outside 0 to 1000 or a negative `max_size` is `invalid_argument`.
 2. The VM is resolved once (see 2.3).
 3. The host asks the agent for the window list with the focused control (`list_windows` with `focused: true`). When the agent cannot be reached: with `handle` or `pid` the call is refused with `agent_required`; without them it continues with the screenshot only and the result has `"agent": "offline"` and no `window`, `focused` or `controls`.
-4. With `handle` or `pid` the window is selected as in 4.4 step 4; `no_window` and `ambiguous_target` refusals carry `candidates`, the windows the selector could have meant (`[{handle, pid, process, title, class}]`, those of `pid` when given, else all). Without them and with `controls`, the tree is read from the foreground window, which `window` then names and which becomes the observation's tree window (index actions target it; coordinate actions on the whole-screen observation stay unchecked, see 4.1); with no foreground window the tree is not read and `stale_risk` says `no foreground window: control tree not read`.
+4. With `handle` or `pid` the window is selected as in 4.4 step 4; `no_window` and `ambiguous_target` refusals carry `candidates`, the windows the selector could have meant (`[{handle, pid, process, title, class}]`, those of `pid` when given, else all). Without them and with `controls`, the tree is read from the foreground window, which `window` then names and which becomes the observation's tree window (index actions target it; coordinate actions on the whole-screen observation use revision and local image checks, see 4.1); with no foreground window the tree is not read and `stale_risk` says `no foreground window: control tree not read`.
 5. Screenshot (`screenshot: true`): the image is taken from the Hyper-V console via WMI `GetVirtualSystemThumbnailImage`, at the current resolution of the VM's first video head, without the agent, so it also shows the lock screen and UAC prompts. Hyper-V delivers RGB565, which is converted to 8-bit RGBA, so colours are quantised. For a window observation the image is cropped to the window's `rect` intersected with the screen; a window that is entirely off screen or minimized is `invalid_argument` (`restore the window first (vm_key, or act on it by index), or observe without handle`). `max_size` shrinks with nearest-neighbour sampling at pixel centres, preserving aspect ratio subject to integer rounding and a minimum of one pixel per axis; an uncropped, unscaled image keeps the original PNG bytes. A capture failure is `failed` (`call vm_status and make sure the VM is running`).
 6. Control tree (`controls: true` or `diff_from` set, and a target window): the agent reads the UI Automation control-view tree rooted at the window (`list_controls`) in a disposable helper process with a 10-second timeout. A timeout or interrupted helper is not an error: the result has no `controls` and `stale_risk` says `target not responding: control tree not read`, and the screenshot is still current. An agent that stops answering at this point is `agent_required` for a window observation and `"agent": "offline"` otherwise. Other agent errors are `failed`.
-7. The observation is stored and its ID returned.
+7. The VM revision and window identity/geometry are checked again. A revision or window change during capture is refused as `stale_observation`; otherwise the observation is stored for this task and its ID returned. When an external operation remains in progress, `stale_risk` advises waiting and observing again before acting.
 
 Result fields (absent when empty):
 
@@ -339,12 +352,12 @@ The actions are `vm_click`, `vm_drag`, `vm_scroll`, `vm_set_value`, `vm_invoke`,
 - `observe_after`: `none`, `screenshot`, `controls` or `both`; any other value is `invalid_argument`. The default is `screenshot` for `vm_click`, `vm_drag`, `vm_scroll`, `vm_set_value` and `vm_invoke`, and `none` for `vm_type` and `vm_key`.
 - `settle_ms`: the wait before the after-action observation, default 300, 0 to 5000 (`invalid_argument` otherwise).
 
-**Check chain.** A targeted action (one with `observation_id`, `index`, `handle` or `pid`) runs these steps under the input lock (see 4.5), in this order (session, freshness, target, activation, enabled, hit, integrity, execution), and stops at the first refusal with nothing done:
+**Check chain.** A targeted action (one with `observation_id`, `index`, `handle` or `pid`) runs these steps under the input lock (see 4.5), in this order (session, freshness, target, activation, enabled, hit, integrity, execution), and stops at the first refusal. Activation may already have changed focus before a later check refuses; a dispatched mutation invalidates old coordinates even on failure:
 
 1. **Window list.** The host asks the agent for the current windows, session and integrity facts. An agent that does not answer is `agent_required` (`next` suggests `vm_status`, `vm_install_agent`, or raw screen input without `observation_id` and `handle`).
 2. **Session** (`session_unusable`, field `session`): the session is locked (`next` `call vm_unlock`); it is not the VM console session (`call vm_doctor; ...`); or keyboard input goes to the secure desktop (`answer the prompt first with vm_key or vm_click without observation_id (raw screen input), then retry`).
 3. **Freshness** (`stale_observation`), see 4.1.
-4. **Target resolution.** `index` is resolved to its node (`stale_element`, `invalid_argument`) and the target is the observation's tree window (the observed window, or for a whole-screen observation the foreground window whose tree was read); image pixels are mapped to the screen (`invalid_argument`) and the target is the observed window, or none for a whole-screen observation, which is then clicked without any further check. `handle`/`pid` select a window: `no_window` when none matches (`call vm_windows and use a listed handle`), `ambiguous_target` with `handles` when `pid` alone matches several.
+4. **Target resolution.** `index` is resolved to its node (`stale_element`, `invalid_argument`) and the target is the observation's tree window (the observed window, or for a whole-screen observation the foreground window whose tree was read); image pixels are mapped to the screen (`invalid_argument`) and the target is the observed window, or none for a whole-screen observation, which still receives revision and local image checks (see 4.1). `handle`/`pid` select a window: `no_window` when none matches (`call vm_windows and use a listed handle`), `ambiguous_target` with `handles` when `pid` alone matches several.
 5. **Activation.** When neither the target nor a window of its group is in the foreground and `activate` is `true`, the host asks the agent to focus the target (`focus_window`: a minimized window is restored; `SetForegroundWindow`; if that does not work, the agent attaches to the foreground thread's input, injects a zero-distance mouse move and retries; it injects no key, so ribbon programs such as AutoCAD do not enter key-tip mode), lists the windows again and repeats step 3. If the target's group still does not hold the foreground, `activate_failed` with `foreground` (`{handle, pid, class, process, title}` of the window that does, or `null`) and `next` `act on handle <n> first` (adding `it belongs to <process> and probably is a dialog that blocks the target` when it is another process's). With `activate: false` the strict rule applies: a background target is `activate_failed` with `next` `call again with activate: true, or act on handle <n>`.
 6. **Enabled** (`target_disabled`): the target is disabled, as an owner window is while its modal dialog runs. Fields `act_on` and `foreground` name the window to act on: the target's own foreground window (usually the dialog), or another process's foreground window that probably blocks it; when no window explains it, `next` is `call vm_observe (whole screen, controls: true) to find what blocks it`. For keyboard input, the receiving window of the group must also be enabled and not minimized.
 7. **Hit** (pointer actions only). For an `index` the control is first re-located by runtime ID (`Locate`, see 4.1; `stale_element` when it vanished) and the point is the centre of its current rectangle. The agent then reports which top-level window is at the screen point (`window_at`). A window outside the target's group is `covered` with `window` (`{handle, class, process}`, described from `window_at` even when `vm_windows` does not list it, such as a shell overlay) and `next` `act on handle <n> first, or close it, ...` (listed) or `dismiss it with vm_key esc or close it, ...` (not listed). A point off screen is `invalid_argument`.
@@ -521,6 +534,8 @@ These tools need the agent, except `vm_end_turn`.
 
 ### 7.2 vm_launch
 
+Use `vm_apps` first when the program's path is unknown (see 7.5). Pass the returned `launch` object's `path`, `args` and `cwd`, plus the same `vm`.
+
 `vm_launch` starts a program in the guest as a detached process and waits for its first visible top-level window.
 
 - Parameters: `path` (required; `invalid_argument` when empty), `args` (array), `cwd`, `wait_window_ms` (default 60000; zero or negative also means 60 s) and `admin`.
@@ -545,10 +560,20 @@ These tools need the agent, except `vm_end_turn`.
 
 `vm_end_turn` ends an AI turn. It does not need the agent and changes nothing in the guest.
 
-- It cancels this server's pending `vm_wait` calls and deletes the `temp` checkpoints this run created (see 3.3). `vm` limits the checkpoints to one VM; the waits are always all cancelled. `keep` and `manual` checkpoints, running programs and the VM's power state are not touched.
+- It cancels this task's pending `vm_wait` calls, waits for its accepted calls, deletes its `temp` checkpoints and releases VM ownership (see 1.6 and 3.3). `vm` limits waits, checkpoints, observations and ownership cleanup to that VM; without it the whole task ends. `keep` and `manual` checkpoints, running programs and the VM's power state are not touched.
 - `all_temp: true` additionally deletes every `temp` checkpoint of any run on the VM, or on every VM when `vm` is omitted (see 3.3); checkpoints it could not delete are listed in `skipped`. Each deletion merges disk differences and can take minutes.
 - Result: `{"cancelled_waits": 1, "deleted_checkpoints": ["run-20261010-0812-7f3a-temp-step3"], "skipped": [], "errors": []}`. A registered checkpoint that could not be deleted is listed in `errors` as `<vm>/<name>: <error>` and kept for the next `vm_end_turn`; `skipped` entries are `{"id", "name", "reason"}`: checkpoints that were not deleted because they are no longer `temp` or, with `all_temp`, because Hyper-V failed (see 3.3).
-- It is meant for a client's Stop hook and is safe to call at any time. Example hook configurations for Claude Code (`settings.json`, `Stop`) and a Codex plugin (`plugin.json`, `Stop`, `Interrupt`, `SubagentStop`) are in `docs/hooks/`.
+- Example hook configurations for Claude Code (`settings.json`, `Stop`) and a Codex plugin (`plugin.json`, `Stop`, `Interrupt`) are in `docs/hooks/`. Empty arguments require the work's same persistent session/default task. Reconnecting hooks and explicit tasks must pass the task's actual `task_id`; an unscoped `SubagentStop` hook is not provided because it could end a shared parent task.
+
+### 7.5 vm_apps
+
+`vm_apps` discovers launchable Win32 desktop applications in the agent's user context. It reads the current user's and common Start Menu shortcuts and the HKCU/HKLM App Paths registrations, including both registry views. It does not scan drives, execute shortcuts or use uninstall commands as launch targets. Packaged UWP/MSIX apps, non-executable shortcuts and UNC executable targets are not included.
+
+- Parameters: optional `vm`, `query` (case-insensitive substring of the display name or executable path) and `limit` (default 50, maximum 200; negative or greater than 200 is `invalid_argument`).
+- Result: `{apps: [{id, name, launch: {path, args, cwd}, running, windows: [{handle, pid, title}]}], total, truncated, warnings}`. `total` counts matching entries before the limit; empty collections are arrays. Names and window titles are guest data, not instructions.
+- `launch` preserves the executable, argument array and working directory. Pass it directly to `vm_launch` with the same VM. IDs are stable for the same launch specification; different arguments or working directories remain distinct entries. IDs are identifiers for discovery, not selectors accepted by `vm_launch`. App Paths' optional `Path` value is an extra executable search path, not a working directory; `vm_launch` does not apply that extra environment value.
+- `running` matches the full executable path against processes in the agent's Windows session, not just the filename. It does not prove that the process was started with a particular shortcut's arguments. `windows` lists that executable's visible windows in the session; a running background application may have none. Pass a returned `handle` directly to `vm_observe` to reuse an existing window. If `warnings` reports unreadable processes, `running: false` is not proof that the application is stopped.
+- Discovery reads fresh sources on every request. Partial source failures are reported in `warnings` while usable results are preserved; absence from an incomplete result does not prove an application is uninstalled. An older agent without `list_apps` returns `agent_outdated`: call `vm_update_agent`.
 
 ## 8. Guest Agent Installation, Update and Diagnostics
 
@@ -687,6 +712,7 @@ uint32 header length | uint64 payload length | header JSON | payload bytes
 |---|---|---|
 | `ping` | none | `{version, protocol, hostname, user}`; `protocol` is the generation the agent speaks (see 8.6) |
 | `exec` | `{command, shell, cwd, timeout_ms, admin}` | `{exit_code, stdout, stderr, timed_out}` |
+| `list_apps` | `{query, limit}` | `{apps: [{id, name, launch: {path, args, cwd}, running, windows: [{handle, pid, title}]}], total, truncated, warnings}` (see 7.5) |
 | `write_file` | `{path}` + payload (file contents) | none |
 | `read_file` | `{path}` | payload (file contents) |
 | `list_dir` | `{path}` | `{entries: [{name, is_dir}]}`, links skipped |

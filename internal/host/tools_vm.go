@@ -187,7 +187,7 @@ func agentErr(err error) error {
 // registerVM registers the VM, checkpoint (with registerCheckpoint), command, file, clipboard, wait and agent tools.
 func registerVM(d *deps) {
 	m, backend, input, call, u := d.m, d.backend, d.input, d.call, d.u
-	addToolIn(d, toolSpec{name: "vm_list", desc: "List the Hyper-V VMs: name, state (Running, Off, Saved, Paused) and id, plus this server's run_id (checkpoints created in this run carry it).", readOnly: true, idempotent: true}, func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
+	addToolIn(d, toolSpec{name: "vm_list", desc: "List the Hyper-V VMs: name, state (Running, Off, Saved, Paused) and id, plus this task's task_id and run_id (checkpoints created by this task carry its run_id).", readOnly: true, idempotent: true}, func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
 		vms, err := backend.ListVMs()
 		if err != nil {
 			return nil, err
@@ -195,7 +195,7 @@ func registerVM(d *deps) {
 		if vms == nil {
 			vms = []hyperv.VM{}
 		}
-		return jsonResult(map[string]any{"vms": vms, "run_id": d.runID})
+		return jsonResult(map[string]any{"vms": vms, "run_id": d.taskRunID(ctx)})
 	})
 	addToolIn(d, toolSpec{name: "vm_start", desc: "Start a VM (if it is not running) and wait until its desktop is usable: the guest agent answers with the current protocol and the session is unlocked (the unlock password stored in the HyperHand tray is typed if the session is locked). A refusal says why the desktop is not usable; the VM keeps running.", idempotent: true}, func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
 		v, err := backend.Find(in.VM)
@@ -334,7 +334,7 @@ func registerVM(d *deps) {
 		if strings.EqualFold(l.CheckpointType, "Disabled") {
 			return nil, refuse(codeInvalidArgument, disabledNext, map[string]any{"checkpoint_type": l.CheckpointType}, "checkpoints are disabled for VM %q (its Hyper-V checkpoint setting is Disabled)", v.Name)
 		}
-		c, err := createCheckpoint(d, v.Name, label, in.Keep)
+		c, err := createCheckpoint(ctx, d, v.Name, label, in.Keep)
 		if err != nil {
 			return nil, err
 		}
@@ -355,7 +355,7 @@ func registerVM(d *deps) {
 		}
 		out := restoreOut{VM: v.Name, Restored: checkpointRefOf(target), Next: "call vm_start to make sure the desktop is usable"}
 		if in.SaveCurrent {
-			saved, err := createCheckpoint(d, v.Name, "before-restore", false)
+			saved, err := createCheckpoint(ctx, d, v.Name, "before-restore", false)
 			if err != nil {
 				return nil, err
 			}
@@ -451,7 +451,7 @@ func registerVM(d *deps) {
 		}
 		return jsonResult(map[string]any{"ok": true})
 	})
-	addToolIn(d, toolSpec{name: "vm_wait", desc: "Wait until a process runs (process_running) or exits (process_exit), or a file exists (file_exists), up to timeout_ms (default 60 s; satisfied is then false). vm_end_turn cancels pending waits.", readOnly: true, idempotent: true}, func(ctx context.Context, in waitIn) (*mcp.CallToolResult, error) {
+	addToolIn(d, toolSpec{name: "vm_wait", desc: "Wait until a process runs (process_running) or exits (process_exit), or a file exists (file_exists), up to timeout_ms (default 60 s; satisfied is then false). vm_end_turn cancels only the selected task's waits (and only the selected VM when vm is supplied).", readOnly: true, idempotent: true}, func(ctx context.Context, in waitIn) (*mcp.CallToolResult, error) {
 		switch in.Kind {
 		case "process_running", "process_exit":
 			if in.Name == "" {
@@ -466,11 +466,11 @@ func registerVM(d *deps) {
 		}
 		wctx, cancel := context.WithCancel(ctx)
 		defer cancel()
-		defer d.turn.addWait(cancel)()
+		defer d.taskTurn(ctx).addVMWait(in.VM, cancel)()
 		start := time.Now()
 		var r proto.WaitResult
 		if _, err := call(wctx, in.VM, proto.OpWait, proto.WaitArgs{Kind: in.Kind, Name: in.Name, Path: in.Path, TimeoutMs: in.TimeoutMs}, nil, &r); err != nil {
-			if wctx.Err() != nil && ctx.Err() == nil {
+			if errors.Is(context.Cause(ctx), errTaskEnd) || wctx.Err() != nil && ctx.Err() == nil {
 				return nil, refuse(codeFailed, "", map[string]any{"elapsed_ms": time.Since(start).Milliseconds()}, "the wait was cancelled by vm_end_turn")
 			}
 			return nil, agentErr(err)
@@ -739,8 +739,8 @@ type createdCheckpoint struct {
 
 // createCheckpoint creates the checkpoint <run_id>-(temp|keep)-<label> of vm and registers a temp one with
 // turnState. Hyper-V refusing because checkpoints are disabled is invalid_argument with the setting to change.
-func createCheckpoint(d *deps, vm, label string, keep bool) (createdCheckpoint, error) {
-	name := checkpointName(d.runID, label, keep)
+func createCheckpoint(ctx context.Context, d *deps, vm, label string, keep bool) (createdCheckpoint, error) {
+	name := checkpointName(d.taskRunID(ctx), label, keep)
 	c, err := d.backend.CreateCheckpoint(vm, name)
 	if err != nil {
 		if checkpointsDisabled(err) {
@@ -755,7 +755,7 @@ func createCheckpoint(d *deps, vm, label string, keep bool) (createdCheckpoint, 
 	if keep {
 		typ = checkpointKeep
 	} else {
-		d.turn.addTempCheckpoint(vm, tempCheckpoint{ID: c.ID, Name: c.Name})
+		d.taskTurn(ctx).addTempCheckpoint(vm, tempCheckpoint{ID: c.ID, Name: c.Name})
 	}
 	return createdCheckpoint{Checkpoint: c, Type: typ}, nil
 }

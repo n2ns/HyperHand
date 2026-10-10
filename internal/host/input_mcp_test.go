@@ -134,7 +134,7 @@ func TestInputMCPSequenceValidatesBeforeSending(t *testing.T) {
 	defer cancel()
 	var operations atomic.Int32
 	b := &inputMCPBackend{windowMCPBackend: &windowMCPBackend{
-		find: func(string) (hyperv.VM, error) { operations.Add(1); return hyperv.VM{ID: "A", Name: "A"}, nil },
+		find: func(string) (hyperv.VM, error) { return hyperv.VM{ID: "A", Name: "A"}, nil },
 	}, press: func(string, string) error { operations.Add(1); return nil }}
 	cs := connectInputMCP(t, ctx, b)
 	for _, args := range []map[string]any{

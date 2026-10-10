@@ -19,7 +19,7 @@ import (
 
 func TestRunIDNaming(t *testing.T) {
 	id := newRunID()
-	if !regexp.MustCompile(`^run-\d{8}-\d{4}-[0-9a-f]{4}$`).MatchString(id) {
+	if !regexp.MustCompile(`^run-\d{8}-\d{4}-[0-9a-f]{16}$`).MatchString(id) {
 		t.Fatalf("run ID %q", id)
 	}
 	if id2 := newRunID(); id2 == id {

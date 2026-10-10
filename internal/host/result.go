@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -122,11 +123,75 @@ func addToolIn[In any](d *deps, spec toolSpec, f func(context.Context, In) (*mcp
 	tool := &mcp.Tool{Name: spec.name, Description: spec.desc, Annotations: &mcp.ToolAnnotations{
 		ReadOnlyHint: spec.readOnly, DestructiveHint: &destructive, IdempotentHint: spec.idempotent, OpenWorldHint: &openWorld,
 	}}
-	mcp.AddTool(d.s, tool, func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
+	schema, err := jsonschema.For[In](nil)
+	if err != nil {
+		panic(err)
+	}
+	if schema.Properties == nil {
+		schema.Properties = map[string]*jsonschema.Schema{}
+	}
+	schema.Properties["task_id"] = &jsonschema.Schema{Type: "string", Description: "Unique AI task identifier. Reuse on every call when sharing a session or reconnecting; omit only for a dedicated persistent MCP session. vm_end_turn without vm ends this task; use a new ID afterwards."}
+	tool.InputSchema = schema
+	mcp.AddTool(d.s, tool, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
+		var args struct {
+			TaskID string `json:"task_id"`
+			VM     string `json:"vm"`
+		}
+		_ = json.Unmarshal(req.Params.Arguments, &args)
+		task, err := d.resolveTask(req, args.TaskID, spec.name == "vm_end_turn")
+		if err != nil {
+			return errorResult("", err), nil, nil
+		}
+		if task != nil {
+			ctx = context.WithValue(ctx, taskContextKey{}, task)
+			if spec.name != "vm_end_turn" {
+				vm := args.VM
+				if !spec.readOnly || spec.name == "vm_wait" || spec.name == "vm_observe" {
+					v, err := d.raw.Find(vm)
+					if err != nil {
+						switch spec.name {
+						case "vm_observe":
+							err = refuse(codeFailed, "call vm_list and pass vm", nil, "%v", err)
+						case "vm_click", "vm_drag", "vm_scroll", "vm_type", "vm_key", "vm_set_value", "vm_invoke":
+							// Input actions have historically returned the raw lookup error.
+						default:
+							err = vmErr(err)
+						}
+						return taskResult(errorResult(task.runID, err), task), nil, nil
+					}
+					vm = v.Name
+					// Pin the selector passed to the handler too: resolving the default
+					// again could send a write to a different VM than the lease protects.
+					b, _ := json.Marshal(in)
+					var pinned map[string]json.RawMessage
+					_ = json.Unmarshal(b, &pinned)
+					pinned["vm"], _ = json.Marshal(vm)
+					b, _ = json.Marshal(pinned)
+					_ = json.Unmarshal(b, &in)
+				}
+				var done func()
+				ctx, done, err = task.enter(ctx, vm, spec.name == "vm_wait")
+				if err != nil {
+					return taskResult(errorResult(task.runID, err), task), nil, nil
+				}
+				defer done()
+				if !spec.readOnly {
+					if err := d.tasks.claim(task, vm); err != nil {
+						return taskResult(errorResult(task.runID, err), task), nil, nil
+					}
+					switch spec.name {
+					case "vm_start", "vm_shutdown", "vm_turn_off", "vm_restore", "vm_unlock", "vm_install_agent", "vm_update_agent":
+						defer d.beginExternalMutation(ctx, vm, true)()
+					case "vm_exec", "vm_launch":
+						defer d.beginExternalMutation(ctx, vm, false)()
+					}
+				}
+			}
+		}
 		r, err := f(ctx, in)
 		if err != nil {
-			return errorResult(d.runID, err), nil, nil
+			return taskResult(errorResult(d.taskRunID(ctx), err), task), nil, nil
 		}
-		return r, nil, nil
+		return taskResult(r, task), nil, nil
 	})
 }

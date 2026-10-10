@@ -28,7 +28,7 @@ type pointIn struct {
 
 type clickIn struct {
 	VM            string   `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
-	ObservationID string   `json:"observation_id,omitempty" jsonschema:"observation_id from vm_observe: x and y are then pixels of that observation's image and index refers to its control tree; the action is refused (stale_observation) when the observed window moved, resized, minimized or closed since. Without it x and y are raw guest screen pixels with no checks (sign-in screen, UAC prompt)"`
+	ObservationID string   `json:"observation_id,omitempty" jsonschema:"observation_id from vm_observe: x and y are then pixels of that observation's image and index refers to its control tree; stale_observation refuses old coordinates after VM mutations, lifecycle changes, window identity/geometry changes or significant visual changes near the target. Stable control runtime IDs are re-located after ordinary mutations. Without it x and y are raw guest screen pixels with no checks (sign-in screen, UAC prompt)"`
 	X             int      `json:"x,omitempty" jsonschema:"horizontal pixel; ignored when index is set"`
 	Y             int      `json:"y,omitempty" jsonschema:"vertical pixel; ignored when index is set"`
 	Index         *int     `json:"index,omitempty" jsonschema:"a control index of the observation's tree (requires observation_id): clicks the centre of its rect"`
@@ -41,7 +41,7 @@ type clickIn struct {
 
 type dragIn struct {
 	VM            string   `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
-	ObservationID string   `json:"observation_id,omitempty" jsonschema:"observation_id from vm_observe: from and to are then pixels of that observation's image; the action is refused (stale_observation) when the observed window moved, resized, minimized or closed since. Without it from and to are raw guest screen pixels with no checks"`
+	ObservationID string   `json:"observation_id,omitempty" jsonschema:"observation_id from vm_observe: from and to are then pixels of that observation's image; stale_observation refuses old coordinates after VM mutations, lifecycle changes, window identity/geometry changes or significant visual changes near the target. Stable control runtime IDs are re-located after ordinary mutations. Without it from and to are raw guest screen pixels with no checks"`
 	From          pointIn  `json:"from" jsonschema:"where the left button goes down"`
 	To            pointIn  `json:"to" jsonschema:"where it comes up"`
 	Modifiers     []string `json:"modifiers,omitempty" jsonschema:"keys held during the drag: any of ctrl, shift, alt"`
@@ -51,7 +51,7 @@ type dragIn struct {
 
 type scrollIn struct {
 	VM            string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
-	ObservationID string `json:"observation_id,omitempty" jsonschema:"observation_id from vm_observe: x and y are then pixels of that observation's image; the action is refused (stale_observation) when the observed window moved, resized, minimized or closed since. Without it x and y are raw guest screen pixels with no checks"`
+	ObservationID string `json:"observation_id,omitempty" jsonschema:"observation_id from vm_observe: x and y are then pixels of that observation's image; stale_observation refuses old coordinates after VM mutations, lifecycle changes, window identity/geometry changes or significant visual changes near the target. Stable control runtime IDs are re-located after ordinary mutations. Without it x and y are raw guest screen pixels with no checks"`
 	X             int    `json:"x"`
 	Y             int    `json:"y"`
 	DeltaY        int    `json:"delta_y,omitempty" jsonschema:"wheel notches: positive scrolls up, negative down"`
@@ -136,7 +136,7 @@ func registerActions(d *deps) {
 			return a.out(nil, hit, o), nil
 		})
 	})
-	addToolIn(d, toolSpec{name: "vm_drag", desc: "Drag with the left button from one point to another, with modifiers held. Points are pixels of the observation_id image, or raw screen pixels without it. The same checks as vm_click apply at the from point. Result: {ok, window, after}." + descUntrusted}, func(ctx context.Context, in dragIn) (*mcp.CallToolResult, error) {
+	addToolIn(d, toolSpec{name: "vm_drag", desc: "Drag with the left button from one point to another, with modifiers held. Points are pixels of the observation_id image, or raw screen pixels without it. The same target checks as vm_click apply at the from point; both endpoints are checked for stale coordinates and local visual changes. Result: {ok, window, after}." + descUntrusted}, func(ctx context.Context, in dragIn) (*mcp.CallToolResult, error) {
 		if err := validateModifiers(in.Modifiers); err != nil {
 			return nil, err
 		}
@@ -150,7 +150,11 @@ func registerActions(d *deps) {
 				if x2, y2, err = o.toScreen(in.To.X, in.To.Y); err != nil {
 					return nil, err
 				}
+				if err := a.freshCoordinates(o, x2, y2); err != nil {
+					return nil, err
+				}
 			}
+			a.mutated = true
 			if err := a.d.raw.Drag(a.vm, x1, y1, x2, y2, in.Modifiers); err != nil {
 				return nil, err
 			}
@@ -167,11 +171,13 @@ func registerActions(d *deps) {
 				return nil, err
 			}
 			if in.DeltaY != 0 {
+				a.mutated = true
 				if err := a.d.raw.Scroll(a.vm, x, y, in.DeltaY); err != nil {
 					return nil, err
 				}
 			}
 			if in.DeltaX != 0 {
+				a.mutated = true
 				if _, err := a.d.call(a.ctx, a.vm, proto.OpHScroll, proto.HScrollArgs{X: x, Y: y, Delta: in.DeltaX}, nil, nil); err != nil {
 					return nil, agentRequired(err)
 				}
@@ -250,6 +256,7 @@ func (a *action) click(id string, u, v int, index *int, activate bool, button, c
 			return
 		}
 	}
+	a.mutated = true
 	return hit, o, a.d.raw.Click(a.vm, x, y, button, count, modifiers)
 }
 
@@ -336,6 +343,7 @@ func (a *action) typeText(in typeTextIn) (*actionOut, error) {
 			}
 			return nil, refuse(codeSessionUnusable, "call vm_unlock, or type ASCII text", map[string]any{"session": a.ws.Session}, "the Hyper-V keyboard cannot type %q and the agent's session cannot receive injected input", r)
 		}
+		a.mutated = true
 		if err := a.d.raw.TypeText(a.vm, in.Text); err != nil {
 			return nil, err
 		}
@@ -388,6 +396,7 @@ func (a *action) pressKeys(combos []string, sel windowSelector, activate bool) (
 			}
 			sel = windowSelector{Handle: root.Handle, PID: root.PID} // pinned: later combinations go to this group only
 		}
+		a.mutated = true
 		if err := a.d.raw.PressKeys(a.vm, keys); err != nil {
 			return nil, partial(i, fmt.Errorf("combination %q: %w", keys, err))
 		}

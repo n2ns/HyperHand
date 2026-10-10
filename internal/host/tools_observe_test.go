@@ -483,12 +483,12 @@ func TestVMWindowsResult(t *testing.T) {
 	}
 	var keys map[string]json.RawMessage
 	json.Unmarshal([]byte(resultText(r)), &keys)
-	for _, k := range []string{"windows", "foreground", "focused_control", "session"} {
+	for _, k := range []string{"windows", "foreground", "focused_control", "session", "task_id", "run_id"} {
 		if _, ok := keys[k]; !ok {
 			t.Errorf("missing key %s", k)
 		}
 	}
-	if len(keys) != 4 {
+	if len(keys) != 6 {
 		t.Errorf("unexpected keys: %v", keys)
 	}
 }

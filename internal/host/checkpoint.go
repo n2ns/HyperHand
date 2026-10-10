@@ -19,7 +19,7 @@ const (
 	checkpointManual = "manual"
 )
 
-var checkpointNameRe = regexp.MustCompile(`^(run-\d{8}-\d{4}-[0-9a-f]{4})-(temp|keep)-(.+)$`)
+var checkpointNameRe = regexp.MustCompile(`^(run-\d{8}-\d{4}-(?:[0-9a-f]{4}|[0-9a-f]{16}))-(temp|keep)-(.+)$`)
 
 // checkpointName builds the name of a checkpoint created in run runID.
 func checkpointName(runID, label string, keep bool) string {
@@ -30,7 +30,7 @@ func checkpointName(runID, label string, keep bool) string {
 	return runID + "-" + typ + "-" + label
 }
 
-// parseCheckpointName splits "run-<yyyymmdd-hhmm>-<4hex>-(temp|keep)-<label>"; any other name is a manual checkpoint.
+// parseCheckpointName accepts legacy 4-hex and current 16-hex run suffixes; other names are manual checkpoints.
 func parseCheckpointName(name string) (runID, typ, label string) {
 	m := checkpointNameRe.FindStringSubmatch(name)
 	if m == nil {

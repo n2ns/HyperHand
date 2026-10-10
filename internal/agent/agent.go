@@ -30,6 +30,7 @@ var handlers = map[string]Handler{
 	proto.OpListControls:  listControls,
 	proto.OpControlAction: controlAction,
 	proto.OpLaunch:        launch,
+	proto.OpListApps:      listApps,
 	proto.OpHScroll:       hscroll,
 	proto.OpFocusWindow:   focusWindow,
 	proto.OpListWindows:   listWindows,

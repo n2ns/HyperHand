@@ -91,11 +91,14 @@ type observeFunc func(ctx context.Context, in observeIn) (*observeOut, []byte, e
 // observation is what the host remembers about one vm_observe result so that later actions can be checked against it
 // and mapped back to screen pixels.
 type observation struct {
-	ID      string
-	VM      string
-	At      time.Time
-	Window  *proto.WindowInfo  // the observed window; nil for a whole-screen observation
-	Windows []proto.WindowInfo // the window list at capture time
+	ID        string
+	VM        string
+	At        time.Time
+	Revision  uint64             // guest mutations since capture invalidate coordinate-based targets
+	Epoch     uint64             // VM lifecycle changes invalidate both coordinates and control identities
+	SourcePNG []byte             // original screen image, before cropping/scaling, for local visual checks
+	Window    *proto.WindowInfo  // the observed window; nil for a whole-screen observation
+	Windows   []proto.WindowInfo // the window list at capture time
 	// Output image geometry: Crop is the captured region in guest screen pixels (host screenshots are at the guest's
 	// screen resolution, so screenshot pixels are screen pixels) and Scale/ScaleY are output pixels per screen pixel
 	// on each axis (ScaleY 0 means Scale).
@@ -145,14 +148,19 @@ func (o *observation) node(index int) (proto.ControlInfo, error) {
 
 // observationStore keeps the most recent observations per VM.
 type observationStore struct {
-	mu    sync.Mutex
-	byID  map[string]*observation
-	order map[string][]string // VM -> IDs, oldest first
-	limit int
+	mu        sync.Mutex
+	byID      map[string]*observation
+	order     map[string][]string // VM -> IDs, oldest first
+	limit     int
+	revisions *observationRevisions
 }
 
 func newObservationStore() *observationStore {
-	return &observationStore{byID: map[string]*observation{}, order: map[string][]string{}, limit: 8}
+	return newObservationStoreWithRevisions(&observationRevisions{byVM: map[string]observationVersion{}})
+}
+
+func newObservationStoreWithRevisions(revisions *observationRevisions) *observationStore {
+	return &observationStore{byID: map[string]*observation{}, order: map[string][]string{}, limit: 8, revisions: revisions}
 }
 
 // newID returns a fresh observation ID ("o-" and 4 hex bytes).
@@ -191,9 +199,24 @@ func (s *observationStore) get(id string) (*observation, error) {
 	return nil, refuse(codeStaleObservation, "call vm_observe again and use its observation_id", nil, "unknown observation_id %q (expired or never issued)", id)
 }
 
-// runID names this MCP server process's run; checkpoints and errors carry it.
+// clear releases only this task's observations; shared VM revisions stay intact.
+func (s *observationStore) clear(vm string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if vm == "" {
+		s.byID = map[string]*observation{}
+		s.order = map[string][]string{}
+		return
+	}
+	for _, id := range s.order[vm] {
+		delete(s.byID, id)
+	}
+	delete(s.order, vm)
+}
+
+// runID names one AI task's run; checkpoints and results carry it.
 func newRunID() string {
-	var b [2]byte
+	var b [8]byte
 	rand.Read(b[:])
 	return fmt.Sprintf("run-%s-%s", time.Now().Format("20060102-1504"), hex.EncodeToString(b[:]))
 }
