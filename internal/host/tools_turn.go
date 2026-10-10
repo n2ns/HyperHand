@@ -15,9 +15,10 @@ type endTurnIn struct {
 	AllTemp bool   `json:"all_temp,omitempty" jsonschema:"also delete temp checkpoints of other runs (every checkpoint named <run_id>-temp-<label>) on the VM, or on every VM when vm is omitted; default false"`
 }
 
-// endTurnOut is vm_end_turn's result. DeletedCheckpoints are the names of the deleted checkpoints; Skipped lists the
-// temp checkpoints all_temp found but could not delete (with the reason); Errors are this run's registered
-// checkpoints that could not be deleted (kept for the next call) and VMs whose checkpoints could not be listed.
+// endTurnOut is vm_end_turn's result. DeletedCheckpoints are the names of the deleted checkpoints; Skipped lists
+// checkpoints that were not deleted, with the reason: registered temps that are no longer temp-named (renamed to keep
+// or by hand) and, with all_temp, temps whose deletion failed; Errors are this run's registered checkpoints whose
+// deletion failed (kept for the next call) and VMs whose checkpoints could not be listed.
 type endTurnOut struct {
 	CancelledWaits     int                 `json:"cancelled_waits"`
 	DeletedCheckpoints []string            `json:"deleted_checkpoints"`
@@ -25,7 +26,7 @@ type endTurnOut struct {
 	Errors             []string            `json:"errors"`
 }
 
-// skippedCheckpoint is a temp checkpoint vm_end_turn {all_temp: true} could not delete.
+// skippedCheckpoint is a checkpoint vm_end_turn did not delete, with the reason.
 type skippedCheckpoint struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
@@ -98,7 +99,7 @@ func deleteRegisteredTemp(d *deps, vm string, cps []tempCheckpoint, out *endTurn
 
 // registerTurn registers vm_end_turn.
 func registerTurn(d *deps) {
-	addToolIn(d, toolSpec{name: "vm_end_turn", desc: "End the turn: cancel this server's pending vm_wait calls and delete the temp checkpoints created in this run (run_id). Keep and manual checkpoints, running programs and the VM's power state are not touched. Meant for a Stop hook; safe to call any time. all_temp: true additionally deletes every temp checkpoint of any run (names <run_id>-temp-<label>) on the VM, or on every VM when vm is omitted, to clean up after a crashed or restarted server; this crosses runs, so use it only when no other HyperHand client is working on the VM. Deleting merges disk differences and can take minutes per checkpoint; checkpoints all_temp could not delete are listed in skipped.", destructive: true, idempotent: true}, func(ctx context.Context, in endTurnIn) (*mcp.CallToolResult, error) {
+	addToolIn(d, toolSpec{name: "vm_end_turn", desc: "End the turn: cancel this server's pending vm_wait calls and delete the temp checkpoints created in this run (run_id). Keep and manual checkpoints, running programs and the VM's power state are not touched. Meant for a Stop hook; safe to call any time. all_temp: true additionally deletes every temp checkpoint of any run (names <run_id>-temp-<label>) on the VM, or on every VM when vm is omitted, to clean up after a crashed or restarted server; this crosses runs, so use it only when no other HyperHand client is working on the VM. Deleting merges disk differences and can take minutes per checkpoint; registered temps that were renamed to keep (or by hand) in the meantime are not deleted and listed in skipped, as are temps all_temp could not delete.", destructive: true, idempotent: true}, func(ctx context.Context, in endTurnIn) (*mcp.CallToolResult, error) {
 		waits := d.turn.takeWaits()
 		for _, cancel := range waits {
 			cancel()

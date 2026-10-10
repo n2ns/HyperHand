@@ -20,7 +20,7 @@ HyperHand has two executables and three roles:
 - **Screen, mouse and keyboard from the host**: the screenshot and raw mouse and keyboard input go through Hyper-V and work on the sign-in screen and UAC prompts too, since they do not depend on anything running in the guest.
 - **Commands and programs in the guest**: run PowerShell or cmd in the user's desktop session and get the exit code, stdout and stderr back, optionally elevated; `vm_launch` starts a GUI program detached and returns its window handle.
 - **File transfer**: copy files or whole directories in either direction, streamed at hundreds of MB/s. Uploads skip files whose SHA-256 already matches the guest copy.
-- **Checkpoints**: list, create and restore; `vm_end_turn` deletes the temporary checkpoints of a turn, keeps the ones marked `keep`.
+- **Checkpoints**: list the tree, create, restore, keep and delete, selecting by stable `id`; `vm_end_turn` deletes the temporary checkpoints of a turn, keeps the ones marked `keep`.
 - **Clipboard, windows and waiting**: read and write the guest clipboard, list windows with their owner groups, focused control and session state, and wait for process or file conditions.
 - **Start to a usable desktop**: `vm_start` waits until the agent answers and the session is unlocked. If Windows locked the session after signing in, it types the unlock password you stored in the tray; `vm_status` reports power, agent and lock state, `vm_doctor` diagnoses host and guest.
 - **Results an AI can act on**: every result is one JSON object; every error is a JSON object with an error code, the reason and `next`, the call that makes progress.
@@ -85,7 +85,9 @@ Every tool takes an optional `vm` (VM name). Without it, the only running VM is 
 | `vm_list`, `vm_start` | List VMs with their state and the server's `run_id`; start and wait until the desktop is usable (unlocking it with the stored password) |
 | `vm_shutdown`, `vm_turn_off` | Shut the guest down normally and wait until the VM is off (fails, without turning it off, if a program blocks shutdown); turn the VM off immediately, like pulling the plug |
 | `vm_status`, `vm_unlock`, `vm_doctor` | Report power state, agent, session lock state and whether an unlock password is stored; unlock a locked session with the stored password; run read-only host and guest checks with a suggestion per problem |
-| `vm_checkpoints`, `vm_checkpoint`, `vm_restore` | List checkpoints (`name`, `id`, `parent`, `type`); create one named `<run_id>-temp-<label>` (or `-keep-` with `keep: true`); restore by exact name and start the VM unless `start` is false |
+| `vm_checkpoints`, `vm_checkpoint` | List the checkpoint tree (`id`, `name`, `parent`, `type`, `kind`, `state`, `current`, `children`, plus the VM's `checkpoint_type` and `current_parent`); create one named `<run_id>-temp-<label>` (or `-keep-` with `keep: true`) and return its `id` |
+| `vm_restore` | Restore a checkpoint by `id` (or by `name` when it is unique) and start the VM unless `start` is false; `save_current: true` first saves the current state as a `temp` checkpoint |
+| `vm_checkpoint_keep`, `vm_checkpoint_delete` | Rename a `temp` checkpoint to `keep` so that `vm_end_turn` leaves it alone; delete a checkpoint by `id` (`manual` ones by `id` only), with `subtree: true` its whole branch, waiting for Hyper-V to merge the disks |
 | `vm_windows` | List visible windows: handle, title, class, process, rect, enabled, foreground, owner, `group_root`, `integrity`; plus the foreground handle, the focused control and the session state |
 | `vm_observe` | The observation entry point: PNG of the screen or of one window (`handle`), the focused control, `selected_text` and with `controls: true` the indexed control tree (`diff_from` for changes only); returns an `observation_id` |
 | `vm_click`, `vm_drag`, `vm_scroll` | Mouse at image pixels of an `observation_id`, or at a control `index` (`vm_click`); `button`, `count`, `modifiers`, `delta_y`/`delta_x`; without an observation, raw screen pixels |
@@ -96,7 +98,7 @@ Every tool takes an optional `vm` (VM name). Without it, the only running VM is 
 | `vm_push`, `vm_pull` | Copy files or directories host to guest and back; `vm_push` skips unchanged files unless `force` is true |
 | `vm_clipboard_get`, `vm_clipboard_set` | Read or write the guest clipboard |
 | `vm_wait` | Wait until a process exits or runs, or a file exists |
-| `vm_end_turn` | Cancel pending waits and delete this run's temporary checkpoints; meant for a Stop hook |
+| `vm_end_turn` | Cancel pending waits and delete this run's temporary checkpoints (`all_temp: true`: every run's); meant for a Stop hook |
 | `vm_install_agent`, `vm_update_agent` | Install or replace the guest agent |
 
 The host screenshot, raw mouse and keyboard input (actions without `observation_id`, `handle` or `pid`), VM and checkpoint tools work without the agent; window lists, control trees, targeted actions, Unicode text, launching, commands and files need it. Without the agent, `vm_start` still starts the VM but reports that the desktop is not usable.
@@ -109,7 +111,7 @@ Actions take `observation_id` from `vm_observe` and either image pixels of that 
 - `vm_install_agent` types its command on the keyboard; the guest input method must be in English mode. Installing the agent manually avoids this.
 - `admin` commands elevate without a prompt only if the guest's UAC is set to elevate administrators without prompting; otherwise the UAC wait counts toward the command timeout. A late approval cannot execute a cancelled or expired request.
 - Host-side screenshots and input act on the VM console; they do not reach a remote desktop or enhanced session. Actions refuse such a session with `session_unusable`.
-- Only this run's temporary checkpoints can be deleted from HyperHand (`vm_end_turn`); other checkpoints are deleted in Hyper-V Manager.
+- Checkpoints cannot be renamed freely: `vm_checkpoint_keep` only turns a `temp` checkpoint into a `keep` one (with an optional new label). Deleting a checkpoint merges its disk differences, which can take minutes; the call waits for it (up to 15 minutes).
 - Control trees depend on the application's UI Automation support; custom-drawn controls may be missing, so some targets are reachable only by image pixels.
 - HyperHand unlocks only a session that is signed in and locked, with its agent running: it cannot sign a user in at the sign-in screen after a cold boot. Use automatic sign-in for that. The unlock password must be ASCII (the Hyper-V keyboard types ASCII only); store the PIN instead if the lock screen asks for one.
 

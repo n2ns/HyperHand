@@ -43,7 +43,7 @@ var ErrCheckpointNotFound = errors.New("checkpoint not found")
 // a root, which [string] turns into ""); SnapshotType is Standard for a user checkpoint and Recovery/Planned/Missing/
 // Replica... otherwise; State is the saved power state (Running, Off, Saved...).
 // https://learn.microsoft.com/en-us/powershell/module/hyper-v/get-vmsnapshot
-const snapshotFields = `@{n='id';e={[string]$_.Id}},@{n='name';e={$_.Name}},@{n='parent_id';e={[string]$_.ParentSnapshotId}},@{n='created_at';e={$_.CreationTime.ToString('yyyy-MM-ddTHH:mm:sszzz')}},@{n='kind';e={switch ([string]$_.SnapshotType) { 'Standard' {'standard'} 'Recovery' {'production'} default {([string]$_.SnapshotType).ToLower()} }}},@{n='state';e={([string]$_.State).ToLower()}}`
+const snapshotFields = `@{n='id';e={[string]$_.Id}},@{n='name';e={$_.Name}},@{n='parent_id';e={[string]$_.ParentSnapshotId}},@{n='created_at';e={$_.CreationTime.ToString('yyyy-MM-ddTHH:mm:sszzz')}},@{n='kind';e={switch ([string]$_.SnapshotType) { 'Standard' {'standard'} 'Recovery' {'production'} default {$_.ToLower()} }}},@{n='state';e={([string]$_.State).ToLower()}}`
 
 // checkpointScript is the PowerShell that lists a VM's checkpoint tree as one JSON object. vmScript sets $vm to the
 // Microsoft.HyperV.PowerShell.VirtualMachine, whose CheckpointType is the Set-VM -CheckpointType setting (Disabled,

@@ -51,8 +51,8 @@ HyperHand consists of two Windows executables.
 
 - Every successful call returns one text item containing one JSON object. No tool returns free text or `ok` lines.
 - `vm_observe`, and an action whose `observe_after` includes a screenshot (see 4.4), return a PNG image item **before** the JSON text item. No other tool returns an image.
-- Every tool carries MCP tool annotations. `openWorldHint` is `false` for all. `readOnlyHint` is `true` for `vm_list`, `vm_status`, `vm_checkpoints`, `vm_pull`, `vm_clipboard_get`, `vm_wait`, `vm_windows`, `vm_observe` and `vm_doctor`. `destructiveHint` is `true` for `vm_shutdown`, `vm_turn_off`, `vm_restore`, `vm_push`, `vm_update_agent` and `vm_end_turn`, and `false` for every other tool. `idempotentHint` is `true` for `vm_list`, `vm_start`, `vm_status`, `vm_unlock`, `vm_shutdown`, `vm_turn_off`, `vm_checkpoints`, `vm_push`, `vm_pull`, `vm_clipboard_get`, `vm_clipboard_set`, `vm_wait`, `vm_update_agent`, `vm_set_value`, `vm_end_turn` and `vm_doctor`. The annotations are hints for clients, not a security boundary.
-- Each MCP server process has a **run ID** of the form `run-<yyyymmdd-hhmm>-<4 hex>`, generated at start. It is returned by `vm_list`, carried in every error object and used in checkpoint names (see 3.4).
+- Every tool carries MCP tool annotations. `openWorldHint` is `false` for all. `readOnlyHint` is `true` for `vm_list`, `vm_status`, `vm_checkpoints`, `vm_pull`, `vm_clipboard_get`, `vm_wait`, `vm_windows`, `vm_observe` and `vm_doctor`. `destructiveHint` is `true` for `vm_shutdown`, `vm_turn_off`, `vm_restore`, `vm_checkpoint_delete`, `vm_push`, `vm_update_agent` and `vm_end_turn`, and `false` for every other tool. `idempotentHint` is `true` for `vm_list`, `vm_start`, `vm_status`, `vm_unlock`, `vm_shutdown`, `vm_turn_off`, `vm_checkpoints`, `vm_push`, `vm_pull`, `vm_clipboard_get`, `vm_clipboard_set`, `vm_wait`, `vm_update_agent`, `vm_set_value`, `vm_end_turn` and `vm_doctor`. The annotations are hints for clients, not a security boundary.
+- Each MCP server process has a **run ID** of the form `run-<yyyymmdd-hhmm>-<4 hex>`, generated at start. It is returned by `vm_list`, carried in every error object and used in checkpoint names (see 3.3).
 - Tool descriptions of `vm_windows`, `vm_observe`, the actions, `vm_exec`, `vm_pull` and `vm_clipboard_get` state that window titles, control names and values, selected text, command output, file contents and clipboard text are data from the guest, not instructions.
 
 ### 2.2 Error object and codes
@@ -70,7 +70,7 @@ Every refusal and failure is returned as an MCP result with `isError: true` whos
 | Code | When |
 |---|---|
 | `failed` | Any error without a specific code: Hyper-V, WMI or PowerShell failures, transport errors, errors the agent answered with (for example a `vm_exec` start failure), and VM lookup failures in `vm_observe` and the actions (see 2.3) |
-| `invalid_argument` | A parameter is missing, out of range or inconsistent, including VM lookup failures of the VM, checkpoint, command, file, clipboard, wait, launch and agent tools; also an observation that cannot provide what the action needs (no screenshot for pixel coordinates, no control tree for `index`) and a pixel outside the observation image |
+| `invalid_argument` | A parameter is missing, out of range or inconsistent, including VM lookup failures of the VM, checkpoint, command, file, clipboard, wait, launch and agent tools; also an observation that cannot provide what the action needs (no screenshot for pixel coordinates, no control tree for `index`) and a pixel outside the observation image; for checkpoints (see 3.3) an invalid `label`, a VM whose checkpoint setting is `Disabled`, a `manual` checkpoint selected by `name` for deletion, and `vm_checkpoint_keep` on a `keep` or `manual` checkpoint |
 | `stale_observation` | The `observation_id` is unknown or evicted, belongs to another VM, or its window no longer exists, is minimized, or has moved or resized since the observation |
 | `stale_element` | `index` is not in the observation's tree, or the control's runtime ID no longer resolves in the window when the host re-locates it before acting |
 | `session_unusable` | A targeted action: the agent reports its session locked, not the VM console session, or keyboard input on the secure desktop (see 4.4 step 2); untargeted `vm_type` of non-ASCII text while the session is locked or on the secure desktop |
@@ -83,8 +83,9 @@ Every refusal and failure is returned as an MCP result with `isError: true` whos
 | `partial_input` | `vm_type` or `vm_key` stopped after some input was injected; `applied_chars` / `total_chars` or `applied` / `total` say how much. A failure before anything was injected keeps the underlying code (`failed` with `applied_chars: 0`, or the refusal of the first combination) |
 | `agent_required` | The operation needs the guest agent, which did not answer or is not installed |
 | `agent_outdated` | The agent's protocol is older than the host's (`protocol` 2): every new agent connection is pinged first and every op except `ping` and `update_agent` is then refused (see 8.6); also an agent that answered `unknown op`. `next` is `call vm_update_agent` |
-| `ambiguous_target` | `pid` alone selects a process with several visible windows; `handles` lists them |
+| `ambiguous_target` | `pid` alone selects a process with several visible windows; `handles` lists them. A checkpoint `name` that several checkpoints have; `ids` lists them (see 3.3) |
 | `no_window` | No visible window has the given `handle` or `pid`, no window is in the foreground when one is needed, or `vm_launch` saw no window in time |
+| `no_checkpoint` | No checkpoint has the given `id` or `name` (field `id` or `name`), or the selected checkpoint disappeared before the operation; `next` is `call vm_checkpoints and pass a listed id` (see 3.3) |
 
 ### 2.3 VM selection
 
@@ -103,7 +104,7 @@ Every tool except `vm_list` takes an optional `vm` argument.
 
 ## 3. VM and Checkpoint Tools
 
-These tools use Hyper-V on the host and do not need the agent, except for the readiness and unlock steps in 3.7.
+These tools use Hyper-V on the host and do not need the agent, except for the readiness and unlock steps in 3.5.
 
 ### 3.1 vm_list
 
@@ -117,47 +118,118 @@ These tools use Hyper-V on the host and do not need the agent, except for the re
 
 ### 3.2 vm_start, vm_shutdown and vm_turn_off
 
-- `vm_start` requests state Running (`RequestStateChange` 2) unless the VM is already Running, then waits until the desktop is usable (see 3.7). Result: `{"vm": "Win10", "state": "running", "desktop": "usable", "agent": {"version": "0.3.0", "hostname": "WIN10", "user": "WIN10\\tester", "protocol": 2}, "unlocked": false}`; `unlocked` is `true` when the session was locked and `vm_start` unlocked it. When the desktop is not usable the refusal's `reason` starts with `VM <name> is running, but its desktop is not usable:` and its code is `agent_required` (no agent answer within 90 s), `agent_outdated` (fields `agent_protocol`, `host_protocol`) or `session_unusable` (field `locked: true`; the reason says why the unlock failed, see 3.7).
+- `vm_start` requests state Running (`RequestStateChange` 2) unless the VM is already Running, then waits until the desktop is usable (see 3.5). Result: `{"vm": "Win10", "state": "running", "desktop": "usable", "agent": {"version": "0.3.0", "hostname": "WIN10", "user": "WIN10\\tester", "protocol": 2}, "unlocked": false}`; `unlocked` is `true` when the session was locked and `vm_start` unlocked it. When the desktop is not usable the refusal's `reason` starts with `VM <name> is running, but its desktop is not usable:` and its code is `agent_required` (no agent answer within 90 s), `agent_outdated` (fields `agent_protocol`, `host_protocol`) or `session_unusable` (field `locked: true`; the reason says why the unlock failed, see 3.5).
 - `vm_shutdown` asks the guest to shut down through the Hyper-V shutdown integration service (`Msvm_ShutdownComponent.InitiateShutdown` with `Force` false), then checks the VM state every 2 seconds for up to 3 minutes until it is Off. Because shutdown is not forced, a program with unsaved work can keep Windows from shutting down; the tool then fails (`failed`, the reason names `vm_observe` and `vm_turn_off`) and the VM keeps running. If the integration service refuses the request (not running, guest not booted, disabled in the VM settings), the tool fails. It never turns the VM off itself. MCP clients and scripts must allow calls of more than 3 minutes for the wait to finish. Result, also for a VM that is already off: `{"vm": "Win10", "state": "off"}`.
 - `vm_turn_off` requests state Off (`RequestStateChange` 3), which turns the VM off at once like pulling the plug; unsaved guest work is lost. Result: `{"vm": "Win10", "state": "off"}`.
 - All three close the VM's agent client afterwards (see 1.3).
 - For `vm_start` and `vm_turn_off`, WMI return value 0 means completed. When WMI returns 4096 (job started), the tool waits up to 45 seconds for the asynchronous job and checks its result; a job failure or timeout is reported rather than returning success on acceptance. The operation is not resent automatically.
 
-### 3.3 vm_checkpoints
+### 3.3 Checkpoints
 
-`vm_checkpoints` lists the VM's checkpoints sorted by creation time, oldest first:
+Five tools manage Hyper-V checkpoints: `vm_checkpoints`, `vm_checkpoint`, `vm_restore`, `vm_checkpoint_delete` and `vm_checkpoint_keep`; `vm_end_turn` (see 7.4) deletes the temporary ones. None of them needs the agent.
+
+#### Hyper-V facts the tools rely on
+
+- A VM's checkpoints form a tree. Every checkpoint has a GUID id (the `Id` of [`Get-VMSnapshot`](https://learn.microsoft.com/en-us/powershell/module/hyper-v/get-vmsnapshot)) and an optional parent; the VM's current state branches from one checkpoint (the VM's `ParentCheckpointId`), which the tools report as `current_parent` and `current`.
+- Names may repeat; Hyper-V does not prevent it. Only the id is unique, so the id is the selector the tools prefer.
+- Two kinds: a **standard** checkpoint may hold the memory of a running VM and resumes running when restored; a **production** checkpoint is application-consistent and restores to off. The VM's checkpoint setting (`Set-VM -CheckpointType`: `Disabled`, `Production`, `ProductionOnly` or `Standard`) decides which kind [`Checkpoint-VM`](https://learn.microsoft.com/en-us/powershell/module/hyper-v/checkpoint-vm) creates; it cannot be chosen per checkpoint. HyperHand reports Hyper-V's `Standard` snapshot type as `standard`, `Recovery` as `production` and any other snapshot type lower-cased (`planned`, `missing`, `replica`, ...); those are not checkpoints to restore to. See [Microsoft's checkpoint guide](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/checkpoints).
+- Deleting a checkpoint ([`DestroySnapshot`](https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/destroysnapshot-msvm-virtualsystemsnapshotservice)) merges its disk differences into its children or, when it is the current state's parent, into the VM's current disk; its children are re-parented to its parent. Deleting a subtree ([`DestroySnapshotTree`](https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/destroysnapshottree-msvm-virtualsystemsnapshotservice)) removes the checkpoint and all its descendants. The merge takes time in proportion to the differences, minutes for large ones; HyperHand waits for the Hyper-V job for up to 15 minutes.
+- Restoring (applying) a checkpoint replaces the VM's current state. The replaced state is lost unless a checkpoint of it is created first; the restored checkpoint itself stays.
+- Renaming ([`Rename-VMSnapshot`](https://learn.microsoft.com/en-us/powershell/module/hyper-v/rename-vmsnapshot)) changes the name only; the id stays.
+
+#### Names and types
+
+HyperHand names the checkpoints it creates after the server's run ID (see 2.1) and classifies every checkpoint by its name:
+
+| Type | Name | Meaning | Deleted by |
+|---|---|---|---|
+| `temp` | `<run_id>-temp-<label>` | A rollback point for one run; disposable when the turn ends | `vm_end_turn` (this run's), `vm_end_turn` with `all_temp: true` (any run's), `vm_checkpoint_delete` |
+| `keep` | `<run_id>-keep-<label>` | A baseline kept across runs | `vm_checkpoint_delete` only |
+| `manual` | any other name | Made outside HyperHand, for example in Hyper-V Manager | `vm_checkpoint_delete` only, and only by `id` |
+
+- Names match `^(run-\d{8}-\d{4}-[0-9a-f]{4})-(temp|keep)-(.+)$`; `run_id` and `label` are parsed from the name and are `null` for a `manual` checkpoint.
+- A `label` is 1 to 64 characters and contains none of `\ / : * ? " < > |` or line breaks (Hyper-V uses checkpoint names in file paths). Anything else is `invalid_argument` with `next` `pass a label of 1 to 64 characters without \ / : * ? " < > | or line breaks`. The default label is the current time as `hhmmss`.
+
+#### Selecting a checkpoint
+
+`vm_restore`, `vm_checkpoint_delete` and `vm_checkpoint_keep` select their checkpoint with `id` (from `vm_checkpoints`; preferred) or `name`.
+
+- `id` wins when both are given and is compared case-insensitively. An unknown id is `no_checkpoint` with field `id` and `next` `call vm_checkpoints and pass a listed id`.
+- `name` is compared exactly (case-sensitive) and accepted when exactly one checkpoint has it. Several checkpoints with that name: `ambiguous_target` with `ids` (their ids) and `next` `pass id instead of name (vm_checkpoints shows each one's parent and created_at)`. None: `no_checkpoint` with field `name`.
+- Neither: `invalid_argument` with reason `id (or name) is required` and `next` `call vm_checkpoints and pass an id`.
+- A checkpoint that disappeared between the listing and the operation (Hyper-V answers `checkpoint not found`) is `no_checkpoint` with field `id`.
+
+#### vm_checkpoints
+
+`vm_checkpoints` (read-only) returns the VM's checkpoint tree in creation order, parents before children:
 
 ```json
-{"checkpoints": [{"name": "run-20261010-0812-7f3a-temp-step3", "created_at": "2026-10-10 16:12:03", "run_id": "run-20261010-0812-7f3a", "type": "temp", "label": "step3", "id": "8B1D...", "parent": "clean install"}]}
+{"vm": "Win10", "checkpoint_type": "Standard", "current_parent": "c85ca8fb-...", "checkpoints": [
+  {"id": "76221ce2-...", "name": "clean install", "parent": null, "created_at": "2026-10-04T23:49:55+08:00", "type": "manual", "run_id": null, "label": null, "kind": "standard", "state": "off", "current": false, "children": 1},
+  {"id": "c85ca8fb-...", "name": "run-20261010-0812-7f3a-temp-step3", "parent": "76221ce2-...", "created_at": "2026-10-10T08:15:00+08:00", "type": "temp", "run_id": "run-20261010-0812-7f3a", "label": "step3", "kind": "standard", "state": "running", "current": true, "children": 0}
+]}
 ```
 
-- `created_at` is `yyyy-MM-dd HH:mm:ss` in the host's local time; `id` is the checkpoint's Hyper-V ID; `parent` is the parent checkpoint's name (`""` for a root checkpoint).
-- `run_id`, `type` and `label` are parsed from the name (see 3.4): `type` is `temp` or `keep` for names HyperHand created, and `manual` (with empty `run_id` and `label`) for every other name.
+- `checkpoint_type` is the VM's Hyper-V checkpoint setting (`Standard`, `Production`, `ProductionOnly` or `Disabled`), which decides what `vm_checkpoint` will create.
+- `current_parent` is the id of the checkpoint the VM's current state branches from, `null` when there is none; the same checkpoint has `current: true`.
+- Per checkpoint: `id`; `name`; `parent` (the parent's id, `null` for a root); `created_at` (RFC 3339 with the host's offset); `type`, `run_id` and `label` (see above); `kind` (`standard`, `production` or another Hyper-V snapshot type lower-cased, see above); `state`, the power state the checkpoint saved (`running`, `off` or `saved`; `running` means it holds memory and resumes directly); `current`; `children`, the number of direct children (deleting the checkpoint re-parents them).
 - `checkpoints` is `[]` when the VM has none.
 
-### 3.4 vm_checkpoint
+#### vm_checkpoint
 
-`vm_checkpoint` creates a checkpoint with `Checkpoint-VM`. It takes `label` (default: the current time as `hhmmss`) and `keep` (default `false`), and names the checkpoint `<run_id>-temp-<label>`, or `<run_id>-keep-<label>` with `keep: true`. Names match `^(run-\d{8}-\d{4}-[0-9a-f]{4})-(temp|keep)-(.+)$`.
+`vm_checkpoint` creates a checkpoint of the VM's current state with `Checkpoint-VM`. It takes `label` (default `hhmmss`) and `keep` (default `false`) and names the checkpoint `<run_id>-temp-<label>`, or `<run_id>-keep-<label>` with `keep: true`. The new checkpoint becomes the current state's parent.
 
-- Result: `{"name": "run-20261010-0812-7f3a-temp-step3", "type": "temp", "created_at": "2026-10-10T08:12:03Z"}` (`created_at` is the host's UTC time in RFC 3339). Pass `name` to `vm_restore`.
-- A `temp` checkpoint is remembered by the server and deleted by `vm_end_turn` (see 7.4); a `keep` checkpoint stays until deleted by hand. HyperHand never deletes checkpoints whose names it did not create.
+- Result: `{"id": "c85ca8fb-...", "name": "run-20261010-0812-7f3a-temp-step3", "type": "temp", "kind": "standard", "state": "running", "parent": "76221ce2-...", "created_at": "2026-10-10T08:15:00+08:00"}`. Pass `id` to `vm_restore`, `vm_checkpoint_keep` or `vm_checkpoint_delete`.
+- A `temp` checkpoint is registered with the server, and `vm_end_turn` deletes it; `vm_checkpoint_keep` turns it into a `keep` one. A `keep` checkpoint is not registered and stays until `vm_checkpoint_delete`.
+- Refusals, all before anything is created: an invalid `label` (`invalid_argument`, see above); the VM's checkpoint setting is `Disabled` (`invalid_argument` with field `checkpoint_type` and `next` `enable checkpoints for the VM in Hyper-V Manager (Settings > Checkpoints) or with Set-VM -CheckpointType Standard, then retry`). Hyper-V refusing at creation time because checkpoints are disabled is reported the same way, without the field.
 
-### 3.5 vm_restore
+#### vm_restore
 
-`vm_restore` applies the checkpoint whose name equals `name` exactly (case-sensitive, no wildcards; the first match is used).
+`vm_restore` applies a checkpoint selected by `id` or `name` (see above), then starts the VM unless it is already running or `start` is `false`.
 
-- A missing `name` is `invalid_argument` (`call vm_checkpoints and pass a name`); an unknown name is `invalid_argument` with reason `checkpoint not found: <name>`.
-- The VM is resolved before the restore, so an empty `vm` still refers to the same VM after it stops running.
-- After the restore the agent client is discarded.
-- `start` (default `true`): if the VM is not `Running` after the restore, HyperHand starts it. With `start` = `false`, HyperHand skips this additional start operation and leaves the state produced by Hyper-V; it does not force Off or Saved. A running standard checkpoint can restore directly to Running. Standard checkpoints preserve memory state, whereas production checkpoints do not; see [Microsoft's checkpoint guide](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/checkpoints).
-- Result: `{"vm": "Win10", "restored": "run-20261010-0812-7f3a-keep-clean", "state": "running"}`.
-- Restore does not wait for an unlocked desktop or invoke the automatic console-opening hook. Check `vm_status` and call `vm_start` if desktop readiness is required.
+- `save_current` (default `false`): first saves the current state as the `temp` checkpoint `<run_id>-temp-before-restore` (registered for `vm_end_turn`) and reports it as `saved_current`. If that creation fails, nothing is restored. Without it the current state is replaced and lost.
+- The VM is resolved before the restore, so an empty `vm` still refers to the same VM after it stops running. After the restore the VM's agent client is discarded (see 1.3).
+- `start` (default `true`): if the VM is not running after the restore, HyperHand starts it. With `start: false` it leaves the state Hyper-V produced; it does not force Off or Saved. A running standard checkpoint resumes directly; a production checkpoint or one saved while off comes back off and needs the start.
+- Result: `{"vm": "Win10", "restored": {"id": "c85ca8fb-...", "name": "run-20261010-0812-7f3a-keep-golden", "type": "keep"}, "state": "running", "saved_current": {"id": "3d9e...", "name": "run-20261010-0812-7f3a-temp-before-restore", "type": "temp"}, "next": "call vm_start to make sure the desktop is usable"}`. `state` is the VM's power state afterwards, read from Hyper-V (lowercase, see 2.3); `saved_current` is `null` without `save_current`; `next` is a hint in the successful result, not an error.
+- The restore does not wait for a usable desktop: call `vm_start` (or `vm_status`) afterwards. A restore to a checkpoint taken before the agent was installed needs `vm_install_agent` again.
+- Refusals: the selection refusals above; a Hyper-V failure is `failed`. When the restore fails after `save_current` saved the state, the error object carries `saved_current` so that the saved checkpoint can be found.
 
-### 3.6 PowerShell-based operations
+#### vm_checkpoint_delete
 
-`vm_checkpoints`, `vm_checkpoint`, `vm_restore`, the checkpoint deletion of `vm_end_turn` and the file copy of `vm_install_agent` (see 8.1) run a hidden, non-interactive Windows PowerShell on the host with `$ErrorActionPreference = 'Stop'`, the VM looked up by ID and UTF-8 output. A failure is reported as `failed` with reason `powershell: <error>: <stderr and stdout>`.
+`vm_checkpoint_delete` (destructive) deletes a checkpoint selected by `id` or `name`, with `subtree` (default `false`).
 
-### 3.7 Session readiness and unlock: vm_start, vm_status, vm_unlock
+- A `manual` checkpoint is deleted by `id` only. Selected by name, it is refused with `invalid_argument`, field `id` (the checkpoint's id) and `next` `pass id <id> instead of name`.
+- Without `subtree`, `DestroySnapshot` deletes the one checkpoint: its disk differences are merged into its children, or into the VM's current disk when it is the current state's parent, and its children are re-parented to its parent. With `subtree: true`, `DestroySnapshotTree` deletes it and every descendant.
+- The call waits for the merge, up to 15 minutes. Result: `{"deleted": [{"id": "c85ca8fb-...", "name": "run-20261010-0812-7f3a-temp-step3", "type": "temp"}], "merged_into_current": true, "elapsed_ms": 41873}`. `deleted` lists every deleted checkpoint, computed from the tree before the deletion, in the tree's listing order; `merged_into_current` is `true` when the current state's parent was among them (the current state's parent then moves up); `elapsed_ms` is how long Hyper-V took.
+- Deleted `temp` checkpoints of this run are unregistered from `vm_end_turn`. A `keep` checkpoint is deleted like any other; delete it only when the baseline is no longer needed.
+- Refusals: the selection refusals above, and `failed` with `elapsed_ms` and `next` `call vm_checkpoints; a merge may still be running in Hyper-V` when Hyper-V reports an error or the 15-minute wait expires.
+
+#### vm_checkpoint_keep
+
+`vm_checkpoint_keep` keeps a `temp` checkpoint across runs by renaming `<run_id>-temp-<label>` to `<run_id>-keep-<label>` with `Rename-VMSnapshot`. It takes `id` or `name` and an optional new `label` (same rules as above; default: the checkpoint's current label). The `run_id` in the name stays, even for a temp checkpoint of another run.
+
+- Result: `{"id": "c85ca8fb-...", "name": "run-20261010-0812-7f3a-keep-step3", "type": "keep"}`; the id is unchanged. The checkpoint is unregistered from `vm_end_turn`.
+- Only `temp` checkpoints are accepted. A `keep` one: `invalid_argument` with fields `id` and `name`, reason `"<name>" is already a keep checkpoint`, `next` `nothing to do; vm_end_turn does not delete keep checkpoints`. A `manual` one: `invalid_argument` with `id` and `name`, `next` `nothing to do; vm_end_turn does not delete manual checkpoints (pass a temp checkpoint's id to keep one)`.
+- An invalid `label` is `invalid_argument` and is checked before the checkpoint is looked up; an unknown selector is `no_checkpoint` or `ambiguous_target` as above.
+
+#### vm_end_turn and checkpoints
+
+`vm_end_turn` (see 7.4) is the turn's cleanup.
+
+- By default it deletes, by id, the `temp` checkpoints this run registered: those `vm_checkpoint` created without `keep` and the `before-restore` ones of `vm_restore`, minus those `vm_checkpoint_keep` renamed or `vm_checkpoint_delete` deleted. `vm` (case-insensitive) limits this to one VM. Each registered checkpoint is checked against the VM's current list first: one that no longer exists is forgotten silently; one whose name is no longer a `temp` name (renamed outside this server) is not deleted and listed in `skipped` with reason `no longer a temp checkpoint (now <type>); not deleted`; one whose deletion fails is listed in `errors` as `<vm>/<name>: <error>` and stays registered for the next call, as do all of a VM's checkpoints when its list could not be read (`errors`: `<vm>: <error>`). `keep` and `manual` checkpoints are never touched.
+- `all_temp: true` deletes every checkpoint whose name parses as `temp`, whatever its `run_id`, on `vm` or on every VM when `vm` is omitted, to clean up after a crashed or restarted server. One that could not be deleted is listed in `skipped` as `{"id", "name", "reason"}`; a VM that could not be found or whose checkpoints could not be listed is listed in `errors`. This crosses runs: use it only when no other HyperHand client is working on the VM.
+- Each deletion merges disk differences and can take minutes.
+- Result: `{"cancelled_waits": 0, "deleted_checkpoints": ["run-20261010-0812-7f3a-temp-step3", "run-20261009-2200-aaaa-temp-x"], "skipped": [{"id": "9a2f...", "name": "run-20261009-2200-aaaa-temp-stuck", "reason": "Hyper-V job failed"}], "errors": []}`; `deleted_checkpoints` holds names.
+
+#### Annotations
+
+`vm_checkpoints` is read-only and idempotent. `vm_restore`, `vm_checkpoint_delete` and `vm_end_turn` are destructive (`vm_end_turn` also idempotent). `vm_checkpoint` and `vm_checkpoint_keep` are neither read-only nor destructive and carry no idempotent hint (`vm_checkpoint_keep` refuses an already kept checkpoint instead of repeating the rename).
+
+### 3.4 PowerShell-based operations
+
+`vm_checkpoints`, `vm_checkpoint`, `vm_restore`, the rename of `vm_checkpoint_keep` and the file copy of `vm_install_agent` (see 8.1) run a hidden, non-interactive Windows PowerShell on the host with `$ErrorActionPreference = 'Stop'`, the VM looked up by ID and UTF-8 output. A failure is reported as `failed` with reason `powershell: <error>: <stderr and stdout>`. Checkpoint deletion (`vm_checkpoint_delete`, `vm_end_turn`) goes through WMI (`Msvm_VirtualSystemSnapshotService`, see 3.3) instead.
+
+### 3.5 Session readiness and unlock: vm_start, vm_status, vm_unlock
 
 These use the agent's `session_state` (see 10.2), which reports for the agent's own session: the lock state from `WTSQuerySessionInformation` (`WTSSessionInfoEx` SessionFlags), whether it is the console session (`WTSGetActiveConsoleSessionId`), whether keyboard input goes to a secure desktop the user cannot open (`OpenInputDesktop` fails with access denied: the sign-in screen's password box or a UAC prompt), and whether `LogonUI.exe` and `consent.exe` run in it (`WTSEnumerateProcesses`).
 
@@ -205,7 +277,7 @@ An observation is what the host remembers about one `vm_observe` result so that 
 - `integrity` is the process token's integrity level, `low`, `medium`, `high` or `system`, omitted when it cannot be read (for example a protected process).
 - `foreground` is the foreground window's handle, `0` when none.
 - `focused_control` describes the UI Automation element with keyboard focus (`IUIAutomation::GetFocusedElement`): `window` (the top-level window containing it), `name` (empty for password controls), `control_type` (the UIA control type name), `automation_id` and `class_name` (omitted when empty), `runtime_id` and `rect`. It is `null` when nothing has focus or the lookup did not answer within 2 s. Only `vm_windows` and `vm_observe` ask the agent for it (`list_windows` with `focused: true`, which starts a UI Automation helper process); the window lists the actions and `vm_launch` fetch do not.
-- `session` is the agent's `session_state` (see 3.7), `null` when it could not be read.
+- `session` is the agent's `session_state` (see 3.5), `null` when it could not be read.
 - `windows` is `[]` when no window is visible.
 
 ### 4.3 vm_observe
@@ -292,7 +364,7 @@ Microsoft documents foreground activation restrictions in [SetForegroundWindow](
 
 ### 4.5 Input serialisation
 
-All mouse and keyboard operations in the host process are serialised by one lock, so concurrent tool calls never interleave their input events. This includes the keyboard steps of `vm_install_agent`. The MCP process holds a second input lock around the check chain and input of every action, around `vm_clipboard_set`, and around the final check and password typing of an unlock (see 3.7), so no other HyperHand tool sends input in between. The after-action observation runs after the lock is released.
+All mouse and keyboard operations in the host process are serialised by one lock, so concurrent tool calls never interleave their input events. This includes the keyboard steps of `vm_install_agent`. The MCP process holds a second input lock around the check chain and input of every action, around `vm_clipboard_set`, and around the final check and password typing of an unlock (see 3.5), so no other HyperHand tool sends input in between. The after-action observation runs after the lock is released.
 
 ### 4.6 Mouse: vm_click, vm_drag, vm_scroll
 
@@ -473,8 +545,9 @@ These tools need the agent, except `vm_end_turn`.
 
 `vm_end_turn` ends an AI turn. It does not need the agent and changes nothing in the guest.
 
-- It cancels this server's pending `vm_wait` calls and deletes the `temp` checkpoints this run created (see 3.4). `vm` limits the checkpoints to one VM; the waits are always all cancelled. `keep` and manual checkpoints, running programs and the VM's power state are not touched.
-- Result: `{"cancelled_waits": 1, "deleted_checkpoints": ["run-20261010-0812-7f3a-temp-step3"], "errors": []}`. A checkpoint that could not be deleted is listed in `errors` as `<vm>/<name>: <error>` and kept for the next `vm_end_turn`.
+- It cancels this server's pending `vm_wait` calls and deletes the `temp` checkpoints this run created (see 3.3). `vm` limits the checkpoints to one VM; the waits are always all cancelled. `keep` and `manual` checkpoints, running programs and the VM's power state are not touched.
+- `all_temp: true` additionally deletes every `temp` checkpoint of any run on the VM, or on every VM when `vm` is omitted (see 3.3); checkpoints it could not delete are listed in `skipped`. Each deletion merges disk differences and can take minutes.
+- Result: `{"cancelled_waits": 1, "deleted_checkpoints": ["run-20261010-0812-7f3a-temp-step3"], "skipped": [], "errors": []}`. A registered checkpoint that could not be deleted is listed in `errors` as `<vm>/<name>: <error>` and kept for the next `vm_end_turn`; `skipped` entries are `{"id", "name", "reason"}`: checkpoints that were not deleted because they are no longer `temp` or, with `all_temp`, because Hyper-V failed (see 3.3).
 - It is meant for a client's Stop hook and is safe to call at any time. Example hook configurations for Claude Code (`settings.json`, `Stop`) and a Codex plugin (`plugin.json`, `Stop`, `Interrupt`, `SubagentStop`) are in `docs/hooks/`.
 
 ## 8. Guest Agent Installation, Update and Diagnostics
@@ -564,7 +637,7 @@ The guest protocol has a generation number, `protocol` 2 in this version, report
 - It listens on `127.0.0.1:<port>`; protected machine configuration is performed only by the installer.
 - The tray icon's tooltip is `HyperHand`, or says that the MCP server is not running or the background service is unavailable. A left click, or **Settings...** in its right-click menu, opens the settings window; the menu also has **Restart** and **Quit**.
 - The icon is added at once, without waiting for the taskbar. If the taskbar does not accept it yet (for example at logon, while Explorer is still starting), the tray keeps running and retries every 5 seconds and whenever the taskbar is created; it adds the icon again whenever Explorer recreates the taskbar.
-- The settings window shows the MCP endpoint (with **Copy**), the port, the server status, the background service status, the version and **Open log folder**. **Change port** and **Apply and restart** save a new port (1024 to 65535, which must be free) in `%LOCALAPPDATA%\HyperHand\settings.json` and restart the tray; this is unavailable when `-port` was given. Its **Virtual machines** list shows the Hyper-V VMs with their state (running, off, saved, paused), whether an unlock password is stored and whether the console opens when started, refreshed every 5 seconds. For the selected VM: **Open console**, which brings an open Virtual Machine Connection window for that VM to the front (a visible window of `<system directory>\vmconnect.exe` whose title, such as `Win10 on localhost - Virtual Machine Connection` or a localized `localhost 上的 Win10 - 虚拟机连接`, names exactly that VM; a title in another layout is not matched, and a new console is opened) or else runs the `HyperHand Console` task with the VM name (see 9.2), after checking that the name is an existing VM's exact name without quotes, line breaks or a trailing backslash; **Open console when started**, a per-VM check box saved in `%LOCALAPPDATA%\HyperHand\settings.json` (see 3.7); the window warns when the host allows enhanced session mode (`EnhancedMode` under `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization`); **Set unlock password...**, which asks in the Windows credential dialog for the password or PIN the guest lock screen asks for and stores it in Windows Credential Manager for the current user (non-ASCII passwords are refused), and **Clear unlock password**. The user name in the dialog is only a note. Restart replaces only this ordinary tray/MCP process, without UAC, preserving the selected port. Active MCP connections and requests are interrupted; the service, guest agent and VMs are not restarted.
+- The settings window shows the MCP endpoint (with **Copy**), the port, the server status, the background service status, the version and **Open log folder**. **Change port** and **Apply and restart** save a new port (1024 to 65535, which must be free) in `%LOCALAPPDATA%\HyperHand\settings.json` and restart the tray; this is unavailable when `-port` was given. Its **Virtual machines** list shows the Hyper-V VMs with their state (running, off, saved, paused), whether an unlock password is stored and whether the console opens when started, refreshed every 5 seconds. For the selected VM: **Open console**, which brings an open Virtual Machine Connection window for that VM to the front (a visible window of `<system directory>\vmconnect.exe` whose title, such as `Win10 on localhost - Virtual Machine Connection` or a localized `localhost 上的 Win10 - 虚拟机连接`, names exactly that VM; a title in another layout is not matched, and a new console is opened) or else runs the `HyperHand Console` task with the VM name (see 9.2), after checking that the name is an existing VM's exact name without quotes, line breaks or a trailing backslash; **Open console when started**, a per-VM check box saved in `%LOCALAPPDATA%\HyperHand\settings.json` (see 3.5); the window warns when the host allows enhanced session mode (`EnhancedMode` under `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization`); **Set unlock password...**, which asks in the Windows credential dialog for the password or PIN the guest lock screen asks for and stores it in Windows Credential Manager for the current user (non-ASCII passwords are refused), and **Clear unlock password**. The user name in the dialog is only a note. Restart replaces only this ordinary tray/MCP process, without UAC, preserving the selected port. Active MCP connections and requests are interrupted; the service, guest agent and VMs are not restarted.
 
 ### 9.2 install
 
@@ -594,7 +667,7 @@ The tray appends its log to `%LOCALAPPDATA%\HyperHand\hyperhand.log` (the direct
 
 ## 10. Wire Protocol
 
-The host and agent exchange frames over the Hyper-V socket, tunneled through the local broker pipe. This section describes the guest protocol, not the broker's control messages.
+The host and agent exchange frames over the Hyper-V socket, tunneled through the local broker pipe. 10.1 to 10.3 describe the guest protocol; 10.4 lists the broker's checkpoint operations.
 
 ### 10.1 Frame format
 
@@ -629,7 +702,7 @@ uint32 header length | uint64 payload length | header JSON | payload bytes
 | `window_at` | `{x, y}` | `{handle, class, pid, process}`, the top-level window a click at that screen point reaches; handle 0 off screen |
 | `list_windows` | `{focused}` (optional) | `{windows: [{handle, title, class, pid, process, rect, enabled, foreground, minimized, owner, modal, group_root, integrity}], foreground, focused, session, agent_integrity}`; `focused` is the UIA focused control (see 4.2), read through a helper process only when the args ask for it (`vm_windows`, `vm_observe`), `session` the `session_state` result, `agent_integrity` the agent's own integrity level |
 | `wait` | `{kind, name, path, timeout_ms}` | `{satisfied}` |
-| `session_state` | none | `{locked, console, secure_desktop, logonui, consent}` for the agent's session (see 3.7) |
+| `session_state` | none | `{locked, console, secure_desktop, logonui, consent}` for the agent's session (see 3.5) |
 | `update_agent` | payload (new executable) | none; the agent then restarts (see 8.5) |
 
 The former `screenshot` op is gone: all screenshots are taken on the host.
@@ -639,3 +712,17 @@ The former `screenshot` op is gone: all screenshots are taken on the host.
 - An unknown op returns the error `unknown op "<op>"`.
 - A handler that panics returns the error `<op> panicked: <value>`; the agent keeps running.
 - For `write_file`, the agent always consumes the full payload, so a failed write (for example an invalid path) is reported as an error without breaking the connection. Only a failed read from the socket ends the connection.
+
+### 10.4 Broker checkpoint operations
+
+The tray requests checkpoint operations from `HyperHandService` over the broker pipe (see 1.1) in the same frame format; a request header is `{"op", "vm", "name", "id", "subtree"}` (unused fields omitted), a response `{"error", "result"}`.
+
+| Op | Request fields | Result |
+|---|---|---|
+| `checkpoints` | `{vm}` | `{checkpoint_type, current_parent_id, checkpoints: [{id, name, parent_id, created_at, kind, state}]}`, the tree in creation order (`Get-VMSnapshot` sorted by `CreationTime`) |
+| `checkpoint_create` | `{vm, name}` | the created checkpoint `{id, name, parent_id, created_at, kind, state}` (`Checkpoint-VM -Passthru`) |
+| `checkpoint_restore` | `{vm, id}` | none (`Restore-VMSnapshot`) |
+| `checkpoint_delete` | `{vm, id, subtree}` | none (`DestroySnapshot`, or `DestroySnapshotTree` with `subtree`; waits for the job up to 15 minutes) |
+| `checkpoint_rename` | `{vm, id, name}` | none (`Rename-VMSnapshot`) |
+
+The service rejects `checkpoint_restore`, `checkpoint_delete` and `checkpoint_rename` whose `id` is not a GUID in `8-4-4-4-12` form, and `checkpoint_create` or `checkpoint_rename` without `name`. `checkpoint_create`, `checkpoint_restore`, `checkpoint_delete` and `checkpoint_rename` have a 15-minute timeout like `copy`; `checkpoints` has one minute. A missing `id` fails with `checkpoint not found: <id>`, which the tools report as `no_checkpoint`.
