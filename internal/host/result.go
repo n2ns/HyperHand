@@ -163,10 +163,16 @@ func addToolIn[In any](d *deps, spec toolSpec, f func(context.Context, In) (*mcp
 		if inputErr != nil {
 			return taskResult(errorResult(d.taskRunID(ctx), invalidToolArguments(spec.name, inputErr)), task), nil
 		}
+		readOnly := spec.readOnly
+		if spec.name == "vm_push" {
+			var p pushIn
+			_ = json.Unmarshal(req.Params.Arguments, &p)
+			readOnly = p.Mode == "mirror" && (p.Phase == "" || p.Phase == "plan")
+		}
 		if task != nil {
 			if spec.name != "vm_end_turn" {
 				vm := args.VM
-				if !spec.readOnly || spec.name == "vm_wait" || spec.name == "vm_observe" {
+				if !readOnly || spec.name == "vm_wait" || spec.name == "vm_observe" || spec.name == "vm_push" {
 					v, err := d.raw.Find(vm)
 					if err != nil {
 						switch spec.name {
@@ -195,7 +201,7 @@ func addToolIn[In any](d *deps, spec toolSpec, f func(context.Context, In) (*mcp
 					return taskResult(errorResult(task.runID, err), task), nil
 				}
 				defer done()
-				if !spec.readOnly {
+				if !readOnly {
 					if err := d.tasks.claim(task, vm); err != nil {
 						return taskResult(errorResult(task.runID, err), task), nil
 					}

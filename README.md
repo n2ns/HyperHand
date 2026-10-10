@@ -19,7 +19,7 @@ HyperHand has two executables and three roles:
 - **Actions that prepare themselves**: `vm_click`, `vm_type`, `vm_set_value` and the others activate the target window first, check that it is enabled, not covered and reachable, perform the action and return a fresh observation (`after`) in the same call.
 - **Screen, mouse and keyboard from the host**: the screenshot and raw mouse and keyboard input go through Hyper-V and work on the sign-in screen and UAC prompts too, since they do not depend on anything running in the guest.
 - **Commands and programs in the guest**: run PowerShell or cmd in the user's desktop session and get the exit code, stdout and stderr back, optionally elevated; `vm_launch` starts a GUI program detached and returns its window handle.
-- **File transfer**: copy files or whole directories in either direction, streamed at hundreds of MB/s. Uploads skip files whose SHA-256 already matches the guest copy.
+- **File transfer**: copy files or whole directories in either direction. Uploads skip files whose SHA-256 already matches the guest copy. Directory mirror mode first previews changes, then copies, verifies and removes extra guest files; ordinary uploads never delete them.
 - **Checkpoints**: list the tree, create, restore, keep and delete, selecting by stable `id`; `vm_end_turn` deletes the temporary checkpoints of a turn, keeps the ones marked `keep`.
 - **Clipboard, windows and waiting**: read and write the guest clipboard, list windows with their owner groups, focused control and session state, and wait for process or file conditions.
 - **Start to a usable desktop**: `vm_start` waits until the agent answers and the session is unlocked. If Windows locked the session after signing in, it types the unlock password you stored in the tray; `vm_status` reports power, agent and lock state, `vm_doctor` diagnoses host and guest.
@@ -96,7 +96,7 @@ Every tool takes an optional `vm` (VM name). Without it, the only running VM is 
 | `vm_apps` | Find launchable desktop applications by name or executable path; return stable IDs, `launch` arguments for `vm_launch`, running state and visible window handles |
 | `vm_launch` | Start a program detached and return its `pid` and first window's `handle`, `title` and `class` |
 | `vm_exec` | Run a command to completion in the guest; `shell`, `cwd`, `timeout_ms`, `admin` |
-| `vm_push`, `vm_pull` | Copy files or directories host to guest and back; `vm_push` skips unchanged files unless `force` is true |
+| `vm_push`, `vm_pull` | Copy files or directories host to guest and back; `vm_push` skips unchanged files unless `force` is true. `mode: mirror` synchronizes exact directory contents with `phase: plan` then `phase: apply` and the returned `plan_id` |
 | `vm_clipboard_get`, `vm_clipboard_set` | Read or write the guest clipboard |
 | `vm_wait` | Wait until a process exits or runs, or a file exists |
 | `vm_end_turn` | End this task's work: cancel its waits, clean up its temporary checkpoints and release its VM ownership; `vm` limits cleanup to one VM |

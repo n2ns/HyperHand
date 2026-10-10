@@ -225,6 +225,18 @@ Without `observation_id`, `handle` or `pid`, `vm_click`, `vm_drag`, `vm_scroll`,
 
 ### Other tools
 
+For a deployment directory that must exactly match a host build, use `vm_push` in two calls:
+
+```json
+{"task_id":"deploy-1","vm":"Win10","host_path":"V:\\Build\\App","guest_path":"C:\\Test\\App","mode":"mirror","phase":"plan"}
+```
+
+Inspect the returned `changes` and `summary`, including every deletion, then repeat those arguments with `"phase":"apply","plan_id":"<returned plan_id>"`. This mirrors the directory contents, including empty directories; an empty source removes everything inside the target. The target's parent directory must already exist. Keep logs, drawings and user settings outside a mirrored build directory.
+
+The plan is read-only and does not take VM write ownership. Apply takes ownership like ordinary uploads. Use the same task ID, paths and `force` value; plans expire after 10 minutes, are lost on host restart or task cleanup, and only the newest 16 plans are retained across tasks. Applying consumes the plan, even on failure. `plan_stale` means the plan can no longer be used. `mirror_partial` includes `completed`, `failed` and `pending`; `mirror_unknown` means the response was lost or unrecognized and the listed changes have unknown outcomes. In every case, create a new plan before continuing. Mirror requires an updated guest agent; `agent_outdated` asks for `vm_update_agent`, never silently falls back to copying.
+
+Mirror stages changed file bytes on the host and guest, so leave temporary disk space available. It is not a whole-directory transaction or a file-lock workaround: close applications using the deployment files before applying. Details and limits are in [Directory mirror](features.md#65-directory-mirror).
+
 - `vm_type` types Unicode text as key events in the user's session (`\n` presses Enter, `\t` Tab) and never touches the clipboard. Without a target it falls back to the Hyper-V keyboard for ASCII text when the agent is absent or its session is locked or on the secure desktop. With `observation_id` and `index` it reads the control back afterwards: `verified` says whether its `value` contains the typed text. The result has `applied_chars` and `total_chars`; a stop midway is `partial_input` with the same counts. Inspect the window before retyping; never retry blindly.
 - `vm_key` takes either `keys`, such as `ctrl+s`, or `sequence`, such as `["ctrl+a", "backspace"]` (up to 256 combinations). Key names include the numeric keypad (`num0`, `numenter`, ...), `f1` to `f20` and X11-style aliases (`Return`, `Escape`, `KP_Enter`); use `plus` for the `+`/`=` key, for example `ctrl+plus`. With `handle` the sequence stops as soon as another window takes the foreground (`partial_input`).
 - `vm_apps` finds desktop programs without guessing their install paths. For example, call `vm_apps {"vm":"Win10","query":"AutoCAD"}`; reuse a returned `windows[].handle` with `vm_observe`, or pass an entry's `launch` object (`path`, `args`, `cwd`) to `vm_launch` with the same VM. `limit` defaults to 50 (maximum 200); `total`, `truncated` and `warnings` show whether the result is complete. Discovery covers Start Menu executable shortcuts and App Paths, not packaged UWP/MSIX apps or every executable on disk.

@@ -215,6 +215,7 @@ type Manager struct {
 	AfterStart func(vm string)
 	mu         sync.Mutex
 	clients    map[string]*Client
+	transfers  map[string]chan struct{} // full copy/mirror operations, retained across connection replacement
 }
 
 // Client returns the agent client for a VM name ("" = the only running VM).

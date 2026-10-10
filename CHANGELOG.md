@@ -45,6 +45,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Directory mirroring through `vm_push mode: mirror`: read-only `phase: plan` lists copies, empty directories and deletions; `phase: apply` consumes a task/VM-bound plan after rechecking both inventories. Changed files are staged and verified before extra files and empty directories are removed. Drift, partial completion and unconfirmed responses are distinct results; failed applies require a new plan. Ordinary copy behavior is unchanged. Mirror rejects links, type conflicts and manifests exceeding 4096 entries or 1 MiB per side.
 - `vm_invoke` supports control-targeted `ScrollUp`, `ScrollDown`, `ScrollLeft` and `ScrollRight` through UIA ScrollPattern, one small provider-defined step per call. Observations and results include supported axes and scroll percentages; verification reports observed directional movement, including `false` at an unchanged boundary.
 - Control observations expose executable `actions` and readable semantic `state` (toggle, expansion, selection, read-only and offscreen); unknown properties stay absent and `controls_diff` includes capability/state changes. Unsupported actions report action names rather than UIA pattern names.
 - Task ownership: optional `task_id` on every tool, independent observations, waits and checkpoint runs, and exclusive VM writes until task-scoped `vm_end_turn` cleanup. Persistent MCP sessions get a default task; short-lived connections and agents sharing a session can pass distinct IDs.

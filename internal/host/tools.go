@@ -39,8 +39,9 @@ type deps struct {
 	// observe is vm_observe's implementation, set by registerObserve; actions call it for observe_after.
 	observe observeFunc
 	// turn records state vm_end_turn cleans up: pending waits to cancel and temporary checkpoints by VM.
-	turn  *turnState
-	tasks *taskRegistry
+	turn    *turnState
+	tasks   *taskRegistry
+	mirrors *mirrorPlans
 }
 
 // turnState is what vm_end_turn cleans up. Tools register cancellable waits with addWait and temporary checkpoints
@@ -122,6 +123,7 @@ func NewServer(m *Manager) *mcp.Server {
 		runID:   newRunID(),
 		turn:    newTurnState(),
 		tasks:   newTaskRegistry(),
+		mirrors: &mirrorPlans{},
 	}
 	registerVM(d)
 	registerObserve(d)

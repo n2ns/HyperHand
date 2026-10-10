@@ -168,6 +168,9 @@ func registerTurn(d *deps) {
 			}
 		}
 		if task != nil && len(out.Errors) == 0 && (!in.AllTemp || len(out.Skipped) == 0) {
+			if d.mirrors != nil {
+				d.mirrors.discard(task.runID, in.VM)
+			}
 			d.tasks.release(task, in.VM)
 			task.obs.clear(in.VM)
 			cleanupSucceeded = true

@@ -24,6 +24,8 @@ var handlers = map[string]Handler{
 	proto.OpReadFile:      readFile,
 	proto.OpListDir:       listDir,
 	proto.OpHashFiles:     hashFiles,
+	proto.OpMirrorScan:    mirrorScan,
+	proto.OpMirrorApply:   mirrorApply,
 	proto.OpClipboardGet:  clipboardGet,
 	proto.OpClipboardSet:  clipboardSet,
 	proto.OpTypeKeys:      typeKeys,
@@ -67,13 +69,25 @@ func Serve(c net.Conn) error {
 	type frame struct {
 		req     proto.Request
 		payload []byte
+		mirror  *os.File
 		done    bool
 		opErr   error
 		err     error
 	}
 	frames := make(chan frame, 1)
 	gone := make(chan struct{})
+	stopped := make(chan struct{})
+	readerDone := make(chan struct{})
+	defer func() {
+		close(stopped)
+		c.Close()
+		<-readerDone
+		for len(frames) > 0 {
+			removeMirrorPayload((<-frames).mirror)
+		}
+	}()
 	go func() {
+		defer close(readerDone)
 		for {
 			var f frame
 			var size int64
@@ -81,6 +95,9 @@ func Serve(c net.Conn) error {
 			if f.err == nil && f.req.Op == proto.OpWriteFile {
 				f.done = true
 				f.opErr, f.err = writeFileStream(c, f.req.Args, size)
+			} else if f.err == nil && f.req.Op == proto.OpMirrorApply {
+				f.mirror, f.opErr, f.err = stageMirrorPayload(c, f.req.Args, size)
+				f.done = f.opErr != nil
 			} else if f.err == nil {
 				f.payload = make([]byte, size)
 				_, f.err = io.ReadFull(c, f.payload)
@@ -88,7 +105,12 @@ func Serve(c net.Conn) error {
 			if f.err != nil {
 				close(gone)
 			}
-			frames <- f
+			select {
+			case frames <- f:
+			case <-stopped:
+				removeMirrorPayload(f.mirror)
+				return
+			}
 			if f.err != nil {
 				return
 			}
@@ -101,6 +123,11 @@ func Serve(c net.Conn) error {
 		}
 		req, payload := f.req, f.payload
 		ctx, cancel := context.WithCancel(context.Background())
+		select {
+		case <-gone:
+			cancel()
+		default:
+		}
 		go func() {
 			select {
 			case <-gone:
@@ -113,7 +140,14 @@ func Serve(c net.Conn) error {
 		var out []byte
 		var err error
 		if f.done {
-			err = f.opErr
+			if req.Op == proto.OpMirrorApply {
+				result = mirrorStageFailure(req.Args, f.opErr)
+			} else {
+				err = f.opErr
+			}
+		} else if f.mirror != nil {
+			result, err = mirrorApplyStream(ctx, req.Args, f.mirror)
+			removeMirrorPayload(f.mirror)
 		} else {
 			result, out, err = Dispatch(ctx, req.Op, req.Args, payload)
 		}

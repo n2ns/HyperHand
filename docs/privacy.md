@@ -29,12 +29,14 @@ On the host:
 - `%LOCALAPPDATA%\HyperHand\settings.json`: the VMs whose console opens when `vm_start` starts them.
 - Registry key `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\3ce544e1-2645-4383-b332-fedf8a18736b`, which registers the Hyper-V socket service.
 - Unique `.hyperhand-*.hhpart` files in the destination directory while `vm_pull` writes a file; renamed to the target on completion, deleted on failure.
+- `hyperhand-mirror-*.hhpart` in the user's temporary directory while a mirror apply captures changed file bytes. Mirror plans (paths, sizes and hashes) remain in host memory for at most 10 minutes of usability, bounded to 16 plans; task cleanup discards them.
 
 In the guest:
 
 - The agent at `C:\Users\Public\HyperHand\hyperhand-agent.exe` (copied by `vm_install_agent`) and `%LOCALAPPDATA%\HyperHand\hyperhand-agent.exe` (installed copy).
 - Registry value `HyperHandAgent` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 - Unique `.hyperhand-*.hhpart` files in the destination directory while `vm_push` writes a file; renamed to the target on completion, deleted on failure.
+- `hyperhand-mirror-payload-*` files and `hyperhand-mirror-*` staging directories in the agent user's temporary directory during mirror apply. Host and guest staging is removed on normal completion, handled errors and cancellation; abrupt process termination can leave these artifacts.
 - Temporary `hh-admin-*.ps1` or `hh-admin-*.cmd` files under the elevated worker's temp directory for commands with `admin: true`; deleted when the command finishes. Commands and results pass over a single-use local named pipe, not a guest network connection.
 
 Host uninstallation preserves user logs, guest files and nonempty service working data. When service data remains, the owner configuration is also retained for reinstallation. Otherwise the configuration and empty data directory are removed. Installed host and agent executables are deleted only if they still match the hashes recorded for cleanup; directories containing other files are left in place.
