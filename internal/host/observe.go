@@ -36,11 +36,6 @@ func uiaTimedOut(err error) bool {
 	return strings.Contains(s, "timed out") || strings.Contains(s, "interrupted")
 }
 
-// agentRequired is the refusal for an observation that needs the agent while it is unreachable.
-func agentRequired(err error) *toolError {
-	return refuse(codeAgentRequired, "call vm_status; start the VM or install/update the agent", nil, "the guest agent is not reachable: %v", err)
-}
-
 // windowSummary is the compact description of a window in candidates lists of refusals.
 type windowSummary struct {
 	Handle  uint64 `json:"handle"`
@@ -116,11 +111,13 @@ func (d *deps) observeVM(ctx context.Context, in observeIn) (*observeOut, []byte
 	if windowed {
 		w, err := resolveWindow(wr.Windows, windowSelector{Handle: in.Handle, PID: in.PID})
 		if err != nil {
-			fields := map[string]any{"candidates": windowCandidates(wr.Windows, in.PID)}
-			if errors.Is(err, errWindowNotFound) {
-				return nil, nil, refuse(codeNoWindow, "call vm_windows and pass a handle", fields, "no visible window matches handle %d, pid %d", in.Handle, in.PID)
+			// resolveWindow refuses with no_window or ambiguous_target; add the windows the selector could have meant.
+			te := asToolError(err)
+			if te.Fields == nil {
+				te.Fields = map[string]any{}
 			}
-			return nil, nil, refuse(codeAmbiguousTarget, "call vm_windows and pass a handle", fields, "%v", err)
+			te.Fields["candidates"] = windowCandidates(wr.Windows, in.PID)
+			return nil, nil, te
 		}
 		target = &w
 		obs.Window = &w
