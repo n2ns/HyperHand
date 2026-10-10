@@ -132,18 +132,38 @@ func addToolIn[In any](d *deps, spec toolSpec, f func(context.Context, In) (*mcp
 	}
 	schema.Properties["task_id"] = &jsonschema.Schema{Type: "string", Description: "Unique AI task identifier. Reuse on every call when sharing a session or reconnecting; omit only for a dedicated persistent MCP session. vm_end_turn without vm ends this task; use a new ID afterwards."}
 	tool.InputSchema = schema
-	mcp.AddTool(d.s, tool, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
+	resolved, err := schema.Resolve(&jsonschema.ResolveOptions{ValidateDefaults: true})
+	if err != nil {
+		panic(err)
+	}
+	// The generic SDK wrapper returns plain text for schema errors before our
+	// handler runs. Validate here so invalid arguments obey the same JSON contract.
+	d.s.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var in In
+		inputErr := decodeToolArguments(req.Params.Arguments, resolved, &in)
 		var args struct {
-			TaskID string `json:"task_id"`
-			VM     string `json:"vm"`
+			VM string `json:"vm"`
 		}
-		_ = json.Unmarshal(req.Params.Arguments, &args)
-		task, err := d.resolveTask(req, args.TaskID, spec.name == "vm_end_turn")
+		var identity struct {
+			TaskID string `json:"task_id"`
+		}
+		if len(req.Params.Arguments) > 0 {
+			if err := json.Unmarshal(req.Params.Arguments, &identity); err != nil && inputErr != nil {
+				return errorResult("", invalidToolArguments(spec.name, inputErr)), nil
+			}
+			_ = json.Unmarshal(req.Params.Arguments, &args)
+		}
+		task, err := d.resolveTask(req, identity.TaskID, spec.name == "vm_end_turn")
 		if err != nil {
-			return errorResult("", err), nil, nil
+			return errorResult("", err), nil
 		}
 		if task != nil {
 			ctx = context.WithValue(ctx, taskContextKey{}, task)
+		}
+		if inputErr != nil {
+			return taskResult(errorResult(d.taskRunID(ctx), invalidToolArguments(spec.name, inputErr)), task), nil
+		}
+		if task != nil {
 			if spec.name != "vm_end_turn" {
 				vm := args.VM
 				if !spec.readOnly || spec.name == "vm_wait" || spec.name == "vm_observe" {
@@ -157,7 +177,7 @@ func addToolIn[In any](d *deps, spec toolSpec, f func(context.Context, In) (*mcp
 						default:
 							err = vmErr(err)
 						}
-						return taskResult(errorResult(task.runID, err), task), nil, nil
+						return taskResult(errorResult(task.runID, err), task), nil
 					}
 					vm = v.Name
 					// Pin the selector passed to the handler too: resolving the default
@@ -172,12 +192,12 @@ func addToolIn[In any](d *deps, spec toolSpec, f func(context.Context, In) (*mcp
 				var done func()
 				ctx, done, err = task.enter(ctx, vm, spec.name == "vm_wait")
 				if err != nil {
-					return taskResult(errorResult(task.runID, err), task), nil, nil
+					return taskResult(errorResult(task.runID, err), task), nil
 				}
 				defer done()
 				if !spec.readOnly {
 					if err := d.tasks.claim(task, vm); err != nil {
-						return taskResult(errorResult(task.runID, err), task), nil, nil
+						return taskResult(errorResult(task.runID, err), task), nil
 					}
 					switch spec.name {
 					case "vm_start", "vm_shutdown", "vm_turn_off", "vm_restore", "vm_unlock", "vm_install_agent", "vm_update_agent":
@@ -190,8 +210,40 @@ func addToolIn[In any](d *deps, spec toolSpec, f func(context.Context, In) (*mcp
 		}
 		r, err := f(ctx, in)
 		if err != nil {
-			return taskResult(errorResult(d.taskRunID(ctx), err), task), nil, nil
+			return taskResult(errorResult(d.taskRunID(ctx), err), task), nil
 		}
-		return taskResult(r, task), nil, nil
+		return taskResult(r, task), nil
 	})
+}
+
+func invalidToolArguments(tool string, err error) error {
+	return refuse(codeInvalidArgument, "check the "+tool+" input schema and pass the required fields with their declared types", nil, "invalid arguments for %s: %v", tool, err)
+}
+
+func decodeToolArguments(raw json.RawMessage, schema *jsonschema.Resolved, in any) error {
+	var value any = map[string]any{}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return err
+		}
+	}
+	// SDK clients may encode omitted arguments as null. Preserve the generic
+	// SDK's empty-object behavior for tools with no required fields.
+	if value == nil {
+		value = map[string]any{}
+	}
+	if _, ok := value.(map[string]any); !ok {
+		return fmt.Errorf("arguments must be a JSON object")
+	}
+	if err := schema.ApplyDefaults(&value); err != nil {
+		return err
+	}
+	if err := schema.Validate(&value); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, in)
 }

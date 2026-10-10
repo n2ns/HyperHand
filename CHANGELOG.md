@@ -69,6 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `vm_install_agent` confirms the per-installation ID returned by the newly launched agent, so an older running process (including the same version) cannot report success early. Readiness polling stops promptly on cancellation.
 - UI Automation provider failures, including read-only or disabled controls, remain operation failures instead of reporting the responding agent as offline or falling back to raw keyboard input.
 - `vm_invoke Select` detects the SelectionItem pattern on individual list/tree items using the correct UI Automation property, instead of checking the parent container's Selection pattern.
+- Missing, unknown or mistyped tool arguments return structured JSON `invalid_argument` results before VM access, preserving identifiable task ownership instead of leaking the MCP SDK's plain-text validation errors. Omitted or null arguments remain compatible with tools that have no required fields.
 
 ## [0.2.0] - 2026-10-07
 
