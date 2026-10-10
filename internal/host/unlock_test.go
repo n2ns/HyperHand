@@ -19,6 +19,14 @@ type fakeGuest struct {
 	stateEr error
 	pingErr error
 	input   []string // keys and typed text, in order
+	proto   int      // the protocol ping reports; 0 means proto.Protocol
+}
+
+func (g *fakeGuest) protocol() int {
+	if g.proto == 0 {
+		return proto.Protocol
+	}
+	return g.proto
 }
 
 func (g *fakeGuest) call(_ context.Context, _, op string, _ any, _ []byte, result any) ([]byte, error) {
@@ -28,7 +36,7 @@ func (g *fakeGuest) call(_ context.Context, _, op string, _ any, _ []byte, resul
 		if g.pingErr != nil {
 			return nil, g.pingErr
 		}
-		r = proto.PingResult{Version: "dev", Hostname: "PC", User: `PC\tok`}
+		r = proto.PingResult{Version: "dev", Protocol: g.protocol(), Hostname: "PC", User: `PC\tok`}
 	case proto.OpSessionState:
 		if g.stateEr != nil {
 			return nil, g.stateEr
@@ -64,7 +72,7 @@ var (
 func TestUnlockTypesStoredPasswordOnce(t *testing.T) {
 	g := &fakeGuest{states: []proto.SessionStateResult{locked, passwordBox, passwordBox, unlocked}}
 	r, err := g.unlocker("s3cret", true).unlock(context.Background(), "Win10")
-	if err != nil || r != "unlocked" {
+	if err != nil || r != sessionUnlocked {
 		t.Fatalf("%q %v", r, err)
 	}
 	want := []string{"key:ctrl", "key:ctrl+a", "text:s3cret", "key:enter"}
@@ -134,16 +142,16 @@ func TestUnlockOldAgent(t *testing.T) {
 func TestReady(t *testing.T) {
 	ctx := context.Background()
 	g := &fakeGuest{states: []proto.SessionStateResult{unlocked}}
-	if r, err := g.unlocker("", false).ready(ctx, "Win10", time.Second); err != nil || !strings.Contains(r, "desktop unlocked") {
-		t.Errorf("unlocked: %q %v", r, err)
+	if r, err := g.unlocker("", false).ready(ctx, "Win10", time.Second); err != nil || r.Unlocked || r.Agent.Version != "dev" || r.Agent.Protocol != proto.Protocol {
+		t.Errorf("unlocked: %+v %v", r, err)
 	}
 	g = &fakeGuest{states: []proto.SessionStateResult{locked}}
 	if _, err := g.unlocker("", false).ready(ctx, "Win10", time.Second); err == nil || !strings.Contains(err.Error(), "locked") || !strings.Contains(err.Error(), "no unlock password") {
 		t.Errorf("locked without password: %v", err)
 	}
 	g = &fakeGuest{states: []proto.SessionStateResult{locked, locked, passwordBox, passwordBox, unlocked}}
-	if r, err := g.unlocker("pw", true).ready(ctx, "Win10", time.Second); err != nil || !strings.Contains(r, "has been unlocked") {
-		t.Errorf("locked with password: %q %v", r, err)
+	if r, err := g.unlocker("pw", true).ready(ctx, "Win10", time.Second); err != nil || !r.Unlocked {
+		t.Errorf("locked with password: %+v %v", r, err)
 	}
 	// Locked right after the agent first answered (automatic sign-in, then lock).
 	g = &fakeGuest{states: []proto.SessionStateResult{unlocked, locked}}
@@ -151,8 +159,16 @@ func TestReady(t *testing.T) {
 		t.Errorf("relocked: %v", err)
 	}
 	g = &fakeGuest{pingErr: errors.New("connection refused")}
-	if _, err := g.unlocker("pw", true).ready(ctx, "Win10", 0); err == nil || !strings.Contains(err.Error(), "did not answer") {
+	if _, err := g.unlocker("pw", true).ready(ctx, "Win10", 0); err == nil || !strings.Contains(err.Error(), "did not answer") || asToolError(err).Code != codeAgentRequired {
 		t.Errorf("no agent: %v", err)
+	}
+	// An agent with an older protocol is refused before the session is touched.
+	g = &fakeGuest{states: []proto.SessionStateResult{locked}, proto: proto.Protocol - 1}
+	if _, err := g.unlocker("pw", true).ready(ctx, "Win10", time.Second); err == nil || asToolError(err).Code != codeAgentOutdated || asToolError(err).Next != "call vm_update_agent" {
+		t.Errorf("outdated: %v", err)
+	}
+	if len(g.input) != 0 {
+		t.Errorf("outdated agent got input %v", g.input)
 	}
 }
 

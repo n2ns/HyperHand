@@ -1,0 +1,44 @@
+{
+  "name": "hyperhand",
+  "version": "0.3.0",
+  "hooks": {
+    "hooks": {
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "mcp_tool",
+              "server": "hyperhand",
+              "tool": "vm_end_turn",
+              "input": {}
+            }
+          ]
+        }
+      ],
+      "Interrupt": [
+        {
+          "hooks": [
+            {
+              "type": "mcp_tool",
+              "server": "hyperhand",
+              "tool": "vm_end_turn",
+              "input": {}
+            }
+          ]
+        }
+      ],
+      "SubagentStop": [
+        {
+          "hooks": [
+            {
+              "type": "mcp_tool",
+              "server": "hyperhand",
+              "tool": "vm_end_turn",
+              "input": {}
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

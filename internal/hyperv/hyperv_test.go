@@ -105,9 +105,12 @@ func TestParseKeys(t *testing.T) {
 		"win+r":          {0x5B, 'R'},
 		"alt+F4":         {0x12, 0x73},
 		"f12":            {0x7B},
+		"f13":            {0x7C},
+		"F20":            {0x83},
 		"ctrl+5":         {0x11, '5'},
 		"ctrl + /":       {0x11, 0xBF},
 		"ctrl+plus":      {0x11, 0xBB},
+		"Control_L+KP_1": {0x11, 0x61},
 	}
 	for in, want := range cases {
 		got, err := parseKeys(in)
@@ -115,9 +118,46 @@ func TestParseKeys(t *testing.T) {
 			t.Errorf("parseKeys(%q) = %v, %v; want %v", in, got, err, want)
 		}
 	}
-	for _, bad := range []string{"", "ctrl+", "f13", "foo", "ctrl+xx"} {
+	for _, bad := range []string{"", "ctrl+", "f21", "f0", "foo", "ctrl+xx", "KP_10", "numpad1"} {
 		if _, err := parseKeys(bad); err == nil {
 			t.Errorf("parseKeys(%q) should fail", bad)
+		}
+	}
+}
+
+// TestValidateKeys covers the added key names and aliases by their virtual-key codes.
+func TestValidateKeys(t *testing.T) {
+	codes := map[string]int{
+		// Numeric keypad.
+		"num0": 0x60, "num1": 0x61, "num2": 0x62, "num3": 0x63, "num4": 0x64, "num5": 0x65, "num6": 0x66, "num7": 0x67, "num8": 0x68, "num9": 0x69,
+		"KP_0": 0x60, "KP_5": 0x65, "KP_9": 0x69, "kp_3": 0x63,
+		"numenter": 0x0D, "KP_Enter": 0x0D, // no extended flag on the Hyper-V keyboard: the same key as enter
+		"numdot": 0x6E, "KP_Decimal": 0x6E, "numplus": 0x6B, "KP_Add": 0x6B, "numminus": 0x6D, "KP_Subtract": 0x6D,
+		"nummul": 0x6A, "KP_Multiply": 0x6A, "numdiv": 0x6F, "KP_Divide": 0x6F, "numlock": 0x90,
+		// Function and system keys.
+		"f13": 0x7C, "f20": 0x83, "printscreen": 0x2C, "scrolllock": 0x91, "pause": 0x13, "apps": 0x5D, "capslock": 0x14,
+		// X11/Codex aliases.
+		"Return": 0x0D, "Escape": 0x1B, "Control_L": 0x11, "Control_R": 0x11, "Shift_L": 0x10, "Shift_R": 0x10,
+		"Alt_L": 0x12, "Alt_R": 0x12, "Super_L": 0x5B, "period": 0xBE, "comma": 0xBC, "slash": 0xBF, "minus": 0xBD,
+		"equal": 0xBB, "BackSpace": 0x08, "Delete": 0x2E, "Prior": 0x21, "Next": 0x22, "Up": 0x26, "Down": 0x28,
+		"Left": 0x25, "Right": 0x27,
+		// Existing names keep their codes.
+		"ctrl": 0x11, "win": 0x5B, "pageup": 0x21, "pagedown": 0x22, "esc": 0x1B, "del": 0x2E, "space": 0x20,
+	}
+	for name, want := range codes {
+		if err := ValidateKeys(name); err != nil {
+			t.Errorf("ValidateKeys(%q): %v", name, err)
+		}
+		if got, err := parseKeys(name); err != nil || len(got) != 1 || got[0] != want {
+			t.Errorf("parseKeys(%q) = %v, %v; want [%#x]", name, got, err, want)
+		}
+		if err := ValidateKeys("ctrl+" + name); err != nil {
+			t.Errorf("ValidateKeys(ctrl+%q): %v", name, err)
+		}
+	}
+	for _, bad := range []string{"KP_Return", "Super_R", "f21", "numpad0", "num10", ""} {
+		if err := ValidateKeys(bad); err == nil {
+			t.Errorf("ValidateKeys(%q) should fail", bad)
 		}
 	}
 }
@@ -159,11 +199,13 @@ func TestVariantBytes(t *testing.T) {
 }
 
 func TestParseCheckpoints(t *testing.T) {
-	one := Checkpoint{Name: "干净", CreationTime: "2026-10-04 10:00:00"}
+	one := Checkpoint{Name: "干净", CreationTime: "2026-10-04 10:00:00", ID: "11111111-2222-3333-4444-555555555555"}
+	child := Checkpoint{Name: "b", CreationTime: "x", ID: "66666666-7777-8888-9999-000000000000", Parent: "干净", ParentID: one.ID}
 	cases := map[string][]Checkpoint{
 		"": nil,
-		"\xef\xbb\xbf{\"Name\":\"干净\",\"CreationTime\":\"2026-10-04 10:00:00\"}\r\n":           {one},
-		`[{"Name":"干净","CreationTime":"2026-10-04 10:00:00"},{"Name":"b","CreationTime":"x"}]`: {one, {Name: "b", CreationTime: "x"}},
+		"\xef\xbb\xbf{\"Name\":\"干净\",\"CreationTime\":\"2026-10-04 10:00:00\",\"Id\":\"11111111-2222-3333-4444-555555555555\",\"ParentSnapshotName\":\"\",\"ParentSnapshotId\":\"\"}\r\n": {one},
+		`[{"Name":"干净","CreationTime":"2026-10-04 10:00:00","Id":"11111111-2222-3333-4444-555555555555","ParentSnapshotName":"","ParentSnapshotId":""},` +
+			`{"Name":"b","CreationTime":"x","Id":"66666666-7777-8888-9999-000000000000","ParentSnapshotName":"干净","ParentSnapshotId":"11111111-2222-3333-4444-555555555555"}]`: {one, child},
 	}
 	for in, want := range cases {
 		got, err := parseCheckpoints([]byte(in))

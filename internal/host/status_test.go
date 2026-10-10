@@ -29,7 +29,7 @@ func TestStatusDoesNotInterruptBusyAgent(t *testing.T) {
 				<-release
 				return proto.ExecResult{Stdout: "completed"}, nil
 			case proto.OpPing:
-				return proto.PingResult{Version: "test"}, nil
+				return proto.PingResult{Version: "test", Protocol: proto.Protocol}, nil
 			case proto.OpSessionState:
 				return proto.SessionStateResult{Console: true}, nil
 			default:
@@ -57,7 +57,8 @@ func TestStatusDoesNotInterruptBusyAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.IsError || !strings.Contains(resultText(r), "agent: busy") {
+	var st statusOut
+	if r.IsError || json.Unmarshal([]byte(resultText(r)), &st) != nil || st.Agent == nil || st.Agent.State != "busy" || st.Session != nil {
 		t.Fatalf("status: %s", resultText(r))
 	}
 	stop()
@@ -68,7 +69,8 @@ func TestStatusDoesNotInterruptBusyAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.IsError || !strings.Contains(resultText(r), "session: unlocked") {
+	st = statusOut{}
+	if r.IsError || json.Unmarshal([]byte(resultText(r)), &st) != nil || st.Power != "running" || st.Agent == nil || st.Agent.State != "ok" || st.Agent.Protocol != proto.Protocol || st.Session == nil || st.Session.Locked || !st.Session.Console {
 		t.Fatalf("idle status: %s", resultText(r))
 	}
 }

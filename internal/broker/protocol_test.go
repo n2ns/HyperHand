@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func rawFrame(header string, size uint64) []byte {
@@ -48,12 +49,25 @@ func TestOperationBoundary(t *testing.T) {
 		{request{Op: "copy", GuestPath: "C:\\test"}, maxCopy + 1},
 		{request{Op: "copy"}, 0},
 		{request{Op: "checkpoint_restore"}, 0},
+		{request{Op: "checkpoint_delete"}, 0},
+		{request{Op: "checkpoint_delete", Name: "x"}, 1},
 		{request{Op: "click", Button: 4}, 0},
 		{request{Op: "drag", X: -1}, 0},
 	}
 	for _, tt := range tests {
 		if err := validateRequest(tt.r, tt.size); err == nil {
 			t.Fatalf("accepted %#v", tt)
+		}
+	}
+}
+
+func TestCheckpointOperationsAccepted(t *testing.T) {
+	for _, op := range []string{"checkpoint_create", "checkpoint_restore", "checkpoint_delete"} {
+		if err := validateRequest(request{Op: op, VM: "Win10", Name: "run-20261010-0812-7f3a-temp-step1"}, 0); err != nil {
+			t.Errorf("%s: %v", op, err)
+		}
+		if operationTimeout(op) != 15*time.Minute {
+			t.Errorf("%s timeout %v", op, operationTimeout(op))
 		}
 	}
 }

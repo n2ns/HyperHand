@@ -50,7 +50,7 @@ type response struct {
 
 func operationTimeout(op string) time.Duration {
 	switch op {
-	case "copy", "checkpoint_create", "checkpoint_restore":
+	case "copy", "checkpoint_create", "checkpoint_restore", "checkpoint_delete":
 		return 15 * time.Minute
 	case "start", "stop":
 		return time.Minute
@@ -122,7 +122,7 @@ func validateRequest(r request, size int64) error {
 		return errors.New("unexpected broker payload")
 	}
 	switch r.Op {
-	case "list", "find", "start", "stop", "shutdown", "checkpoints", "checkpoint_create", "checkpoint_restore", "screenshot", "keys", "text", "dial":
+	case "list", "find", "start", "stop", "shutdown", "checkpoints", "checkpoint_create", "checkpoint_restore", "checkpoint_delete", "screenshot", "keys", "text", "dial":
 	case "click":
 		if r.Button < 1 || r.Button > 3 {
 			return errors.New("invalid mouse button")
@@ -145,7 +145,7 @@ func validateRequest(r request, size int64) error {
 	default:
 		return fmt.Errorf("unsupported broker operation %q", r.Op)
 	}
-	if (r.Op == "checkpoint_create" || r.Op == "checkpoint_restore") && r.Name == "" {
+	if (r.Op == "checkpoint_create" || r.Op == "checkpoint_restore" || r.Op == "checkpoint_delete") && r.Name == "" {
 		return errors.New("checkpoint name required")
 	}
 	if r.Op == "click" || r.Op == "drag" || r.Op == "scroll" {
