@@ -314,7 +314,7 @@ var uiaPatterns = []uiaPattern{
 	{30031, 10000, []string{"Invoke"}, []string{"Invoke"}},
 	{30041, 10015, []string{"Toggle"}, []string{"Toggle"}},
 	{30028, 10005, []string{"Expand", "Collapse"}, []string{"Expand", "Collapse"}},
-	{30037, 10010, []string{"Select"}, []string{"Select"}},
+	{30036, 10010, []string{"Select"}, []string{"Select"}},
 	{30043, 10002, []string{"Value"}, []string{"SetValue"}},
 	{30035, 10017, []string{"ScrollItem"}, []string{"ScrollIntoView"}},
 }

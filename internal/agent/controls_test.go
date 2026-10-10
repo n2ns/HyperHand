@@ -276,6 +276,51 @@ func TestControlsNativeSnapshot(t *testing.T) {
 	}
 }
 
+func TestControlsNativeListItemSelect(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	h := offscreenWindow(t, "hyperhand-selection-test", 0, -30000)
+	class, _ := windows.UTF16PtrFromString("LISTBOX")
+	const wsChild, wsVisible, lbsNotify = 0x40000000, 0x10000000, 1
+	list, _, err := pCreateWindowExW.Call(0, uintptr(unsafe.Pointer(class)), 0,
+		wsChild|wsVisible|lbsNotify, 10, 10, 200, 100, uintptr(h), 0, 0, 0)
+	if list == 0 {
+		t.Fatal(err)
+	}
+	send := user32.NewProc("SendMessageW")
+	const lbAddString, lbSetCurSel, lbGetCurSel = 0x0180, 0x0186, 0x0188
+	for i, name := range []string{"first selection item", "second selection item"} {
+		text, _ := windows.UTF16PtrFromString(name)
+		got, _, _ := send.Call(list, lbAddString, 0, uintptr(unsafe.Pointer(text)))
+		if got != uintptr(i) {
+			t.Fatalf("LB_ADDSTRING returned %d, want %d", got, i)
+		}
+	}
+	send.Call(list, lbSetCurSel, 0, 0)
+	a := proto.ControlsArgs{Handle: uint64(h), PID: uint32(os.Getpid()), MaxDepth: 3, MaxNodes: 20}
+	reply, err := pumpHelper(t, helperRequest{Controls: &a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var item *proto.ControlInfo
+	for i, node := range reply.Controls.Nodes {
+		if node.ControlType == 50007 && node.Name == "second selection item" {
+			item = &reply.Controls.Nodes[i]
+			break
+		}
+	}
+	if item == nil || item.RuntimeID == "" || !slices.Contains(item.Patterns, "Select") {
+		t.Fatalf("native ListItem must expose Select and a runtime ID: item=%+v tree=%+v", item, reply.Controls.Nodes)
+	}
+	act := proto.ControlActionArgs{Handle: a.Handle, PID: a.PID, RuntimeID: item.RuntimeID, Action: "Select"}
+	if _, err := pumpHelper(t, helperRequest{Action: &act}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := send.Call(list, lbGetCurSel, 0, 0); got != 1 {
+		t.Fatalf("Select did not change the native list selection: got %d, want 1", got)
+	}
+}
+
 // The focused-element helper answers within its budget; what has focus on the test machine is not under our control.
 func TestFocusedHelper(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), focusedTimeout)
