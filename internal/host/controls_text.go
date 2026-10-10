@@ -64,6 +64,8 @@ func controlActions(n proto.ControlInfo) []string {
 			actions = append(actions, "SetValue")
 		case "ScrollItem":
 			actions = append(actions, "ScrollIntoView")
+		case "Scroll":
+			actions = append(actions, "ScrollUp", "ScrollDown", "ScrollLeft", "ScrollRight")
 		case "Invoke", "Toggle", "Expand", "Collapse", "Select":
 			actions = append(actions, pattern)
 		}

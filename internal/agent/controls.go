@@ -317,6 +317,7 @@ var uiaPatterns = []uiaPattern{
 	{30036, 10010, []string{"Select"}, []string{"Select"}},
 	{30043, 10002, []string{"Value"}, []string{"SetValue"}},
 	{30035, 10017, []string{"ScrollItem"}, []string{"ScrollIntoView"}},
+	{30034, 10004, []string{"Scroll"}, []string{"ScrollUp", "ScrollDown", "ScrollLeft", "ScrollRight"}},
 }
 
 // patternNames lists ControlInfo.Patterns for the available patterns (indexes into uiaPatterns).
@@ -339,6 +340,27 @@ func actionNames(available []bool) []string {
 		}
 	}
 	return names
+}
+
+// actionNamesForState omits directions only when UIA explicitly says that axis
+// cannot scroll. Unknown state still advertises the provider's ScrollPattern.
+func actionNamesForState(available []bool, state *proto.ControlState) []string {
+	actions := actionNames(available)
+	return slices.DeleteFunc(actions, func(action string) bool { return !scrollAxisSupported(action, state) })
+}
+
+func scrollAxisSupported(action string, state *proto.ControlState) bool {
+	if state == nil {
+		return true
+	}
+	switch action {
+	case "ScrollUp", "ScrollDown":
+		return state.VerticallyScrollable == nil || *state.VerticallyScrollable
+	case "ScrollLeft", "ScrollRight":
+		return state.HorizontallyScrollable == nil || *state.HorizontallyScrollable
+	default:
+		return true
+	}
 }
 
 // parseAction returns the canonical spelling of a control_action Action (case-insensitive).

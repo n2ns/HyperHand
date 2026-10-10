@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
 	"syscall"
 	"unicode/utf16"
@@ -42,22 +43,27 @@ const (
 	uiaCollapse            = 4
 	uiaSelectionItemSelect = 3 // IUIAutomationSelectionItemPattern
 	uiaScrollIntoView      = 3 // IUIAutomationScrollItemPattern
+	uiaScroll              = 3 // IUIAutomationScrollPattern
 	uiaTextGetSelection    = 5 // IUIAutomationTextPattern
 	uiaTextRangeGetText    = 12
 )
 
 // UIA property IDs (UIAutomationClient.h) and pattern IDs.
 const (
-	propHasKeyboardFocus   = 30008
-	propNativeWindowHandle = 30020
-	propIsOffscreen        = 30022
-	propValueValue         = 30045
-	propValueReadOnly      = 30046
-	propExpandState        = 30070
-	propSelectionSelected  = 30079
-	propToggleState        = 30086
-	patternText            = 10014
-	uiaTextLimit           = 512
+	propHasKeyboardFocus        = 30008
+	propNativeWindowHandle      = 30020
+	propIsOffscreen             = 30022
+	propValueValue              = 30045
+	propValueReadOnly           = 30046
+	propHorizontalScrollPercent = 30053
+	propVerticalScrollPercent   = 30055
+	propHorizontallyScrollable  = 30057
+	propVerticallyScrollable    = 30058
+	propExpandState             = 30070
+	propSelectionSelected       = 30079
+	propToggleState             = 30086
+	patternText                 = 10014
+	uiaTextLimit                = 512
 )
 
 var (
@@ -328,22 +334,29 @@ func performControlAction(a proto.ControlActionArgs) (proto.ControlActionResult,
 	if action == "Locate" {
 		return readControlActionResult(e, available, action, a.Value), nil
 	}
+	var before *proto.ControlState
+	switch action {
+	case "Toggle", "ScrollUp", "ScrollDown", "ScrollLeft", "ScrollRight":
+		before = e.state(available)
+	}
 	idx := patternFor(action)
-	if !available[idx] {
-		return proto.ControlActionResult{}, unsupportedPattern(action, actionNames(available))
+	if !available[idx] || !scrollAxisSupported(action, before) {
+		if before == nil {
+			before = e.state(available)
+		}
+		return proto.ControlActionResult{}, unsupportedPattern(action, actionNamesForState(available, before))
 	}
 	var pattern *ole.IUnknown
 	if err := uiaCall(e.element, uiaGetCurrentPattern, uintptr(uiaPatterns[idx].id), uintptr(unsafe.Pointer(&pattern))); err != nil {
 		return proto.ControlActionResult{}, err
 	}
 	if pattern == nil {
-		return proto.ControlActionResult{}, unsupportedPattern(action, actionNames(available))
+		if before == nil {
+			before = e.state(available)
+		}
+		return proto.ControlActionResult{}, unsupportedPattern(action, actionNamesForState(available, before))
 	}
 	defer pattern.Release()
-	var before *proto.ControlState
-	if action == "Toggle" {
-		before = e.state(available)
-	}
 	switch action {
 	case "SetValue":
 		value := ole.SysAllocString(a.Value)
@@ -361,6 +374,14 @@ func performControlAction(a proto.ControlActionArgs) (proto.ControlActionResult,
 		err = uiaCall(pattern, uiaSelectionItemSelect)
 	case "ScrollIntoView":
 		err = uiaCall(pattern, uiaScrollIntoView)
+	case "ScrollUp":
+		err = uiaCall(pattern, uiaScroll, 2, 1) // NoAmount, SmallDecrement
+	case "ScrollDown":
+		err = uiaCall(pattern, uiaScroll, 2, 4) // NoAmount, SmallIncrement
+	case "ScrollLeft":
+		err = uiaCall(pattern, uiaScroll, 1, 2)
+	case "ScrollRight":
+		err = uiaCall(pattern, uiaScroll, 4, 2)
 	}
 	if err != nil {
 		return proto.ControlActionResult{}, fmt.Errorf("%s failed: %w", action, err)
@@ -485,6 +506,8 @@ func (e *nativeControl) state(available []bool) *proto.ControlState {
 		{"", propIsOffscreen, &s.Offscreen},
 		{"SetValue", propValueReadOnly, &s.ReadOnly},
 		{"Select", propSelectionSelected, &s.Selected},
+		{"ScrollUp", propHorizontallyScrollable, &s.HorizontallyScrollable},
+		{"ScrollUp", propVerticallyScrollable, &s.VerticallyScrollable},
 	} {
 		if p.action != "" && !available[patternFor(p.action)] {
 			continue
@@ -515,7 +538,23 @@ func (e *nativeControl) state(available []bool) *proto.ControlState {
 		}
 		v.Clear()
 	}
-	if s.Toggle == nil && s.ExpandCollapse == nil && s.Selected == nil && s.ReadOnly == nil && s.Offscreen == nil {
+	if available[patternFor("ScrollUp")] {
+		for _, p := range []struct {
+			id         int32
+			target     **float64
+			scrollable *bool
+		}{
+			{propHorizontalScrollPercent, &s.HorizontalScrollPercent, s.HorizontallyScrollable},
+			{propVerticalScrollPercent, &s.VerticalScrollPercent, s.VerticallyScrollable},
+		} {
+			v, err := e.stateProperty(p.id)
+			if err == nil && v.VT == ole.VT_R8 {
+				*p.target = readableScrollPercent(math.Float64frombits(uint64(v.Val)), p.scrollable)
+			}
+			v.Clear()
+		}
+	}
+	if s.Toggle == nil && s.ExpandCollapse == nil && s.Selected == nil && s.ReadOnly == nil && s.Offscreen == nil && s.HorizontallyScrollable == nil && s.VerticallyScrollable == nil && s.HorizontalScrollPercent == nil && s.VerticalScrollPercent == nil {
 		return nil
 	}
 	return s
@@ -703,8 +742,8 @@ func (e *nativeControl) info() (proto.ControlInfo, bool, bool, error) {
 		return n, false, false, err
 	}
 	n.Patterns = patternNames(available)
-	n.Actions = actionNames(available)
 	n.State = e.state(available)
+	n.Actions = actionNamesForState(available, n.State)
 	if available[valuePatternIndex] && password == 0 {
 		value, shortened, err := e.propertyText(propValueValue)
 		if err != nil {

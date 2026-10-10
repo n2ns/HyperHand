@@ -1,11 +1,105 @@
 package agent
 
 import (
+	"encoding/json"
+	"math"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"hyperhand/internal/proto"
 )
+
+func TestControlScrollState(t *testing.T) {
+	yes, no := true, false
+	for _, scrollable := range []*bool{nil, &yes, &no} {
+		for _, value := range []float64{0, 50, 100, -1, math.NaN(), math.Inf(1)} {
+			got := readableScrollPercent(value, scrollable)
+			want := (scrollable == nil || *scrollable) && validScrollPercent(value)
+			if (got != nil) != want || got != nil && *got != value {
+				t.Errorf("readable percentage value=%v axis=%v: got %v", value, scrollable, got)
+			}
+		}
+	}
+	for _, action := range []string{"ScrollUp", "ScrollDown", "ScrollLeft", "ScrollRight"} {
+		for _, test := range []struct {
+			before, after float64
+			want          bool
+		}{
+			{50, 60, action == "ScrollDown" || action == "ScrollRight"},
+			{50, 40, action == "ScrollUp" || action == "ScrollLeft"},
+			{0, 0, false}, {100, 100, false},
+		} {
+			before := &proto.ControlState{HorizontalScrollPercent: &test.before, VerticalScrollPercent: &test.before}
+			after := &proto.ControlState{HorizontalScrollPercent: &test.after, VerticalScrollPercent: &test.after}
+			if got := verifyControlState(action, before, after); got == nil || *got != test.want {
+				t.Errorf("%s %v->%v: got %v want %v", action, test.before, test.after, got, test.want)
+			}
+			if got := verifyControlState(action, nil, after); got != nil {
+				t.Errorf("%s unknown before: %v", action, got)
+			}
+			if got := verifyControlState(action, before, &proto.ControlState{}); got != nil {
+				t.Errorf("%s unknown after: %v", action, got)
+			}
+		}
+	}
+	for _, v := range []float64{-1, -0.001, 100.01, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if validScrollPercent(v) {
+			t.Errorf("invalid percentage accepted: %v", v)
+		}
+		p := 50.0
+		if got := verifyControlState("ScrollDown", &proto.ControlState{VerticalScrollPercent: &p}, &proto.ControlState{VerticalScrollPercent: &v}); got != nil {
+			t.Errorf("invalid readback verified: %v -> %v", v, got)
+		}
+	}
+	for _, v := range []float64{0, 0.1, 50, 100} {
+		if !validScrollPercent(v) {
+			t.Errorf("valid percentage rejected: %v", v)
+		}
+	}
+}
+
+func TestControlScrollActions(t *testing.T) {
+	available := make([]bool, len(uiaPatterns))
+	available[patternFor("ScrollUp")] = true
+	available[patternFor("Invoke")] = true
+	yes, no := true, false
+	for _, test := range []struct {
+		state                *proto.ControlState
+		horizontal, vertical bool
+	}{
+		{nil, true, true}, {&proto.ControlState{}, true, true},
+		{&proto.ControlState{HorizontallyScrollable: &no, VerticallyScrollable: &yes}, false, true},
+		{&proto.ControlState{HorizontallyScrollable: &yes, VerticallyScrollable: &no}, true, false},
+		{&proto.ControlState{HorizontallyScrollable: &no, VerticallyScrollable: &no}, false, false},
+	} {
+		actions := actionNamesForState(available, test.state)
+		for _, action := range []string{"ScrollLeft", "ScrollRight"} {
+			if slices.Contains(actions, action) != test.horizontal {
+				t.Errorf("horizontal actions %v, want enabled=%v", actions, test.horizontal)
+			}
+		}
+		for _, action := range []string{"ScrollUp", "ScrollDown"} {
+			if slices.Contains(actions, action) != test.vertical {
+				t.Errorf("vertical actions %v, want enabled=%v", actions, test.vertical)
+			}
+		}
+		if !slices.Contains(actions, "Invoke") || !slices.Contains(patternNames(available), "Scroll") {
+			t.Errorf("unrelated action or legacy pattern dropped: %v", actions)
+		}
+	}
+	available[patternFor("Invoke")] = false
+	actions := actionNamesForState(available, &proto.ControlState{HorizontallyScrollable: &no, VerticallyScrollable: &no})
+	data, err := json.Marshal(proto.ControlInfo{Patterns: []string{"Scroll"}, Actions: actions})
+	if err != nil || !strings.Contains(string(data), `"actions":[]`) {
+		t.Fatalf("explicit empty actions lost on wire: %s, %v", data, err)
+	}
+	var roundtrip proto.ControlInfo
+	if err := json.Unmarshal(data, &roundtrip); err != nil || roundtrip.Actions == nil || len(roundtrip.Actions) != 0 {
+		t.Fatalf("empty actions indistinguishable from legacy node: %+v, %v", roundtrip, err)
+	}
+}
 
 func TestVerifyControlState(t *testing.T) {
 	on, off, indeterminate := "on", "off", "indeterminate"

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"math"
 	"time"
 
 	"hyperhand/internal/proto"
@@ -16,7 +17,7 @@ func readVerifiedControlAction(action string, before *proto.ControlState, read f
 			r.Verified = verifyControlState(action, before, r.State)
 		}
 		switch action {
-		case "SetValue", "Toggle", "Expand", "Collapse", "Select", "ScrollIntoView":
+		case "SetValue", "Toggle", "Expand", "Collapse", "Select", "ScrollIntoView", "ScrollUp", "ScrollDown", "ScrollLeft", "ScrollRight":
 		default:
 			return r
 		}
@@ -63,8 +64,35 @@ func verifyControlState(action string, before, after *proto.ControlState) *bool 
 			return nil
 		}
 		matched = !*after.Offscreen
+	case "ScrollUp", "ScrollDown", "ScrollLeft", "ScrollRight":
+		if before == nil {
+			return nil
+		}
+		old, current := before.VerticalScrollPercent, after.VerticalScrollPercent
+		if action == "ScrollLeft" || action == "ScrollRight" {
+			old, current = before.HorizontalScrollPercent, after.HorizontalScrollPercent
+		}
+		if old == nil || current == nil || !validScrollPercent(*old) || !validScrollPercent(*current) {
+			return nil
+		}
+		if action == "ScrollUp" || action == "ScrollLeft" {
+			matched = *current < *old
+		} else {
+			matched = *current > *old
+		}
 	default:
 		return nil
 	}
 	return &matched
+}
+
+func validScrollPercent(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0 && value <= 100
+}
+
+func readableScrollPercent(value float64, scrollable *bool) *float64 {
+	if scrollable != nil && !*scrollable || !validScrollPercent(value) {
+		return nil
+	}
+	return &value
 }

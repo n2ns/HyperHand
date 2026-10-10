@@ -16,7 +16,8 @@ type ControlsArgs struct {
 // RuntimeID (IUIAutomationElement::GetRuntimeId, dot-joined integers) identifies the element across snapshots while
 // it exists and is what control_action takes. ControlType is a Microsoft UIA control type ID (ControlTypeName gives
 // its name). Patterns lists the supported pattern names among Invoke, Toggle, Expand, Collapse, Select, Value,
-// ScrollItem (see ControlActions). Value and HasValue carry ValuePattern's current value (never for password
+// ScrollItem and Scroll (see ControlActions). Actions contains callable action names, filtered by known scroll-axis
+// capability. Value and HasValue carry ValuePattern's current value (never for password
 // controls). Focused marks the element with keyboard focus. The root has Parent -1 and Depth 0.
 type ControlInfo struct {
 	Index        int           `json:"index"`
@@ -32,7 +33,7 @@ type ControlInfo struct {
 	Rect         Rect          `json:"rect"`
 	RuntimeID    string        `json:"runtime_id,omitempty"`
 	Patterns     []string      `json:"patterns,omitempty"`
-	Actions      []string      `json:"actions,omitempty"`
+	Actions      []string      `json:"actions"`
 	State        *ControlState `json:"state,omitempty"`
 	Value        string        `json:"value,omitempty"`
 	HasValue     bool          `json:"has_value,omitempty"`
@@ -41,11 +42,15 @@ type ControlInfo struct {
 
 // ControlState contains readable UIA state. Nil fields mean unavailable, not false.
 type ControlState struct {
-	Toggle         *string `json:"toggle,omitempty"`
-	ExpandCollapse *string `json:"expand_collapse,omitempty"`
-	Selected       *bool   `json:"selected,omitempty"`
-	ReadOnly       *bool   `json:"read_only,omitempty"`
-	Offscreen      *bool   `json:"offscreen,omitempty"`
+	Toggle                  *string  `json:"toggle,omitempty"`
+	ExpandCollapse          *string  `json:"expand_collapse,omitempty"`
+	Selected                *bool    `json:"selected,omitempty"`
+	ReadOnly                *bool    `json:"read_only,omitempty"`
+	Offscreen               *bool    `json:"offscreen,omitempty"`
+	HorizontallyScrollable  *bool    `json:"horizontally_scrollable,omitempty"`
+	VerticallyScrollable    *bool    `json:"vertically_scrollable,omitempty"`
+	HorizontalScrollPercent *float64 `json:"horizontal_scroll_percent,omitempty"`
+	VerticalScrollPercent   *float64 `json:"vertical_scroll_percent,omitempty"`
 }
 
 // ControlsResult: Focused is the index of the focused node, -1 when none is in the tree. SelectedText is the text
@@ -60,9 +65,10 @@ type ControlsResult struct {
 
 // ControlActions are the Action values control_action accepts (case-insensitive). SetValue uses ValuePattern and
 // takes Value; the others take no value. Invoke: InvokePattern; Toggle: TogglePattern; Expand/Collapse:
-// ExpandCollapsePattern; Select: SelectionItemPattern; ScrollIntoView: ScrollItemPattern. Locate performs nothing:
+// ExpandCollapsePattern; Select: SelectionItemPattern; ScrollIntoView: ScrollItemPattern. ScrollUp/Down/Left/Right
+// use ScrollPattern's provider-defined small step. Locate performs nothing:
 // it re-finds the element and returns its current Rect and value, so the host can act on fresh coordinates.
-var ControlActions = []string{"SetValue", "Invoke", "Toggle", "Expand", "Collapse", "Select", "ScrollIntoView", "Locate"}
+var ControlActions = []string{"SetValue", "Invoke", "Toggle", "Expand", "Collapse", "Select", "ScrollIntoView", "ScrollUp", "ScrollDown", "ScrollLeft", "ScrollRight", "Locate"}
 
 // ControlActionArgs: the element RuntimeID inside the top-level window Handle of process PID. The agent re-finds the
 // element by runtime ID; a missing element is the error "element not found" (host code stale_element); an action the

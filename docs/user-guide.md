@@ -219,6 +219,8 @@ Prefer control actions where the tree has the control: `vm_set_value` sets a tex
 
 Control actions return the actual post-action `state`. `verified:true` means the read-back matches the action, `false` means a readable mismatch, and `null` means it could not be verified. Toggle compares before/after state; Expand, Collapse, Select and ScrollIntoView check their target states. The agent polls for up to 250 ms when needed without replaying the action. Invoke remains `null` because a button's business effect cannot be inferred generically; inspect its result with `observe_after` or another observation.
 
+For a scrollable container, use its control `index` with `vm_invoke` action `ScrollUp`, `ScrollDown`, `ScrollLeft` or `ScrollRight`. Each call requests one small UIA step. Available directions appear in `actions`; `state` reports readable axis support and scroll percentages from 0 to 100. `verified:true` confirms movement in that direction; an unchanged boundary returns `false` with its actual position. `vm_scroll` remains available for coordinate-based wheel input on surfaces without ScrollPattern.
+
 Without `observation_id`, `handle` or `pid`, `vm_click`, `vm_drag`, `vm_scroll`, `vm_key` and ASCII `vm_type` send raw input to the VM console at screen pixels, with no checks and without the agent. Use that only for the sign-in screen and UAC prompts.
 
 ### Other tools

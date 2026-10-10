@@ -574,6 +574,40 @@ func TestInvoke(t *testing.T) {
 	}
 }
 
+func TestInvokeSemanticScroll(t *testing.T) {
+	state := &proto.ControlState{HorizontallyScrollable: new(false), VerticallyScrollable: new(true), VerticalScrollPercent: new(0.0)}
+	for _, action := range []string{"ScrollUp", "ScrollDown", "ScrollLeft", "ScrollRight"} {
+		t.Run(action, func(t *testing.T) {
+			f := controlAgent(proto.ControlActionResult{State: state, Verified: new(false)}, nil)
+			td := newTestDeps(t, f)
+			id := td.put(options(), 1, controlNodes())
+			r, m := td.call(t, "vm_invoke", map[string]any{"observation_id": id, "index": 1, "action": strings.ToLower(action), "observe_after": "none"})
+			if r.IsError || m["ok"] != true || m["verified"] != false {
+				t.Fatalf("scroll result: %v", m)
+			}
+			want := map[string]any{"horizontally_scrollable": false, "vertically_scrollable": true, "vertical_scroll_percent": float64(0)}
+			if !reflect.DeepEqual(m["state"], want) {
+				t.Fatalf("scroll state lost false or zero: %v", m["state"])
+			}
+			if f.count(proto.OpControlAction) != 1 {
+				t.Fatalf("scroll repeated: %v", f.ops)
+			}
+			if a := f.args[slices.Index(f.ops, proto.OpControlAction)].(proto.ControlActionArgs); a.Action != action || a.RuntimeID != "42.7" || a.Value != "" {
+				t.Fatalf("scroll did not use canonical semantic target: %+v", a)
+			}
+		})
+	}
+	// The unsupported action response reports fresh usable directions, not the cached pattern.
+	f := controlAgent(proto.ControlActionResult{}, errors.New("unsupported pattern: ScrollLeft; supported: ScrollUp, ScrollDown, ScrollLeft, ScrollRight"))
+	td := newTestDeps(t, f)
+	id := td.put(options(), 1, controlNodes())
+	r, m := td.call(t, "vm_invoke", map[string]any{"observation_id": id, "index": 1, "action": "ScrollLeft", "observe_after": "none"})
+	want := []any{"ScrollUp", "ScrollDown", "ScrollLeft", "ScrollRight"}
+	if !r.IsError || m["error"] != codeUnsupportedPattern || !reflect.DeepEqual(m["supported"], want) {
+		t.Fatalf("scroll supported list: %v", m)
+	}
+}
+
 func TestObserveAfter(t *testing.T) {
 	for _, tt := range []struct {
 		mode       string

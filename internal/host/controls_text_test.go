@@ -1,6 +1,7 @@
 package host
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -44,6 +45,9 @@ func TestControlSemanticDiff(t *testing.T) {
 		{"expand", &proto.ControlState{ExpandCollapse: new("collapsed")}, &proto.ControlState{ExpandCollapse: new("expanded")}, true},
 		{"read only", &proto.ControlState{ReadOnly: new(false)}, &proto.ControlState{ReadOnly: new(true)}, true},
 		{"offscreen", &proto.ControlState{Offscreen: new(false)}, &proto.ControlState{Offscreen: new(true)}, true},
+		{"scroll axis", &proto.ControlState{HorizontallyScrollable: new(false)}, &proto.ControlState{HorizontallyScrollable: new(true)}, true},
+		{"horizontal scroll", &proto.ControlState{HorizontalScrollPercent: new(0.0)}, &proto.ControlState{HorizontalScrollPercent: new(20.0)}, true},
+		{"vertical scroll", &proto.ControlState{VerticalScrollPercent: new(0.0)}, &proto.ControlState{VerticalScrollPercent: new(20.0)}, true},
 		{"equal state values", &proto.ControlState{Toggle: new("off"), Selected: new(false)}, &proto.ControlState{Toggle: new("off"), Selected: new(false)}, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -76,10 +80,55 @@ func TestSupportedControlActions(t *testing.T) {
 		{"unsupported pattern: Toggle; supported: Invoke, SetValue", []string{"Invoke", "SetValue"}},
 		{"unsupported pattern: Toggle; supported: ", []string{}},
 		{"unsupported pattern: Toggle; supported: none", []string{}},
+		{"unsupported pattern: Toggle; supported: ScrollUp, ScrollDown, ScrollLeft, ScrollRight", []string{"ScrollUp", "ScrollDown", "ScrollLeft", "ScrollRight"}},
 	} {
 		if got := supportedControlActions(tt.message, n); !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("%q: supported = %v, want %v", tt.message, got, tt.want)
 		}
+	}
+}
+
+func TestRenderScrollControl(t *testing.T) {
+	n := proto.ControlInfo{Enabled: true, Actions: []string{"ScrollUp", "ScrollDown"},
+		State: &proto.ControlState{HorizontallyScrollable: new(false), VerticallyScrollable: new(true), VerticalScrollPercent: new(0.0)}}
+	line := renderControl(n)
+	for _, part := range []string{`actions=[ScrollUp,ScrollDown]`, `"horizontally_scrollable":false`, `"vertically_scrollable":true`, `"vertical_scroll_percent":0`} {
+		if !strings.Contains(line, part) {
+			t.Fatalf("scroll control missing %q: %s", part, line)
+		}
+	}
+	if strings.Contains(line, "horizontal_scroll_percent") {
+		t.Fatalf("unknown percentage rendered as known: %s", line)
+	}
+	legacy := proto.ControlInfo{Patterns: []string{"Scroll"}}
+	if got := controlActions(legacy); !reflect.DeepEqual(got, []string{"ScrollUp", "ScrollDown", "ScrollLeft", "ScrollRight"}) {
+		t.Fatalf("legacy Scroll actions: %v", got)
+	}
+	legacy.Actions = []string{"ScrollLeft", "ScrollRight"}
+	if got := controlActions(legacy); !reflect.DeepEqual(got, legacy.Actions) {
+		t.Fatalf("explicit axis actions were replaced: %v", got)
+	}
+}
+
+func TestEmptyScrollActionsSurviveWire(t *testing.T) {
+	n := proto.ControlInfo{Enabled: true, Patterns: []string{"Scroll"}, Actions: []string{},
+		State: &proto.ControlState{HorizontallyScrollable: new(false), VerticallyScrollable: new(false)}}
+	data, err := json.Marshal(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded proto.ControlInfo
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Actions == nil {
+		t.Fatalf("explicit empty actions disappeared on the wire: %s", data)
+	}
+	if actions := controlActions(decoded); len(actions) != 0 {
+		t.Fatalf("non-scrollable axes regained actions after decoding: %v", actions)
+	}
+	if line := renderControl(decoded); strings.Contains(line, "actions=") {
+		t.Fatalf("non-scrollable axes advertise actions: %s", line)
 	}
 }
 

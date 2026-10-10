@@ -378,7 +378,10 @@ func TestParseAction(t *testing.T) {
 }
 
 func TestPatternNames(t *testing.T) {
-	available := []bool{true, false, true, false, true, false} // Invoke, ExpandCollapse, Value
+	available := make([]bool, len(uiaPatterns))
+	for _, action := range []string{"Invoke", "Expand", "SetValue"} {
+		available[patternFor(action)] = true
+	}
 	if got := fmt.Sprint(patternNames(available)); got != "[Invoke Expand Collapse Value]" {
 		t.Errorf("patterns: %s", got)
 	}

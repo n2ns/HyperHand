@@ -73,7 +73,7 @@ type invokeIn struct {
 	VM            string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
 	ObservationID string `json:"observation_id" jsonschema:"observation_id of a vm_observe call with controls: true"`
 	Index         int    `json:"index" jsonschema:"the control's index in that observation's tree"`
-	Action        string `json:"action" jsonschema:"Invoke, Toggle, Expand, Collapse, Select or ScrollIntoView (case-insensitive); choose from the control's actions in the tree"`
+	Action        string `json:"action" jsonschema:"Invoke, Toggle, Expand, Collapse, Select, ScrollIntoView, ScrollUp, ScrollDown, ScrollLeft or ScrollRight (case-insensitive); choose from the control's actions in the tree"`
 	Activate      *bool  `json:"activate,omitempty" jsonschema:"bring the window to the foreground first when it is not; default true"`
 	afterIn
 }
@@ -190,10 +190,10 @@ func registerActions(d *deps) {
 			return a.control(in.ObservationID, in.Index, "SetValue", in.Value, on(in.Activate))
 		})
 	})
-	addToolIn(d, toolSpec{name: "vm_invoke", desc: "Perform a semantic action from a control's actions in a vm_observe tree: Invoke (buttons, menu items), Toggle (check boxes), Expand, Collapse, Select (list and tab items) or ScrollIntoView. Refuses a control that no longer exists (stale_element) or lacks support (unsupported_pattern, with supported action names). Result: {ok, verified, value, state: readable control state or null, window, after}. verified is true when read-back confirms Toggle changed state, Expand expanded, Collapse collapsed, Select selected or ScrollIntoView is no longer offscreen; false when readable but not confirmed, null when unknown. Invoke always has verified:null because UIA cannot verify its business effect. Omitted state fields are unknown, not false. The action executes once; read-back may wait up to 250 ms for state to settle." + descUntrusted}, func(ctx context.Context, in invokeIn) (*mcp.CallToolResult, error) {
+	addToolIn(d, toolSpec{name: "vm_invoke", desc: "Perform a semantic action from a control's actions in a vm_observe tree: Invoke (buttons, menu items), Toggle (check boxes), Expand, Collapse, Select (list and tab items), ScrollIntoView, ScrollUp, ScrollDown, ScrollLeft or ScrollRight. Directional scrolling targets the control's UIA ScrollPattern, moves one provider-defined small increment and needs no coordinates. Only actions for supported scroll axes are advertised. Refuses a control that no longer exists (stale_element) or lacks support (unsupported_pattern, with supported action names). Result: {ok, verified, value, state: readable control state or null, window, after}. verified is true when read-back confirms Toggle changed state, Expand expanded, Collapse collapsed, Select selected, ScrollIntoView is no longer offscreen, or a scroll percentage moved in the requested direction; false when readable but not confirmed (including no movement at a scroll boundary), null when unknown. Scroll state includes horizontally_scrollable, vertically_scrollable and horizontal_scroll_percent/vertical_scroll_percent (0 to 100 on a scrollable axis). Invoke always has verified:null because UIA cannot verify its business effect. Omitted state fields are unknown, not false. The action executes once; read-back may wait up to 250 ms for state to settle." + descUntrusted}, func(ctx context.Context, in invokeIn) (*mcp.CallToolResult, error) {
 		i := slices.IndexFunc(proto.ControlActions, func(s string) bool { return strings.EqualFold(s, in.Action) })
 		if i < 0 || proto.ControlActions[i] == "SetValue" {
-			return nil, refuse(codeInvalidArgument, "use action Invoke, Toggle, Expand, Collapse, Select or ScrollIntoView; vm_set_value sets values", nil, "unknown action %q", in.Action)
+			return nil, refuse(codeInvalidArgument, "use action Invoke, Toggle, Expand, Collapse, Select, ScrollIntoView, ScrollUp, ScrollDown, ScrollLeft or ScrollRight; vm_set_value sets values", nil, "unknown action %q", in.Action)
 		}
 		return d.run(ctx, in.VM, in.afterIn, afterScreenshot, func(a *action) (*actionOut, error) {
 			return a.control(in.ObservationID, in.Index, proto.ControlActions[i], "", on(in.Activate))
