@@ -33,6 +33,18 @@ These are development candidates, not authorization to implement all of them tog
 
 References: [tool behavior](docs/features.md), [Win10 acceptance](docs/acceptance-20261010.md), and [semantic control acceptance](docs/semantic-acceptance-20261010.md).
 
+### AI-caller feedback: PipeSifu 3D session (2026-10-10)
+
+Friction an AI caller hit while deploying PipeSifu builds, installing its AutoCAD plugin and drawing 3D parts on the Win10 VM through the PipeSifu `Invoke-HyperHand.ps1` helper (one MCP session per call). Each item names the observed behavior; none has been reproduced in isolation yet, so confirm the cause before changing code. Window waits (`window_exists` etc.) were also wanted and already shipped in `3c2241c`.
+
+| Priority | Item | Observed behavior and minimum delivery |
+| --- | --- | --- |
+| P1 | Typing into AutoCAD is cut off by its dynamic-input tooltip | `vm_type {handle: <AutoCAD main window>, text: "_qnew\n"}` returned `partial_input` after 3 of 6 characters: "keyboard input target is no longer the visible, enabled foreground window with the requested PID". `vm_windows` then showed the foreground window as `CAcDynInputWndControl` of the same `acad.exe`, which AutoCAD shows as soon as a command name is typed. Check whether it is outside the main window's group (no owner link) or fails the visibility/enabled test, and accept it as part of the AutoCAD target the way the command line and its history popup are. Acceptance: typing a command name plus Enter into AutoCAD 2015 with dynamic input on (the default) completes and runs the command. |
+| P1 | Orphaned write ownership from session-per-call clients (concrete cause for the "Recovery of abandoned task ownership" row above) | The helper opens and deletes one MCP session per call, so each call without `task_id` runs in a new default task. The first write (`vm_exec`) reserved Win10 for a task that no later call could reach, and the next session's write (`vm_checkpoint`) got `vm_busy`; the only way on was to copy `owner_task_id` from the error and pass it explicitly. Minimum delivery: end a default task, releasing ownership, when its MCP session is deleted with no accepted calls in flight (explicit `task_id`s keep today's behavior), and document that scripts needing ownership across calls must pass an explicit `task_id`. Acceptance: two consecutive session-per-call writes without `task_id` both succeed; an explicit-ID task still keeps ownership across sessions. |
+| P3 | Minimal official client for scripts | Every caller rebuilds the same wrapper (the AI wrote `hhlib.py`): JSON argument files to survive shell quoting of Windows paths, a stable `task_id`, UTF-8 decoding, turning error objects into failures, saving images, and finding a control index in the tree text. Ship a small documented client (CLI or Python module) with these, so agents and subagents do not each re-derive it. |
+
+Out of scope for this file: the helper script itself lives in the PipeSifu repository (`.agents/skills/hyperhand-vm/scripts/Invoke-HyperHand.ps1`); its Chinese output arriving in the console code page and its `-TimeoutSec` cap of 300 seconds were PipeSifu skill issues and are fixed there (UTF-8 output, cap 3600; 2026-10-10).
+
 ## 3. Remaining acceptance coverage
 
 Record the exact source/build, environment, expected behavior and independent evidence for each result. Preserve the distinction between unit coverage and actual installed behavior.
@@ -70,6 +82,7 @@ Evidence and boundaries: [v0.2.0 acceptance](docs/acceptance-v0.2.0.md#remaining
 ## 6. Completed capabilities to keep out of the backlog
 
 - [x] Window groups, target integrity checks, structured tool results/errors, observation IDs and freshness checks.
+- [x] Required `vm` on every tool except `vm_list` (no default VM; `all_temp` needs `vm`), so a call meant for a VM that is off never reaches another one. Installed-host acceptance with `Win10` and `Win10-PipeSifu`: see the [acceptance record](docs/vm-required-acceptance-20261010.md).
 - [x] UIA semantic actions, state readback and four-direction semantic scrolling; custom-provider coverage remains bounded by the acceptance records.
 - [x] UI condition waits and assertions: six window/control kinds, exact enabled/value/state matching, one-shot checks, timeout/cancellation, unknown-state protection and concurrent actions. See the [wait contract](docs/features.md#73-vm_wait).
 - [x] Control search and subtree observation: bounded exact property search, explicit unique/multiple/not-found/incomplete results, subtree diff isolation and direct use of returned identities by actions and waits. Installed Win10 acceptance covered a 2234-node fixture and the real AutoCAD Options tab/Cancel workflow. See the [search contract](docs/features.md#control-search-and-subtree-observation) and [acceptance record](docs/control-search-acceptance-20261010.md).
