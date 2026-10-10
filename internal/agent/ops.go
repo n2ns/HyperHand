@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"image/png"
 	"io"
 	"io/fs"
 	"os"
@@ -19,7 +18,6 @@ import (
 	"unicode/utf8"
 	"unsafe"
 
-	"github.com/kbinani/screenshot"
 	"golang.org/x/sys/windows"
 
 	"hyperhand/internal/proto"
@@ -239,24 +237,6 @@ func listDir(_ context.Context, args json.RawMessage, _ []byte) (any, []byte, er
 		r.Entries = append(r.Entries, proto.DirEntry{Name: e.Name(), IsDir: e.IsDir()})
 	}
 	return r, nil, nil
-}
-
-func screenshotOp(context.Context, json.RawMessage, []byte) (any, []byte, error) {
-	bounds := screenshot.GetDisplayBounds(0)
-	img, err := screenshot.CaptureRect(bounds)
-	if err != nil {
-		return nil, nil, err
-	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		return nil, nil, err
-	}
-	var sessionID uint32
-	if err := windows.ProcessIdToSessionId(windows.GetCurrentProcessId(), &sessionID); err != nil {
-		return nil, nil, err
-	}
-	return proto.ScreenshotResult{Width: img.Bounds().Dx(), Height: img.Bounds().Dy(), OriginX: bounds.Min.X, OriginY: bounds.Min.Y,
-		SessionID: sessionID, Console: sessionID == windows.WTSGetActiveConsoleSessionId()}, buf.Bytes(), nil
 }
 
 func waitOp(ctx context.Context, args json.RawMessage, _ []byte) (any, []byte, error) {

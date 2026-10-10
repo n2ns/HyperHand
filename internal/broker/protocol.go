@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"hyperhand/internal/hyperv"
 )
 
 const (
@@ -24,18 +26,19 @@ type Config struct {
 }
 
 type request struct {
-	Op        string `json:"op"`
-	VM        string `json:"vm,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Text      string `json:"text,omitempty"`
-	GuestPath string `json:"guest_path,omitempty"`
-	X         int    `json:"x,omitempty"`
-	Y         int    `json:"y,omitempty"`
-	X2        int    `json:"x2,omitempty"`
-	Y2        int    `json:"y2,omitempty"`
-	Button    int    `json:"button,omitempty"`
-	Delta     int    `json:"delta,omitempty"`
-	Double    bool   `json:"double,omitempty"`
+	Op        string   `json:"op"`
+	VM        string   `json:"vm,omitempty"`
+	Name      string   `json:"name,omitempty"`
+	Text      string   `json:"text,omitempty"`
+	GuestPath string   `json:"guest_path,omitempty"`
+	X         int      `json:"x,omitempty"`
+	Y         int      `json:"y,omitempty"`
+	X2        int      `json:"x2,omitempty"`
+	Y2        int      `json:"y2,omitempty"`
+	Button    int      `json:"button,omitempty"`
+	Delta     int      `json:"delta,omitempty"`
+	Count     int      `json:"count,omitempty"`
+	Modifiers []string `json:"modifiers,omitempty"`
 }
 
 type response struct {
@@ -124,7 +127,17 @@ func validateRequest(r request, size int64) error {
 		if r.Button < 1 || r.Button > 3 {
 			return errors.New("invalid mouse button")
 		}
-	case "drag", "scroll":
+		if r.Count < 1 || r.Count > 3 {
+			return errors.New("invalid click count")
+		}
+		if err := hyperv.ValidateModifiers(r.Modifiers); err != nil {
+			return err
+		}
+	case "drag":
+		if err := hyperv.ValidateModifiers(r.Modifiers); err != nil {
+			return err
+		}
+	case "scroll":
 	case "copy":
 		if r.GuestPath == "" {
 			return errors.New("guest path required")

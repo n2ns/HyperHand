@@ -128,6 +128,9 @@ func (Client) ListCheckpoints(vm string) ([]hyperv.Checkpoint, error) {
 func (Client) CreateCheckpoint(vm, name string) error {
 	return call(request{Op: "checkpoint_create", VM: vm, Name: name})
 }
+func (Client) DeleteCheckpoint(vm, name string) error {
+	return call(request{Op: "checkpoint_delete", VM: vm, Name: name})
+}
 func (Client) RestoreCheckpoint(vm, name string) error {
 	return call(request{Op: "checkpoint_restore", VM: vm, Name: name})
 }
@@ -135,11 +138,11 @@ func (Client) Screenshot(vm string) ([]byte, int, int, error) {
 	out, b, err := rpc(request{Op: "screenshot", VM: vm}, nil, 0)
 	return b, out.Width, out.Height, err
 }
-func (Client) Click(vm string, x, y, button int, double bool) error {
-	return call(request{Op: "click", VM: vm, X: x, Y: y, Button: button, Double: double})
+func (Client) Click(vm string, x, y, button, count int, modifiers []string) error {
+	return call(request{Op: "click", VM: vm, X: x, Y: y, Button: button, Count: count, Modifiers: modifiers})
 }
-func (Client) Drag(vm string, x1, y1, x2, y2 int) error {
-	return call(request{Op: "drag", VM: vm, X: x1, Y: y1, X2: x2, Y2: y2})
+func (Client) Drag(vm string, x1, y1, x2, y2 int, modifiers []string) error {
+	return call(request{Op: "drag", VM: vm, X: x1, Y: y1, X2: x2, Y2: y2, Modifiers: modifiers})
 }
 func (Client) Scroll(vm string, x, y, delta int) error {
 	return call(request{Op: "scroll", VM: vm, X: x, Y: y, Delta: delta})

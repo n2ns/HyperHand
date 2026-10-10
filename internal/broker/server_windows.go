@@ -277,9 +277,9 @@ func (s *server) handle(c net.Conn) {
 	case "screenshot":
 		payload, out.Width, out.Height, err = screenshotReady(s.ctx, r.VM)
 	case "click":
-		err = hyperv.Click(r.VM, r.X, r.Y, r.Button, r.Double)
+		err = hyperv.Click(r.VM, r.X, r.Y, r.Button, r.Count, r.Modifiers)
 	case "drag":
-		err = hyperv.Drag(r.VM, r.X, r.Y, r.X2, r.Y2)
+		err = hyperv.Drag(r.VM, r.X, r.Y, r.X2, r.Y2, r.Modifiers)
 	case "scroll":
 		err = hyperv.Scroll(r.VM, r.X, r.Y, r.Delta)
 	case "keys":

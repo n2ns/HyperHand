@@ -18,9 +18,10 @@ type Backend interface {
 	ListCheckpoints(string) ([]hyperv.Checkpoint, error)
 	CreateCheckpoint(string, string) error
 	RestoreCheckpoint(string, string) error
+	DeleteCheckpoint(vm, name string) error // removes one checkpoint (not its children); implemented by vm_end_turn's work
 	Screenshot(string) ([]byte, int, int, error)
-	Click(string, int, int, int, bool) error
-	Drag(string, int, int, int, int) error
+	Click(vm string, x, y, button, count int, modifiers []string) error
+	Drag(vm string, x1, y1, x2, y2 int, modifiers []string) error
 	Scroll(string, int, int, int) error
 	PressKeys(string, string) error
 	TypeText(string, string) error

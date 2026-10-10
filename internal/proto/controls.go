@@ -2,6 +2,9 @@ package proto
 
 const OpListControls = "list_controls"
 
+// OpControlAction performs a UI Automation pattern action on one element: ControlActionArgs -> ControlActionResult.
+const OpControlAction = "control_action"
+
 type ControlsArgs struct {
 	Handle   uint64 `json:"handle"`
 	PID      uint32 `json:"pid"`
@@ -9,24 +12,80 @@ type ControlsArgs struct {
 	MaxNodes int    `json:"max_nodes,omitempty"`
 }
 
-// ControlInfo is read-only metadata; Rect uses physical screen pixels. Index is local to this snapshot.
-// ControlType is a Microsoft UIA control type ID. The root has Parent -1 and Depth 0.
+// ControlInfo is one node of the control-view tree. Rect uses physical screen pixels. Index is local to this snapshot;
+// RuntimeID (IUIAutomationElement::GetRuntimeId, dot-joined integers) identifies the element across snapshots while
+// it exists and is what control_action takes. ControlType is a Microsoft UIA control type ID (ControlTypeName gives
+// its name). Patterns lists the supported pattern names among Invoke, Toggle, Expand, Collapse, Select, Value,
+// ScrollItem (see ControlActions). Value and HasValue carry ValuePattern's current value (never for password
+// controls). Focused marks the element with keyboard focus. The root has Parent -1 and Depth 0.
 type ControlInfo struct {
-	Index        int    `json:"index"`
-	Parent       int    `json:"parent"`
-	Depth        int    `json:"depth"`
-	Name         string `json:"name"`
-	ControlType  int32  `json:"control_type"`
-	AutomationID string `json:"automation_id"`
-	ClassName    string `json:"class_name"`
-	PID          uint32 `json:"pid"`
-	Enabled      bool   `json:"enabled"`
-	Offscreen    bool   `json:"offscreen"`
-	Rect         Rect   `json:"rect"`
+	Index        int      `json:"index"`
+	Parent       int      `json:"parent"`
+	Depth        int      `json:"depth"`
+	Name         string   `json:"name"`
+	ControlType  int32    `json:"control_type"`
+	AutomationID string   `json:"automation_id"`
+	ClassName    string   `json:"class_name"`
+	PID          uint32   `json:"pid"`
+	Enabled      bool     `json:"enabled"`
+	Offscreen    bool     `json:"offscreen"`
+	Rect         Rect     `json:"rect"`
+	RuntimeID    string   `json:"runtime_id,omitempty"`
+	Patterns     []string `json:"patterns,omitempty"`
+	Value        string   `json:"value,omitempty"`
+	HasValue     bool     `json:"has_value,omitempty"`
+	Focused      bool     `json:"focused,omitempty"`
 }
 
+// ControlsResult: Focused is the index of the focused node, -1 when none is in the tree. SelectedText is the text
+// selected in the window when a TextPattern reports one.
 type ControlsResult struct {
-	Nodes      []ControlInfo `json:"nodes"`
-	Truncated  bool          `json:"truncated"`
-	Truncation []string      `json:"truncation,omitempty"`
+	Nodes        []ControlInfo `json:"nodes"`
+	Truncated    bool          `json:"truncated"`
+	Truncation   []string      `json:"truncation,omitempty"`
+	Focused      int           `json:"focused"`
+	SelectedText string        `json:"selected_text,omitempty"`
+}
+
+// ControlActions are the Action values control_action accepts (case-insensitive). SetValue uses ValuePattern and
+// takes Value; the others take no value. Invoke: InvokePattern; Toggle: TogglePattern; Expand/Collapse:
+// ExpandCollapsePattern; Select: SelectionItemPattern; ScrollIntoView: ScrollItemPattern.
+var ControlActions = []string{"SetValue", "Invoke", "Toggle", "Expand", "Collapse", "Select", "ScrollIntoView"}
+
+// ControlActionArgs: the element RuntimeID inside the top-level window Handle of process PID. The agent re-finds the
+// element by runtime ID; a missing element is the error "element not found" (host code stale_element); an action the
+// element does not support is the error "unsupported pattern: <action>; supported: <list>".
+type ControlActionArgs struct {
+	Handle    uint64 `json:"handle"`
+	PID       uint32 `json:"pid"`
+	RuntimeID string `json:"runtime_id"`
+	Action    string `json:"action"`
+	Value     string `json:"value,omitempty"`
+}
+
+// ControlActionResult: after the action, Value/HasValue re-read the element's ValuePattern (when supported); for
+// SetValue, Verified says whether the read-back equals the requested value (nil when it could not be read).
+type ControlActionResult struct {
+	Value    string `json:"value,omitempty"`
+	HasValue bool   `json:"has_value,omitempty"`
+	Verified *bool  `json:"verified,omitempty"`
+}
+
+// ControlTypeName maps a UIA control type ID (UIA_*ControlTypeId) to its name without the "ControlType" suffix.
+func ControlTypeName(id int32) string {
+	if n, ok := controlTypeNames[id]; ok {
+		return n
+	}
+	return "Custom"
+}
+
+var controlTypeNames = map[int32]string{
+	50000: "Button", 50001: "Calendar", 50002: "CheckBox", 50003: "ComboBox", 50004: "Edit", 50005: "Hyperlink",
+	50006: "Image", 50007: "ListItem", 50008: "List", 50009: "Menu", 50010: "MenuBar", 50011: "MenuItem",
+	50012: "ProgressBar", 50013: "RadioButton", 50014: "ScrollBar", 50015: "Slider", 50016: "Spinner",
+	50017: "StatusBar", 50018: "Tab", 50019: "TabItem", 50020: "Text", 50021: "ToolBar", 50022: "ToolTip",
+	50023: "Tree", 50024: "TreeItem", 50025: "Custom", 50026: "Group", 50027: "Thumb", 50028: "DataGrid",
+	50029: "DataItem", 50030: "Document", 50031: "SplitButton", 50032: "Window", 50033: "Pane", 50034: "Header",
+	50035: "HeaderItem", 50036: "Table", 50037: "TitleBar", 50038: "Separator", 50039: "SemanticZoom",
+	50040: "AppBar",
 }

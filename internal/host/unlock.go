@@ -221,16 +221,16 @@ type lockedInput struct {
 	mu sync.Locker
 }
 
-func (b lockedInput) Click(vm string, x, y, button int, double bool) error {
+func (b lockedInput) Click(vm string, x, y, button, count int, modifiers []string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.Backend.Click(vm, x, y, button, double)
+	return b.Backend.Click(vm, x, y, button, count, modifiers)
 }
 
-func (b lockedInput) Drag(vm string, x1, y1, x2, y2 int) error {
+func (b lockedInput) Drag(vm string, x1, y1, x2, y2 int, modifiers []string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.Backend.Drag(vm, x1, y1, x2, y2)
+	return b.Backend.Drag(vm, x1, y1, x2, y2, modifiers)
 }
 
 func (b lockedInput) Scroll(vm string, x, y, delta int) error {

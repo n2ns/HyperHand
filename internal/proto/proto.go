@@ -19,6 +19,10 @@ const ServiceID = "3ce544e1-2645-4383-b332-fedf8a18736b"
 // Version is set at build time for releases: -ldflags "-X hyperhand/internal/proto.Version=0.1.0".
 var Version = "dev"
 
+// Protocol is the wire protocol generation. The host refuses an agent whose ping reports a lower Protocol with the
+// error code agent_outdated; there is no compatibility path for older agents.
+const Protocol = 2
+
 const (
 	OpPing         = "ping"          // -> PingResult
 	OpExec         = "exec"          // ExecArgs -> ExecResult
@@ -26,12 +30,13 @@ const (
 	OpReadFile     = "read_file"     // PathArgs -> payload
 	OpListDir      = "list_dir"      // PathArgs -> ListDirResult
 	OpHashFiles    = "hash_files"    // PathsArgs -> HashesResult
-	OpScreenshot   = "screenshot"    // -> payload PNG
 	OpClipboardGet = "clipboard_get" // -> TextResult
 	OpClipboardSet = "clipboard_set" // TextArgs
 	OpFocusWindow  = "focus_window"  // TitleArgs -> FocusResult (the matched title and handle)
-	OpListWindows  = "list_windows"  // -> WindowsResult
+	OpListWindows  = "list_windows"  // -> WindowsResult (windows, foreground, focused control, session)
 	OpWindowAt     = "window_at"     // PointArgs -> HandleResult
+	OpLaunch       = "launch"        // LaunchArgs -> LaunchResult: start a detached process
+	OpHScroll      = "hscroll"       // HScrollArgs: horizontal wheel at a screen point (SendInput; the Hyper-V mouse has none)
 	OpWait         = "wait"          // WaitArgs -> WaitResult
 	OpSessionState = "session_state" // -> SessionStateResult
 	OpUpdateAgent  = "update_agent"  // payload = new exe; the agent answers, replaces itself and restarts
@@ -61,6 +66,7 @@ type SessionStateResult struct {
 
 type PingResult struct {
 	Version  string `json:"version"`
+	Protocol int    `json:"protocol"` // see Protocol; 0 from agents that predate it
 	Hostname string `json:"hostname"`
 	User     string `json:"user"`
 }
@@ -129,7 +135,9 @@ type Rect struct {
 }
 
 // WindowInfo describes a visible top-level window. Owner is the owner window's handle (0 if none); Modal means the
-// owner is disabled, as it is while a modal dialog runs.
+// owner is disabled, as it is while a modal dialog runs. GroupRoot is the handle reached by following Owner links
+// through listed windows of the same process (at most 8 links): the window itself when it has no such owner.
+// Integrity is the process token's integrity level: "low", "medium", "high", "system", or "" when it cannot be read.
 type WindowInfo struct {
 	Handle     uint64 `json:"handle"`
 	Title      string `json:"title"`
@@ -142,6 +150,41 @@ type WindowInfo struct {
 	Minimized  bool   `json:"minimized"`
 	Owner      uint64 `json:"owner,omitempty"`
 	Modal      bool   `json:"modal"`
+	GroupRoot  uint64 `json:"group_root"`
+	Integrity  string `json:"integrity,omitempty"`
+}
+
+// FocusedControl summarizes the UI Automation element with keyboard focus (IUIAutomation::GetFocusedElement). Window
+// is the top-level window containing it. ControlType is the UIA control type name (ControlTypeName). RuntimeID is
+// what control_action takes. Rect is in physical screen pixels.
+type FocusedControl struct {
+	Window       uint64 `json:"window"`
+	Name         string `json:"name"`
+	ControlType  string `json:"control_type"`
+	AutomationID string `json:"automation_id,omitempty"`
+	ClassName    string `json:"class_name,omitempty"`
+	RuntimeID    string `json:"runtime_id,omitempty"`
+	Rect         Rect   `json:"rect"`
+}
+
+// LaunchArgs starts Path with Args in Cwd as a detached process: not in a job object, so it outlives the request.
+// Admin starts it elevated through the admin worker.
+type LaunchArgs struct {
+	Path  string   `json:"path"`
+	Args  []string `json:"args,omitempty"`
+	Cwd   string   `json:"cwd,omitempty"`
+	Admin bool     `json:"admin,omitempty"`
+}
+
+type LaunchResult struct {
+	PID uint32 `json:"pid"`
+}
+
+// HScrollArgs scrolls the horizontal wheel at screen point (X, Y) by Delta notches, positive to the right.
+type HScrollArgs struct {
+	X     int `json:"x"`
+	Y     int `json:"y"`
+	Delta int `json:"delta"`
 }
 
 type PointArgs struct {
@@ -158,9 +201,15 @@ type HandleResult struct {
 	Process string `json:"process,omitempty"`
 }
 
-// WindowsResult lists the windows from the top of the Z order down.
+// WindowsResult lists the windows from the top of the Z order down. Foreground is the foreground window's handle (0
+// if none); Focused describes the focused control (nil when UIA cannot report one); Session is the agent's session
+// state.
 type WindowsResult struct {
-	Windows []WindowInfo `json:"windows"`
+	Windows        []WindowInfo        `json:"windows"`
+	Foreground     uint64              `json:"foreground"`
+	Focused        *FocusedControl     `json:"focused,omitempty"`
+	Session        *SessionStateResult `json:"session,omitempty"`
+	AgentIntegrity string              `json:"agent_integrity,omitempty"` // the agent's own integrity level, same values as WindowInfo.Integrity
 }
 
 type TextResult struct {

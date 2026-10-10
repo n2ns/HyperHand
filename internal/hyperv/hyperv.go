@@ -14,6 +14,7 @@ import (
 	"image/png"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -123,16 +124,73 @@ func Screenshot(vm string) (pngData []byte, width, height int, err error) {
 	return
 }
 
-// Click: button 1 left, 2 right, 3 middle.
-func Click(vm string, x, y, button int, double bool) error {
+// Modifiers are the key names accepted in Click and Drag modifiers.
+var Modifiers = []string{"ctrl", "shift", "alt"}
+
+// ValidateModifiers checks a modifiers list: each must be one of Modifiers, without repeats.
+func ValidateModifiers(mods []string) error {
+	seen := map[string]bool{}
+	for _, m := range mods {
+		if !slices.Contains(Modifiers, m) {
+			return fmt.Errorf("unknown modifier %q; allowed: %s", m, strings.Join(Modifiers, ", "))
+		}
+		if seen[m] {
+			return fmt.Errorf("modifier %q repeated", m)
+		}
+		seen[m] = true
+	}
+	return nil
+}
+
+// withModifiers holds the modifier keys on the VM's keyboard while f runs with the mouse device, then releases them
+// in reverse order even if f fails.
+func withModifiers(vm string, mods []string, f func(*session, *ole.IDispatch) error) error {
+	if err := ValidateModifiers(mods); err != nil {
+		return err
+	}
+	return withDevice(vm, "Msvm_Keyboard", func(s *session, k *ole.IDispatch) (err error) {
+		o, err := s.find(vm)
+		if err != nil {
+			return err
+		}
+		mice, err := s.assoc(o, "Msvm_SyntheticMouse")
+		if err != nil {
+			return err
+		}
+		if len(mice) == 0 {
+			return fmt.Errorf("Msvm_SyntheticMouse not found (VM not running?)")
+		}
+		pressed := 0
+		defer func() {
+			for i := pressed - 1; i >= 0; i-- {
+				if _, rerr := s.call(k, "ReleaseKey", "KeyCode", int32(keyNames[mods[i]])); rerr != nil && err == nil {
+					err = rerr
+				}
+			}
+		}()
+		for _, m := range mods {
+			if _, err := s.call(k, "PressKey", "KeyCode", int32(keyNames[m])); err != nil {
+				return err
+			}
+			pressed++
+		}
+		return f(s, mice[0])
+	})
+}
+
+// Click: button 1 left, 2 right, 3 middle; count clicks (1 to 3) while the modifiers (ctrl, shift, alt) are held.
+func Click(vm string, x, y, button, count int, modifiers []string) error {
+	if count < 1 || count > 3 {
+		return fmt.Errorf("click count must be 1 to 3")
+	}
 	inputMu.Lock()
 	defer inputMu.Unlock()
-	return withDevice(vm, "Msvm_SyntheticMouse", func(s *session, m *ole.IDispatch) error {
+	return withModifiers(vm, modifiers, func(s *session, m *ole.IDispatch) error {
 		if err := s.move(m, x, y); err != nil {
 			return err
 		}
 		time.Sleep(100 * time.Millisecond)
-		for i := 0; i < 1+boolInt(double); i++ {
+		for i := 0; i < count; i++ {
 			if _, err := s.call(m, "ClickButton", "ButtonIndex", int32(button)); err != nil {
 				return err
 			}
@@ -141,10 +199,11 @@ func Click(vm string, x, y, button int, double bool) error {
 	})
 }
 
-func Drag(vm string, x1, y1, x2, y2 int) error {
+// Drag drags with the left button from (x1, y1) to (x2, y2) while the modifiers are held.
+func Drag(vm string, x1, y1, x2, y2 int, modifiers []string) error {
 	inputMu.Lock()
 	defer inputMu.Unlock()
-	return withDevice(vm, "Msvm_SyntheticMouse", func(s *session, m *ole.IDispatch) (err error) {
+	return withModifiers(vm, modifiers, func(s *session, m *ole.IDispatch) (err error) {
 		if err := s.move(m, x1, y1); err != nil {
 			return err
 		}
@@ -657,13 +716,6 @@ func toInt(v interface{}) int {
 	case string:
 		i, _ := strconv.Atoi(n)
 		return i
-	}
-	return 0
-}
-
-func boolInt(b bool) int {
-	if b {
-		return 1
 	}
 	return 0
 }

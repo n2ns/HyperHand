@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,12 +19,12 @@ type windowMCPBackend struct {
 	Backend
 	find    func(string) (hyperv.VM, error)
 	respond func(string, proto.Request) (any, error)
-	click   func(string, int, int, int, bool) error
+	click   func(string, int, int, int, int, []string) error
 }
 
 func (b *windowMCPBackend) Find(name string) (hyperv.VM, error) { return b.find(name) }
-func (b *windowMCPBackend) Click(vm string, x, y, button int, double bool) error {
-	return b.click(vm, x, y, button, double)
+func (b *windowMCPBackend) Click(vm string, x, y, button, count int, modifiers []string) error {
+	return b.click(vm, x, y, button, count, modifiers)
 }
 func (b *windowMCPBackend) Dial(_ context.Context, id string) (net.Conn, error) {
 	client, guest := net.Pipe()
@@ -94,9 +93,9 @@ func TestWindowMCPSelectorSchema(t *testing.T) {
 				return nil, fmt.Errorf("unexpected guest op %q", req.Op)
 			}
 		},
-		click: func(_ string, x, y, button int, double bool) error {
-			if x != 101 || y != 52 || button != 1 || double {
-				return fmt.Errorf("unexpected click: %d %d %d %v", x, y, button, double)
+		click: func(_ string, x, y, button, count int, _ []string) error {
+			if x != 101 || y != 52 || button != 1 || count != 1 {
+				return fmt.Errorf("unexpected click: %d %d %d %d", x, y, button, count)
 			}
 			clicks.Add(1)
 			return nil
@@ -107,9 +106,7 @@ func TestWindowMCPSelectorSchema(t *testing.T) {
 		name string
 		args map[string]any
 	}{
-		{"vm_focus_window", map[string]any{"title": "OPTIONS", "pid": 100, "exact": true}},
 		{"vm_click", map[string]any{"window": "OPTIONS", "pid": 100, "exact": true, "x": 1, "y": 2}},
-		{"vm_wait", map[string]any{"kind": "window_foreground", "title": "OPTIONS", "handle": 10, "pid": 100, "exact": true, "timeout_ms": 100}},
 	} {
 		r, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: tt.name, Arguments: tt.args})
 		if err != nil {
@@ -124,83 +121,8 @@ func TestWindowMCPSelectorSchema(t *testing.T) {
 	}
 }
 
-func TestWindowMCPWaitReleasesAgentAndPinsVM(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	firstPoll := make(chan struct{})
-	var polls, defaultFinds, otherVMCalls atomic.Int32
-	var clipboardRead atomic.Bool
-	b := &windowMCPBackend{
-		find: func(name string) (hyperv.VM, error) {
-			id := "A"
-			if name == "" && defaultFinds.Add(1) > 1 {
-				id = "B"
-			}
-			return hyperv.VM{ID: id, Name: id}, nil
-		},
-		respond: func(id string, req proto.Request) (any, error) {
-			if id != "A" {
-				otherVMCalls.Add(1)
-			}
-			switch req.Op {
-			case proto.OpListWindows:
-				if polls.Add(1) == 1 {
-					close(firstPoll)
-				}
-				if clipboardRead.Load() {
-					return proto.WindowsResult{Windows: testWindows()}, nil
-				}
-				return proto.WindowsResult{}, nil
-			case proto.OpClipboardGet:
-				clipboardRead.Store(true)
-				return proto.TextResult{Text: "concurrent request completed"}, nil
-			default:
-				return nil, fmt.Errorf("window wait must not send guest op %q", req.Op)
-			}
-		},
-	}
-	cs := connectWindowMCP(t, ctx, b)
-	done := make(chan error, 1)
-	go func() {
-		r, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "vm_wait", Arguments: map[string]any{"kind": "window_exists", "title": "Options", "timeout_ms": 2000}})
-		if err == nil && (r.IsError || !strings.Contains(resultText(r), "satisfied: true")) {
-			err = fmt.Errorf("wait result: %s", resultText(r))
-		}
-		done <- err
-	}()
-	select {
-	case <-firstPoll:
-	case err := <-done:
-		t.Fatalf("wait ended before first poll: %v", err)
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
-	// This targets the same agent; completion is also what makes the pending window appear.
-	r, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "vm_clipboard_get", Arguments: map[string]any{"vm": "A"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.IsError || resultText(r) != "concurrent request completed" {
-		t.Fatalf("concurrent request: %s", resultText(r))
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
-	if polls.Load() < 2 {
-		t.Errorf("wait never polled again: %d", polls.Load())
-	}
-	if defaultFinds.Load() != 1 || otherVMCalls.Load() != 0 {
-		t.Errorf("wait changed VM: default resolutions=%d, other VM calls=%d", defaultFinds.Load(), otherVMCalls.Load())
-	}
-}
-
 func TestWindowMCPActionsPinVM(t *testing.T) {
-	for _, tool := range []string{"vm_focus_window", "vm_click"} {
+	for _, tool := range []string{"vm_click"} {
 		t.Run(tool, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -232,7 +154,7 @@ func TestWindowMCPActionsPinVM(t *testing.T) {
 						return nil, fmt.Errorf("unexpected op %q", req.Op)
 					}
 				},
-				click: func(vm string, x, y, button int, double bool) error {
+				click: func(vm string, x, y, button, count int, _ []string) error {
 					if vm != "A" {
 						return fmt.Errorf("click did not pin VM: %q", vm)
 					}

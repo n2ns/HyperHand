@@ -15,7 +15,7 @@ import (
 )
 
 func TestInputMCPConcurrentMutationsWaitForKeys(t *testing.T) {
-	for _, tool := range []string{"vm_focus_window", "vm_clipboard_set", "vm_click"} {
+	for _, tool := range []string{"vm_clipboard_set", "vm_click"} {
 		t.Run(tool, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -49,7 +49,7 @@ func TestInputMCPConcurrentMutationsWaitForKeys(t *testing.T) {
 						return nil, fmt.Errorf("unexpected op %s", req.Op)
 					}
 				},
-				click: func(string, int, int, int, bool) error { observe(); clicks.Add(1); return nil },
+				click: func(string, int, int, int, int, []string) error { observe(); clicks.Add(1); return nil },
 			}, press: func(string, string) error {
 				holding.Store(true)
 				close(entered)
@@ -75,8 +75,6 @@ func TestInputMCPConcurrentMutationsWaitForKeys(t *testing.T) {
 			}
 			args := map[string]any{"vm": "A"}
 			switch tool {
-			case "vm_focus_window":
-				args["handle"] = 17
 			case "vm_clipboard_set":
 				args["text"] = "new clipboard"
 			case "vm_click":

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -132,6 +131,15 @@ func describe(w proto.WindowInfo) string {
 	return fmt.Sprintf("%q (handle %d, %s)", w.Title, w.Handle, w.Process)
 }
 
+// titleIn selects a window by title substring (or exact title), handle or PID; used by focusWindow.
+type titleIn struct {
+	VM     string
+	Title  string
+	Handle uint64
+	PID    uint32
+	Exact  bool
+}
+
 type windowSelector struct {
 	Title  string
 	Handle uint64
@@ -189,64 +197,6 @@ func resolveWindow(ws []proto.WindowInfo, s windowSelector) (proto.WindowInfo, e
 		b.WriteString("\n" + describe(w))
 	}
 	return proto.WindowInfo{}, fmt.Errorf("%s", b.String())
-}
-
-// Window waits run on the host, releasing the agent between polls so other tools can make progress.
-func waitWindow(ctx context.Context, call agentCall, in waitIn) (*mcp.CallToolResult, error) {
-	switch in.Kind {
-	case "window_exists", "window_gone", "window_foreground":
-	default:
-		return nil, fmt.Errorf("unknown window wait kind %q", in.Kind)
-	}
-	sel := windowSelector{Title: in.Title, Handle: in.Handle, PID: in.PID, Exact: in.Exact}
-	if err := sel.validate(); err != nil {
-		return nil, err
-	}
-	d := 60 * time.Second
-	if in.TimeoutMs > 0 {
-		// Avoid overflowing time.Duration for a large JSON integer.
-		if int64(in.TimeoutMs) > int64((1<<63-1)/time.Millisecond) {
-			return nil, errors.New("timeout_ms is too large")
-		}
-		d = time.Duration(in.TimeoutMs) * time.Millisecond
-	}
-	wctx, cancel := context.WithTimeout(ctx, d)
-	defer cancel()
-	ticker := time.NewTicker(300 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if wctx.Err() != nil {
-			return text("satisfied: false"), nil
-		}
-		ws, err := listWindows(wctx, call, in.VM)
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if wctx.Err() != nil {
-			return text("satisfied: false"), nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		w, err := resolveWindow(ws, sel)
-		missing := errors.Is(err, errWindowNotFound)
-		if err != nil && !missing {
-			return nil, err
-		}
-		if in.Kind == "window_gone" && missing {
-			return text("satisfied: true"), nil
-		}
-		if !missing && (in.Kind == "window_exists" || in.Kind == "window_foreground" && w.Foreground) {
-			return text("satisfied: true\nhandle: %d\ntitle: %s", w.Handle, w.Title), nil
-		}
-		select {
-		case <-wctx.Done():
-		case <-ticker.C:
-		}
-	}
 }
 
 // clickTarget converts (x, y), relative to the top-left of w's visible frame, to screen pixels. It refuses unless w is
