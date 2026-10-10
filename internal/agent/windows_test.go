@@ -111,8 +111,13 @@ func TestWindowAt(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := r.(proto.HandleResult).Handle == uint64(h); got != c.want {
-			t.Errorf("(%d, %d): handle %d, test window %d", c.x, c.y, r.(proto.HandleResult).Handle, h)
+		hit := r.(proto.HandleResult)
+		if got := hit.Handle == uint64(h); got != c.want {
+			t.Errorf("(%d, %d): handle %d, test window %d", c.x, c.y, hit.Handle, h)
+		}
+		// The hit window is described as well, since list_windows may not show it.
+		if c.want && (!strings.EqualFold(hit.Class, "Static") || hit.PID != windows.GetCurrentProcessId() || hit.Process == "") {
+			t.Errorf("hit description: %+v", hit)
 		}
 	}
 }

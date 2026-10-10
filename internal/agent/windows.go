@@ -154,5 +154,8 @@ func windowAt(_ context.Context, args json.RawMessage, _ []byte) (any, []byte, e
 		return proto.HandleResult{}, nil, nil
 	}
 	root, _, _ := pGetAncestor.Call(h, gaRoot)
-	return proto.HandleResult{Handle: uint64(root)}, nil, nil
+	// Describe it too: the covering window may be one list_windows does not show (a shell overlay above the desktop band).
+	var pid uint32
+	windows.GetWindowThreadProcessId(windows.HWND(root), &pid)
+	return proto.HandleResult{Handle: uint64(root), Class: className(windows.HWND(root)), PID: pid, Process: processName(pid)}, nil, nil
 }

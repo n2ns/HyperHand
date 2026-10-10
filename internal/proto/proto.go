@@ -150,9 +150,12 @@ type PointArgs struct {
 }
 
 // HandleResult: the top-level window that receives a click at the point; 0 when the point is off screen or no
-// window is there.
+// window is there. Class, PID and Process describe it; older agents leave them empty.
 type HandleResult struct {
-	Handle uint64 `json:"handle"`
+	Handle  uint64 `json:"handle"`
+	Class   string `json:"class,omitempty"`
+	PID     uint32 `json:"pid,omitempty"`
+	Process string `json:"process,omitempty"`
 }
 
 // WindowsResult lists the windows from the top of the Z order down.

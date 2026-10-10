@@ -96,13 +96,13 @@ func TestClickTarget(t *testing.T) {
 
 func TestCheckHit(t *testing.T) {
 	ws := testWindows()
-	if err := checkHit(ws, ws[0], 110, 70, 10); err != nil {
-		t.Errorf("hit: %v", err)
+	if hit, err := checkHit(ws, ws[0], 110, 70, proto.HandleResult{Handle: 10}); err != nil || hit.Handle != 10 {
+		t.Errorf("hit: %+v %v", hit, err)
 	}
-	if err := checkHit(ws, ws[0], 110, 70, 30); err == nil || !strings.Contains(err.Error(), "covered by window") || !strings.Contains(err.Error(), "handle 30") {
+	if _, err := checkHit(ws, ws[0], 110, 70, proto.HandleResult{Handle: 30}); err == nil || !strings.Contains(err.Error(), "covered by window") || !strings.Contains(err.Error(), "handle 30") {
 		t.Errorf("covered: %v", err)
 	}
-	if err := checkHit(ws, ws[0], 110, 70, 0); err == nil || !strings.Contains(err.Error(), "off screen") {
+	if _, err := checkHit(ws, ws[0], 110, 70, proto.HandleResult{}); err == nil || !strings.Contains(err.Error(), "off screen") {
 		t.Errorf("off screen: %v", err)
 	}
 }
@@ -151,7 +151,7 @@ func TestToolsOldAgent(t *testing.T) {
 		t.Errorf("list: %v", err)
 	}
 	f = oldAgent()
-	if _, _, err := clickPoint(ctx, f.call, clickIn{Window: "Options", X: 1, Y: 1}); err == nil || !strings.Contains(err.Error(), "vm_update_agent") {
+	if _, _, _, err := clickPoint(ctx, f.call, clickIn{Window: "Options", X: 1, Y: 1}); err == nil || !strings.Contains(err.Error(), "vm_update_agent") {
 		t.Errorf("click: %v", err)
 	}
 	// A focus by handle must not reach an agent that ignores handle (it would focus by an empty title).
@@ -168,15 +168,15 @@ func TestToolsOldAgent(t *testing.T) {
 func TestClickPoint(t *testing.T) {
 	ctx := context.Background()
 	f := newAgent(10)
-	if x, y, err := clickPoint(ctx, f.call, clickIn{Window: "options", X: 10, Y: 20}); err != nil || x != 110 || y != 70 {
-		t.Fatalf("ok: %d %d %v", x, y, err)
+	if x, y, hit, err := clickPoint(ctx, f.call, clickIn{Window: "options", X: 10, Y: 20}); err != nil || x != 110 || y != 70 || hit.Handle != 10 {
+		t.Fatalf("ok: %d %d %+v %v", x, y, hit, err)
 	}
 	if p := f.args[1].(proto.PointArgs); p != (proto.PointArgs{X: 110, Y: 70}) {
 		t.Errorf("window_at asked for %+v", p)
 	}
 	// Plain coordinates never ask the agent.
 	f = newAgent(10)
-	if x, y, err := clickPoint(ctx, f.call, clickIn{X: 5, Y: 6}); err != nil || x != 5 || y != 6 || len(f.ops) != 0 {
+	if x, y, hit, err := clickPoint(ctx, f.call, clickIn{X: 5, Y: 6}); err != nil || x != 5 || y != 6 || hit.Handle != 0 || len(f.ops) != 0 {
 		t.Errorf("plain: %d %d %v %v", x, y, err, f.ops)
 	}
 	// Every refusal is an error; window_at is not asked once an earlier check fails.
@@ -192,7 +192,7 @@ func TestClickPoint(t *testing.T) {
 		{clickIn{Handle: 10, X: 1, Y: 1}, 0, "off screen"},
 	} {
 		f := newAgent(c.at)
-		_, _, err := clickPoint(ctx, f.call, c.in)
+		_, _, _, err := clickPoint(ctx, f.call, c.in)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%+v: want %q, got %v", c.in, c.want, err)
 		}
@@ -245,13 +245,13 @@ func TestFocusWindowSelection(t *testing.T) {
 func TestClickPointSelection(t *testing.T) {
 	for _, in := range []clickIn{{Window: "OPTIONS", PID: 100, Exact: true, X: 1, Y: 2}, {Handle: 10, PID: 100, Window: "ignored", Exact: true, X: 1, Y: 2}} {
 		f := newAgent(10)
-		if x, y, err := clickPoint(context.Background(), f.call, in); err != nil || x != 101 || y != 52 {
+		if x, y, _, err := clickPoint(context.Background(), f.call, in); err != nil || x != 101 || y != 52 {
 			t.Errorf("%+v: %d %d %v", in, x, y, err)
 		}
 	}
 	for _, in := range []clickIn{{PID: 100}, {Handle: 10, PID: 200}, {Window: "Option", Exact: true}, {Exact: true}} {
 		f := newAgent(10)
-		if _, _, err := clickPoint(context.Background(), f.call, in); err == nil {
+		if _, _, _, err := clickPoint(context.Background(), f.call, in); err == nil {
 			t.Errorf("want refusal: %+v", in)
 		}
 		if slices.Contains(f.ops, proto.OpWindowAt) {
@@ -260,7 +260,7 @@ func TestClickPointSelection(t *testing.T) {
 	}
 	// A PID-only selector must select a window, never fall back to absolute coordinates.
 	f := newAgent(30)
-	if _, _, err := clickPoint(context.Background(), f.call, clickIn{PID: 200}); err == nil || !strings.Contains(err.Error(), "foreground") {
+	if _, _, _, err := clickPoint(context.Background(), f.call, clickIn{PID: 200}); err == nil || !strings.Contains(err.Error(), "foreground") {
 		t.Errorf("PID-only background: %v", err)
 	}
 }

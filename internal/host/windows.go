@@ -27,35 +27,81 @@ func listWindows(ctx context.Context, call agentCall, vm string) ([]proto.Window
 }
 
 // clickPoint returns the screen point for vm_click: (x, y) as given, or with window or handle, the point inside that
-// window after every check passed. An error means nothing may be clicked.
-func clickPoint(ctx context.Context, call agentCall, in clickIn) (int, int, error) {
+// window after every check passed, and the window of its group the click reaches (zero without a selector). An error
+// means nothing may be clicked.
+func clickPoint(ctx context.Context, call agentCall, in clickIn) (int, int, proto.WindowInfo, error) {
 	if in.Window == "" && in.Handle == 0 && in.PID == 0 && !in.Exact {
-		return in.X, in.Y, nil
+		return in.X, in.Y, proto.WindowInfo{}, nil
 	}
 	sel := windowSelector{Title: in.Window, Handle: in.Handle, PID: in.PID, Exact: in.Exact}
 	if err := sel.validate(); err != nil {
-		return 0, 0, err
+		return 0, 0, proto.WindowInfo{}, err
 	}
 	ws, err := listWindows(ctx, call, in.VM)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, proto.WindowInfo{}, err
 	}
 	w, err := resolveWindow(ws, sel)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, proto.WindowInfo{}, err
 	}
 	x, y, err := clickTarget(ws, w, in.X, in.Y)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, proto.WindowInfo{}, err
 	}
 	var at proto.HandleResult
 	if _, err := call(ctx, in.VM, proto.OpWindowAt, proto.PointArgs{X: x, Y: y}, nil, &at); err != nil {
-		return 0, 0, err
+		return 0, 0, proto.WindowInfo{}, err
 	}
-	if err := checkHit(ws, w, x, y, at.Handle); err != nil {
-		return 0, 0, err
+	hit, err := checkHit(ws, w, x, y, at)
+	if err != nil {
+		return 0, 0, proto.WindowInfo{}, err
 	}
-	return x, y, nil
+	return x, y, hit, nil
+}
+
+// maxOwnerDepth bounds owner-chain walks (owner links from a window up to root); AutoCAD needs 2 (history popup ->
+// command line -> main window).
+const maxOwnerDepth = 8
+
+// inGroup reports whether h is root or a listed window of root's process that root owns, directly or through other
+// such windows. AutoCAD's command line is owned by its main window, and the command history popup by the command line.
+func inGroup(ws []proto.WindowInfo, root proto.WindowInfo, h uint64) bool {
+	for range maxOwnerDepth + 1 { // the window itself, then up to maxOwnerDepth owners
+
+		if h == root.Handle {
+			return true
+		}
+		w, ok := findWindow(ws, h)
+		if !ok || w.PID != root.PID {
+			return false
+		}
+		h = w.Owner
+	}
+	return false
+}
+
+func findWindow(ws []proto.WindowInfo, h uint64) (proto.WindowInfo, bool) {
+	for _, w := range ws {
+		if w.Handle == h {
+			return w, true
+		}
+	}
+	return proto.WindowInfo{}, false
+}
+
+func foreground(ws []proto.WindowInfo) (proto.WindowInfo, bool) {
+	for _, w := range ws {
+		if w.Foreground {
+			return w, true
+		}
+	}
+	return proto.WindowInfo{}, false
+}
+
+// windowLines describes the window an action reached, one "key: value" per line, for the caller's next call.
+func windowLines(w proto.WindowInfo) string {
+	return fmt.Sprintf("handle: %d\npid: %d\nclass: %s\nprocess: %s\ntitle: %s", w.Handle, w.PID, w.Class, w.Process, w.Title)
 }
 
 func focusWindow(ctx context.Context, call agentCall, in titleIn) (*mcp.CallToolResult, error) {
@@ -78,8 +124,11 @@ func focusWindow(ctx context.Context, call agentCall, in titleIn) (*mcp.CallTool
 	return text("focused: %s\nhandle: %d", r.Text, r.Handle), nil
 }
 
-// describe is a short identification of a window for error messages.
+// describe is a short identification of a window for error messages; untitled windows also name their class.
 func describe(w proto.WindowInfo) string {
+	if w.Title == "" && w.Class != "" {
+		return fmt.Sprintf("%q (handle %d, class %s, %s)", w.Title, w.Handle, w.Class, w.Process)
+	}
 	return fmt.Sprintf("%q (handle %d, %s)", w.Title, w.Handle, w.Process)
 }
 
@@ -200,20 +249,11 @@ func waitWindow(ctx context.Context, call agentCall, in waitIn) (*mcp.CallToolRe
 	}
 }
 
-// clickTarget converts (x, y), relative to the top-left of w's visible frame, to screen pixels. It refuses when w is
-// not the foreground window, is disabled (a modal dialog owns input), or the point is outside w.
+// clickTarget converts (x, y), relative to the top-left of w's visible frame, to screen pixels. It refuses unless w is
+// usable (checkUsable) and the point is inside w.
 func clickTarget(ws []proto.WindowInfo, w proto.WindowInfo, x, y int) (int, int, error) {
-	if !w.Foreground {
-		fg := "none"
-		for _, o := range ws {
-			if o.Foreground {
-				fg = describe(o)
-			}
-		}
-		return 0, 0, fmt.Errorf("window %s is not in the foreground; the foreground window is %s", describe(w), fg)
-	}
-	if !w.Enabled {
-		return 0, 0, fmt.Errorf("window %s is disabled (a modal dialog owns input)", describe(w))
+	if err := checkUsable(ws, w); err != nil {
+		return 0, 0, err
 	}
 	r := w.Rect
 	ax, ay := int(r.Left)+x, int(r.Top)+y
@@ -223,20 +263,55 @@ func clickTarget(ws []proto.WindowInfo, w proto.WindowInfo, x, y int) (int, int,
 	return ax, ay, nil
 }
 
-// checkHit refuses a click at screen point (x, y) unless at, the top-level window there, is w: another window (for
-// example an always-on-top one) covers the point, or the point is off screen (at is 0).
-func checkHit(ws []proto.WindowInfo, w proto.WindowInfo, x, y int, at uint64) error {
-	if at == w.Handle {
-		return nil
-	}
-	if at == 0 {
-		return fmt.Errorf("(%d, %d) in window %s is off screen", x, y, describe(w))
-	}
-	other := fmt.Sprintf("handle %d", at)
-	for _, o := range ws {
-		if o.Handle == at {
-			other = describe(o)
+// checkUsable refuses unless w is enabled and w or one of its own windows (inGroup) is the foreground window. Each
+// refusal names the window to act on next: w's own modal dialog, the outside window probably blocking it, or w itself
+// to focus.
+func checkUsable(ws []proto.WindowInfo, w proto.WindowInfo) error {
+	fg, ok := foreground(ws)
+	inFront := ok && inGroup(ws, w, fg.Handle)
+	if !w.Enabled {
+		var dialogs []string
+		for _, o := range ws {
+			if o.Modal && o.Handle != w.Handle && inGroup(ws, w, o.Handle) {
+				dialogs = append(dialogs, describe(o))
+			}
 		}
+		if len(dialogs) > 0 {
+			return fmt.Errorf("window %s is disabled by its modal dialog %s; act on the dialog's handle first", describe(w), strings.Join(dialogs, ", "))
+		}
+		if ok && !inFront {
+			return fmt.Errorf("window %s is disabled while %s, which is not one of its own windows, is in the foreground and probably blocks it; act on handle %d first", describe(w), describe(fg), fg.Handle)
+		}
+		return fmt.Errorf("window %s is disabled and none of its own windows is a modal dialog; take a fresh vm_windows and vm_screenshot to find what blocks it", describe(w))
 	}
-	return fmt.Errorf("screen point (%d, %d) of window %s is covered by window %s", x, y, describe(w), other)
+	if !ok {
+		return fmt.Errorf("window %s is not in the foreground and no window is; call vm_focus_window with handle %d first", describe(w), w.Handle)
+	}
+	if !inFront {
+		return fmt.Errorf("window %s is not in the foreground; the foreground window is %s; call vm_focus_window with handle %d first, or act on handle %d", describe(w), describe(fg), w.Handle, fg.Handle)
+	}
+	return nil
+}
+
+// checkHit returns the window a click at screen point (x, y) reaches, refusing unless at, the top-level window there,
+// is w or one of its own windows: another window (an always-on-top one, a shell overlay) covers the point, or the point
+// is off screen (at.Handle is 0).
+func checkHit(ws []proto.WindowInfo, w proto.WindowInfo, x, y int, at proto.HandleResult) (proto.WindowInfo, error) {
+	if inGroup(ws, w, at.Handle) {
+		hit, _ := findWindow(ws, at.Handle)
+		if at.Handle == w.Handle {
+			hit = w
+		}
+		return hit, nil
+	}
+	if at.Handle == 0 {
+		return proto.WindowInfo{}, fmt.Errorf("(%d, %d) in window %s is off screen", x, y, describe(w))
+	}
+	other := fmt.Sprintf("handle %d", at.Handle) // older agents do not describe the window
+	if o, ok := findWindow(ws, at.Handle); ok {
+		other = describe(o)
+	} else if at.Class != "" { // not listed (e.g. a shell overlay above the desktop band): describe it from window_at
+		other = describe(proto.WindowInfo{Handle: at.Handle, Class: at.Class, PID: at.PID, Process: at.Process})
+	}
+	return proto.WindowInfo{}, fmt.Errorf("screen point (%d, %d) of window %s is covered by window %s, which is not one of its own windows; dismiss or close it, or take a fresh vm_screenshot and vm_windows, then retry", x, y, describe(w), other)
 }

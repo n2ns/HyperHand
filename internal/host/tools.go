@@ -41,7 +41,7 @@ type clickIn struct {
 	Y      int    `json:"y"`
 	Button string `json:"button,omitempty" jsonschema:"left (default), right or middle"`
 	Double bool   `json:"double,omitempty" jsonschema:"double click"`
-	Window string `json:"window,omitempty" jsonschema:"click inside this window: case-insensitive title substring that must match exactly one window (see vm_windows); x and y are then relative to its top-left corner, and the click is refused unless it is the enabled foreground window and the point is inside it; needs the agent"`
+	Window string `json:"window,omitempty" jsonschema:"click inside this window: case-insensitive title substring that must match exactly one window (see vm_windows); x and y are then relative to its top-left corner, and the click is refused unless it is enabled, it or one of its own windows is in the foreground, and the point is inside it and reaches it or one of its own windows; needs the agent"`
 	Handle uint64 `json:"handle,omitempty" jsonschema:"like window, but selects the window by its handle from vm_windows"`
 	PID    uint32 `json:"pid,omitempty" jsonschema:"restrict the target window to this process ID; may be used alone if exactly one visible window matches"`
 	Exact  bool   `json:"exact,omitempty" jsonschema:"match the full window title instead of a substring, case-insensitively; requires window unless handle is set"`
@@ -67,7 +67,7 @@ type typeTextIn struct {
 	VM     string `json:"vm,omitempty"`
 	Text   string `json:"text"`
 	Mode   string `json:"mode,omitempty" jsonschema:"paste (default) or keys (Unicode SendInput; requires updated agent, does not use clipboard)"`
-	Window string `json:"window,omitempty" jsonschema:"target window title; must already be foreground"`
+	Window string `json:"window,omitempty" jsonschema:"target window title; it or one of its own windows must already be foreground"`
 	Handle uint64 `json:"handle,omitempty"`
 	PID    uint32 `json:"pid,omitempty"`
 	Exact  bool   `json:"exact,omitempty"`
@@ -76,7 +76,7 @@ type keyIn struct {
 	VM       string   `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
 	Keys     string   `json:"keys,omitempty" jsonschema:"a key or combination; pass either keys or sequence"`
 	Sequence []string `json:"sequence,omitempty" jsonschema:"ordered key combinations, e.g. [ctrl+a,backspace]; at most 256"`
-	Window   string   `json:"window,omitempty" jsonschema:"target window title; must remain foreground"`
+	Window   string   `json:"window,omitempty" jsonschema:"target window title; it or one of its own windows must remain foreground"`
 	Handle   uint64   `json:"handle,omitempty"`
 	PID      uint32   `json:"pid,omitempty"`
 	Exact    bool     `json:"exact,omitempty"`
@@ -402,7 +402,7 @@ func NewServer(m *Manager) *mcp.Server {
 			}
 			return text("%s", b), nil
 		})
-	add(s, "vm_click", "Click at screen pixel (x, y), or with window, handle or pid at (x, y) inside the unique matching window after checking it is the enabled foreground window. exact matches the full title.", func(ctx context.Context, in clickIn) (*mcp.CallToolResult, error) {
+	add(s, "vm_click", "Click at screen pixel (x, y), or with window, handle or pid at (x, y) inside the unique matching window after checking it is enabled, that it or one of its own windows (same process, owned directly or through other owned windows, e.g. AutoCAD's command line) is in the foreground, and that the point reaches it or one of its own windows. exact matches the full title. With a selector the result also gives the handle, pid, class, process and title of the window the click reached.", func(ctx context.Context, in clickIn) (*mcp.CallToolResult, error) {
 		b := map[string]int{"": 1, "left": 1, "right": 2, "middle": 3}[in.Button]
 		if b == 0 {
 			return nil, fmt.Errorf("unknown button %q", in.Button)
@@ -418,11 +418,17 @@ func NewServer(m *Manager) *mcp.Server {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		x, y, err := clickPoint(ctx, call, in)
+		x, y, hit, err := clickPoint(ctx, call, in)
 		if err != nil {
 			return nil, u.lockedHint(ctx, in.VM, err)
 		}
-		return done(raw.Click(in.VM, x, y, b, in.Double))
+		if err := raw.Click(in.VM, x, y, b, in.Double); err != nil {
+			return nil, err
+		}
+		if hit.Handle == 0 {
+			return text("ok"), nil
+		}
+		return text("ok\n%s", windowLines(hit)), nil
 	})
 	add(s, "vm_controls", "Read a bounded UI Automation control-view tree for one visible window selected by title, handle or pid. Requires an updated agent. Returns snapshot-local indexes, physical screen rectangles and truncation reasons. Does not click or read values; password names and subtrees are omitted. Provider calls time out after 10 seconds.", func(ctx context.Context, in controlsIn) (*mcp.CallToolResult, error) {
 		if in.MaxDepth < 0 || in.MaxDepth > 10 || in.MaxNodes < 0 || in.MaxNodes > 1000 {
@@ -459,7 +465,7 @@ func NewServer(m *Manager) *mcp.Server {
 	add(s, "vm_scroll", "Scroll the mouse wheel at (x, y).", func(ctx context.Context, in scrollIn) (*mcp.CallToolResult, error) {
 		return done(backend.Scroll(in.VM, in.X, in.Y, in.Delta))
 	})
-	add(s, "vm_type", "Type text into the foreground window. mode=paste (default) uses the clipboard, with ASCII keyboard fallback without the agent. mode=keys uses guest Unicode SendInput, preserves the clipboard and requires an updated agent. Optional window/handle/pid restricts the target; never focuses it automatically. Input may be partial on failure and must not be blindly retried.",
+	add(s, "vm_type", "Type text into the foreground window. mode=paste (default) uses the clipboard, with ASCII keyboard fallback without the agent. mode=keys uses guest Unicode SendInput, preserves the clipboard and requires an updated agent. Optional window/handle/pid restricts the target: input goes to that window, or to one of its own windows (same process, owned directly or through other owned windows, e.g. AutoCAD's command line) when that one is in the foreground; never focuses automatically. With a target the result gives the handle, pid, class, process and title of the window that received the input. Input may be partial on failure and must not be blindly retried.",
 		func(ctx context.Context, in typeTextIn) (*mcp.CallToolResult, error) {
 			if in.Mode != "" && in.Mode != "paste" && in.Mode != "keys" {
 				return nil, fmt.Errorf("unknown input mode %q", in.Mode)
@@ -476,9 +482,9 @@ func NewServer(m *Manager) *mcp.Server {
 			}
 			sel := windowSelector{Title: in.Window, Handle: in.Handle, PID: in.PID, Exact: in.Exact}
 			checkTarget := in.Mode == "keys" || sel != (windowSelector{})
-			var target proto.WindowInfo
+			var root, target proto.WindowInfo
 			if checkTarget {
-				target, err = inputWindow(ctx, call, in.VM, sel)
+				root, target, err = inputWindow(ctx, call, in.VM, sel)
 				if err != nil {
 					return nil, err
 				}
@@ -489,16 +495,21 @@ func NewServer(m *Manager) *mcp.Server {
 				if err != nil {
 					return nil, fmt.Errorf("keys input failed (requires an updated agent): %w", err)
 				}
-				return text("input events: %d", r.Events), nil
+				return text("input events: %d\n%s", r.Events, windowLines(target)), nil
 			}
 			_, err = call(ctx, in.VM, proto.OpClipboardSet, proto.TextArgs{Text: in.Text}, nil, nil)
 			if err == nil {
-				if checkTarget {
-					if _, err := inputWindow(ctx, call, in.VM, windowSelector{Handle: target.Handle, PID: target.PID}); err != nil {
-						return nil, err
-					}
+				if !checkTarget {
+					return done(raw.PressKeys(in.VM, "ctrl+v"))
 				}
-				return done(raw.PressKeys(in.VM, "ctrl+v"))
+				// Recheck after setting the clipboard; the paste goes to whichever window of the group is foreground now.
+				if _, target, err = inputWindow(ctx, call, in.VM, windowSelector{Handle: root.Handle, PID: root.PID}); err != nil {
+					return nil, err
+				}
+				if err := raw.PressKeys(in.VM, "ctrl+v"); err != nil {
+					return nil, err
+				}
+				return text("ok\n%s", windowLines(target)), nil
 			}
 			if checkTarget {
 				return nil, err
@@ -510,7 +521,7 @@ func NewServer(m *Manager) *mcp.Server {
 			}
 			return done(raw.TypeText(in.VM, in.Text))
 		})
-	add(s, "vm_key", "Press keys or an ordered sequence of key combinations. Optional window/handle/pid requires the target to remain foreground. Keys: ctrl, shift, alt, win, enter, esc, tab, space, backspace, delete, insert, home, end, pageup, pagedown, arrows, f1-f12, a-z, 0-9, punctuation and plus. Partial sequences are not retried.", func(ctx context.Context, in keyIn) (*mcp.CallToolResult, error) {
+	add(s, "vm_key", "Press keys or an ordered sequence of key combinations. Optional window/handle/pid requires the target, or one of its own windows, to remain foreground; the result then gives the window that received the last combination. Keys: ctrl, shift, alt, win, enter, esc, tab, space, backspace, delete, insert, home, end, pageup, pagedown, arrows, f1-f12, a-z, 0-9, punctuation and plus. Partial sequences are not retried.", func(ctx context.Context, in keyIn) (*mcp.CallToolResult, error) {
 		sequence, err := keySequence(in)
 		if err != nil {
 			return nil, err
@@ -522,22 +533,28 @@ func NewServer(m *Manager) *mcp.Server {
 		input.Lock()
 		defer input.Unlock()
 		sel := windowSelector{Title: in.Window, Handle: in.Handle, PID: in.PID, Exact: in.Exact}
+		var target proto.WindowInfo
 		for i, keys := range sequence {
 			if err := ctx.Err(); err != nil {
 				return nil, fmt.Errorf("after %d combinations: %w", i, err)
 			}
 			if sel != (windowSelector{}) {
-				w, err := inputWindow(ctx, call, v.Name, sel)
+				// Pin the selected window; each combination goes to it or to one of its own windows in the foreground.
+				var root proto.WindowInfo
+				root, target, err = inputWindow(ctx, call, v.Name, sel)
 				if err != nil {
 					return nil, fmt.Errorf("after %d combinations: %w", i, err)
 				}
-				sel = windowSelector{Handle: w.Handle, PID: w.PID}
+				sel = windowSelector{Handle: root.Handle, PID: root.PID}
 			}
 			if err := raw.PressKeys(v.Name, keys); err != nil {
 				return nil, fmt.Errorf("combination %d failed; input may be partial: %w", i+1, err)
 			}
 		}
-		return text("ok"), nil
+		if target.Handle == 0 {
+			return text("ok"), nil
+		}
+		return text("ok\n%s", windowLines(target)), nil
 	})
 	add(s, "vm_exec", "Run a command in the guest (as the logged-on user); returns exit code, stdout and stderr.",
 		func(ctx context.Context, in execIn) (*mcp.CallToolResult, error) {
