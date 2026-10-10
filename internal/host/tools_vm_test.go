@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -55,14 +57,47 @@ func TestParseCheckpointName(t *testing.T) {
 	}
 }
 
-// vmToolsBackend records checkpoint operations for the VM tools; unexpected operations fail (nil Backend).
+// vmToolsBackend is an in-memory Hyper-V for the VM tools: one checkpoint tree (shared by its VMs) that create,
+// delete, rename and restore change as Hyper-V would, plus a record of the operations; unexpected operations fail
+// (nil Backend). A delete of an id ending in "-fails" fails.
 type vmToolsBackend struct {
 	Backend
-	mu      sync.Mutex
-	created []string
-	deleted []string
-	vms     []hyperv.VM
-	listErr error
+	mu        sync.Mutex
+	created   []string
+	deleted   []string
+	renamed   []string
+	restored  []string
+	vms       []hyperv.VM
+	listErr   error
+	createErr error
+	tree      *hyperv.CheckpointList // nil: defaultTree on first use
+}
+
+// defaultTree is a manual root with one temp child, which is the current state's parent.
+func defaultTree() hyperv.CheckpointList {
+	return hyperv.CheckpointList{CheckpointType: "Standard", CurrentParentID: "id-2", Checkpoints: []hyperv.Checkpoint{
+		{Name: "baseline", CreatedAt: "2026-10-04T10:00:00+08:00", ID: "id-1", Kind: "standard", State: "off"},
+		{Name: "run-20261010-0812-7f3a-temp-step3", CreatedAt: "2026-10-10T08:15:00+08:00", ID: "id-2", ParentID: "id-1", Kind: "standard", State: "running"},
+	}}
+}
+
+// current returns the tree (under b.mu).
+func (b *vmToolsBackend) current() *hyperv.CheckpointList {
+	if b.tree == nil {
+		t := defaultTree()
+		b.tree = &t
+	}
+	return b.tree
+}
+
+// node returns the checkpoint with ID id and its index in the tree (under b.mu).
+func (b *vmToolsBackend) node(id string) (hyperv.Checkpoint, int, error) {
+	for i, c := range b.current().Checkpoints {
+		if c.ID == id {
+			return c, i, nil
+		}
+	}
+	return hyperv.Checkpoint{}, -1, fmt.Errorf("%w: %s", hyperv.ErrCheckpointNotFound, id)
 }
 
 func (b *vmToolsBackend) ListVMs() ([]hyperv.VM, error) { return b.vms, b.listErr }
@@ -78,27 +113,83 @@ func (b *vmToolsBackend) Find(name string) (hyperv.VM, error) {
 	return hyperv.VM{}, errors.New("VM \"" + name + "\" not found")
 }
 func (b *vmToolsBackend) ListCheckpoints(vm string) (hyperv.CheckpointList, error) {
-	return hyperv.CheckpointList{CheckpointType: "Standard", CurrentParentID: "id-2", Checkpoints: []hyperv.Checkpoint{
-		{Name: "baseline", CreatedAt: "2026-10-04T10:00:00+08:00", ID: "id-1", Kind: "standard", State: "off"},
-		{Name: "run-20261010-0812-7f3a-temp-step3", CreatedAt: "2026-10-10T08:15:00+08:00", ID: "id-2", ParentID: "id-1", Kind: "standard", State: "running"},
-	}}, nil
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	t := *b.current()
+	t.Checkpoints = append([]hyperv.Checkpoint{}, t.Checkpoints...)
+	return t, nil
 }
+
+// CreateCheckpoint adds a running standard checkpoint under the current parent and makes it the current parent.
 func (b *vmToolsBackend) CreateCheckpoint(vm, name string) (hyperv.Checkpoint, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.createErr != nil {
+		return hyperv.Checkpoint{}, b.createErr
+	}
 	b.created = append(b.created, vm+"/"+name)
-	return hyperv.Checkpoint{ID: "id-" + name, Name: name, CreatedAt: "2026-10-10T09:00:00+08:00", Kind: "standard", State: "running"}, nil
+	t := b.current()
+	c := hyperv.Checkpoint{ID: "id-" + name, Name: name, ParentID: t.CurrentParentID, CreatedAt: "2026-10-10T09:00:00+08:00", Kind: "standard", State: "running"}
+	t.Checkpoints = append(t.Checkpoints, c)
+	t.CurrentParentID = c.ID
+	return c, nil
 }
+
+// DeleteCheckpoint removes the checkpoint (with subtree, its descendants too); surviving children and a removed
+// current parent move to the deleted checkpoint's parent.
 func (b *vmToolsBackend) DeleteCheckpoint(vm, id string, subtree bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if strings.HasSuffix(id, "-fails") {
 		return errors.New("Hyper-V job failed")
 	}
+	target, _, err := b.node(id)
+	if err != nil {
+		return err
+	}
+	t := b.current()
+	removed := map[string]bool{id: true}
+	var kept []hyperv.Checkpoint
+	for _, c := range t.Checkpoints {
+		if c.ID == id || subtree && removed[c.ParentID] {
+			removed[c.ID] = true
+			continue
+		}
+		kept = append(kept, c)
+	}
+	for i := range kept {
+		if removed[kept[i].ParentID] {
+			kept[i].ParentID = target.ParentID
+		}
+	}
+	if removed[t.CurrentParentID] {
+		t.CurrentParentID = target.ParentID
+	}
+	t.Checkpoints = kept
 	b.deleted = append(b.deleted, vm+"/"+id)
 	return nil
 }
-func (b *vmToolsBackend) RenameCheckpoint(vm, id, name string) error { return nil }
+func (b *vmToolsBackend) RenameCheckpoint(vm, id, name string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, i, err := b.node(id)
+	if err != nil {
+		return err
+	}
+	b.current().Checkpoints[i].Name = name
+	b.renamed = append(b.renamed, vm+"/"+id+"="+name)
+	return nil
+}
+func (b *vmToolsBackend) RestoreCheckpoint(vm, id string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, _, err := b.node(id); err != nil {
+		return err
+	}
+	b.current().CurrentParentID = id
+	b.restored = append(b.restored, vm+"/"+id)
+	return nil
+}
 
 // connectTools builds a server on b and returns the client session and the server's deps.
 func connectTools(t *testing.T, ctx context.Context, b Backend) (*mcp.ClientSession, *deps) {
@@ -176,16 +267,20 @@ func TestVMListAndCheckpointsShapes(t *testing.T) {
 	if len(list.VMs) != 2 || list.VMs[0].Name != "Win10" || list.RunID != d.runID {
 		t.Errorf("vm_list %+v", list)
 	}
-	var cps struct {
-		Checkpoints []checkpointOut `json:"checkpoints"`
-	}
+	var cps checkpointsOut
 	callJSON(t, ctx, cs, "vm_checkpoints", nil, &cps)
-	want := []checkpointOut{
-		{Name: "baseline", CreatedAt: "2026-10-04T10:00:00+08:00", Type: "manual", ID: "id-1"},
-		{Name: "run-20261010-0812-7f3a-temp-step3", CreatedAt: "2026-10-10T08:15:00+08:00", RunID: "run-20261010-0812-7f3a", Type: "temp", Label: "step3", ID: "id-2", Parent: "id-1"},
+	want := checkpointsOut{VM: "Win10", CheckpointType: "Standard", CurrentParent: ptr("id-2"), Checkpoints: []checkpointOut{
+		{ID: "id-1", Name: "baseline", CreatedAt: "2026-10-04T10:00:00+08:00", Type: "manual", Kind: "standard", State: "off", Children: 1},
+		{ID: "id-2", Name: "run-20261010-0812-7f3a-temp-step3", Parent: ptr("id-1"), CreatedAt: "2026-10-10T08:15:00+08:00", Type: "temp", RunID: ptr("run-20261010-0812-7f3a"), Label: ptr("step3"), Kind: "standard", State: "running", Current: true},
+	}}
+	if !reflect.DeepEqual(cps, want) {
+		t.Errorf("vm_checkpoints %s", jsonString(cps))
 	}
-	if len(cps.Checkpoints) != 2 || cps.Checkpoints[0] != want[0] || cps.Checkpoints[1] != want[1] {
-		t.Errorf("vm_checkpoints %+v", cps.Checkpoints)
+	// The null fields render as JSON null, not as "" or missing.
+	raw := map[string]any{}
+	callJSON(t, ctx, cs, "vm_checkpoints", nil, &raw)
+	if first, ok := raw["checkpoints"].([]any)[0].(map[string]any); !ok || first["parent"] != nil || first["run_id"] != nil || first["label"] != nil {
+		t.Errorf("manual checkpoint JSON %v", raw["checkpoints"])
 	}
 	// An unknown VM is an invalid argument that names the fix.
 	e := callRefused(t, ctx, cs, "vm_status", map[string]any{"vm": "nope"})
@@ -198,8 +293,10 @@ func TestVMListAndCheckpointsShapes(t *testing.T) {
 		t.Fatal(err)
 	}
 	readOnly := map[string]bool{"vm_list": true, "vm_status": true, "vm_checkpoints": true, "vm_clipboard_get": true, "vm_pull": true, "vm_wait": true}
-	destructive := map[string]bool{"vm_turn_off": true, "vm_restore": true, "vm_shutdown": true, "vm_update_agent": true, "vm_push": true, "vm_end_turn": true}
+	destructive := map[string]bool{"vm_turn_off": true, "vm_restore": true, "vm_shutdown": true, "vm_update_agent": true, "vm_push": true, "vm_end_turn": true, "vm_checkpoint_delete": true}
+	names := map[string]bool{}
 	for _, tool := range tools.Tools {
+		names[tool.Name] = true
 		a := tool.Annotations
 		if a == nil || a.DestructiveHint == nil || a.OpenWorldHint == nil || *a.OpenWorldHint {
 			t.Errorf("%s: annotations %+v", tool.Name, a)
@@ -209,6 +306,19 @@ func TestVMListAndCheckpointsShapes(t *testing.T) {
 			t.Errorf("%s: readOnly %v destructive %v", tool.Name, a.ReadOnlyHint, *a.DestructiveHint)
 		}
 	}
+	for _, name := range []string{"vm_checkpoints", "vm_checkpoint", "vm_restore", "vm_checkpoint_delete", "vm_checkpoint_keep", "vm_end_turn"} {
+		if !names[name] {
+			t.Errorf("%s is not registered", name)
+		}
+	}
+}
+
+func ptr(s string) *string { return &s }
+
+// jsonString renders v for test failure messages.
+func jsonString(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
 }
 
 func TestVMWaitValidatesKind(t *testing.T) {
