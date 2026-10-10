@@ -46,7 +46,11 @@ func main() {
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "install" {
-		if err := install(); err != nil {
+		id, err := parseInstallID(os.Args[2:])
+		if err == nil {
+			err = install(id)
+		}
+		if err != nil {
 			windows.MessageBox(0, windows.StringToUTF16Ptr(err.Error()), windows.StringToUTF16Ptr("HyperHand"), 0x10)
 			os.Exit(1)
 		}
@@ -56,6 +60,12 @@ func main() {
 		uninstall()
 		return
 	}
+	id, err := parseInstallID(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	agent.InstallID = id
 	h, err := windows.CreateMutex(nil, false, windows.StringToUTF16Ptr("HyperHandAgent"))
 	if err == windows.ERROR_ALREADY_EXISTS {
 		return
@@ -147,7 +157,7 @@ func hidden(name string, args ...string) *exec.Cmd {
 	return c
 }
 
-func install() error {
+func install(id string) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -180,7 +190,7 @@ func install() error {
 	if err := k.SetStringValue("HyperHandAgent", `"`+dst+`"`); err != nil {
 		return err
 	}
-	return exec.Command(dst).Start()
+	return exec.Command(dst, installLaunchArgs(id)...).Start()
 }
 
 // uninstall undoes install (and the C:\Users\Public staging copy); every step runs even if

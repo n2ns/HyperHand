@@ -65,10 +65,11 @@ type SessionStateResult struct {
 }
 
 type PingResult struct {
-	Version  string `json:"version"`
-	Protocol int    `json:"protocol"` // see Protocol; 0 from agents that predate it
-	Hostname string `json:"hostname"`
-	User     string `json:"user"`
+	InstallID string `json:"install_id,omitempty"` // identifies the installation that launched this process
+	Version   string `json:"version"`
+	Protocol  int    `json:"protocol"` // see Protocol; 0 from agents that predate it
+	Hostname  string `json:"hostname"`
+	User      string `json:"user"`
 }
 
 // ExecArgs: Shell is "powershell" (default) or "cmd"; TimeoutMs 0 means 60 s. Admin runs it elevated (the VM's UAC is

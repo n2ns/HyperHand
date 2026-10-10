@@ -3,6 +3,7 @@ package host
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -66,14 +67,15 @@ type clipboardIn struct {
 
 // agentInfo describes the guest agent in results.
 type agentInfo struct {
-	Version  string `json:"version"`
-	Hostname string `json:"hostname"`
-	User     string `json:"user"`
-	Protocol int    `json:"protocol"`
+	InstallID string `json:"install_id,omitempty"`
+	Version   string `json:"version"`
+	Hostname  string `json:"hostname"`
+	User      string `json:"user"`
+	Protocol  int    `json:"protocol"`
 }
 
 func agentOf(p proto.PingResult) agentInfo {
-	return agentInfo{Version: p.Version, Hostname: p.Hostname, User: p.User, Protocol: p.Protocol}
+	return agentInfo{Version: p.Version, Hostname: p.Hostname, User: p.User, Protocol: p.Protocol, InstallID: p.InstallID}
 }
 
 // vmState is the lowercase power state used in results ("running", "off", "saved", "paused").
@@ -477,7 +479,7 @@ func registerVM(d *deps) {
 		}
 		return jsonResult(map[string]any{"satisfied": r.Satisfied, "elapsed_ms": time.Since(start).Milliseconds()})
 	})
-	addToolIn(d, toolSpec{name: "vm_install_agent", desc: "Install the HyperHand agent in the guest (copies it in and runs its installer via the Hyper-V keyboard; a user must be logged on and the guest IME in English mode), then wait until it answers. If it fails, look at the screen with vm_observe."}, func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
+	addToolIn(d, toolSpec{name: "vm_install_agent", desc: "Install the HyperHand agent in the guest (copies it in and runs its installer via the Hyper-V keyboard; a user must be logged on and the guest IME in English mode), then wait until the agent launched by this installation answers. An already-running agent cannot confirm success. If it fails, look at the screen with vm_observe."}, func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
 		v, err := backend.Find(in.VM)
 		if err != nil {
 			return nil, vmErr(err)
@@ -493,7 +495,10 @@ func registerVM(d *deps) {
 			return nil, err
 		}
 		time.Sleep(1500 * time.Millisecond)
-		if err := backend.TypeText(v.Name, GuestAgentPath+" install"); err != nil {
+		var nonce [16]byte
+		rand.Read(nonce[:])
+		installID := hex.EncodeToString(nonce[:])
+		if err := backend.TypeText(v.Name, GuestAgentPath+" install --install-id "+installID); err != nil {
 			return nil, err
 		}
 		if err := backend.PressKeys(v.Name, "enter"); err != nil {
@@ -503,7 +508,7 @@ func registerVM(d *deps) {
 		if err != nil {
 			return nil, vmErr(err)
 		}
-		return agentResult(waitPing(ctx, c))
+		return agentResult(waitInstalledAgent(ctx, c, installID))
 	})
 	addToolIn(d, toolSpec{name: "vm_update_agent", desc: "Replace the guest agent with the hyperhand-agent.exe next to hyperhand.exe and wait until it is back. Call it when a tool refuses with agent_outdated.", destructive: true, idempotent: true}, func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
 		exe, err := agentExe()
@@ -549,20 +554,45 @@ func agentExe() (string, error) {
 
 // waitPing pings the agent for up to 30 s.
 func waitPing(ctx context.Context, c *Client) (proto.PingResult, error) {
+	return waitAgentPing(ctx, c, "", 30*time.Second, 2*time.Second)
+}
+
+func waitInstalledAgent(ctx context.Context, c *Client, installID string) (proto.PingResult, error) {
+	return waitAgentPing(ctx, c, installID, 30*time.Second, 2*time.Second)
+}
+
+func waitAgentPing(ctx context.Context, c *Client, installID string, timeout, interval time.Duration) (proto.PingResult, error) {
+	wctx, stop := context.WithTimeout(ctx, timeout)
+	defer stop()
 	var err error
-	for end := time.Now().Add(30 * time.Second); time.Now().Before(end); time.Sleep(2 * time.Second) {
+	for {
 		var p proto.PingResult
-		pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		pctx, cancel := context.WithTimeout(wctx, 5*time.Second)
 		_, err = c.Call(pctx, proto.OpPing, nil, nil, &p)
 		cancel()
-		if err == nil {
+		if err == nil && (installID == "" || p.InstallID == installID) {
 			return p, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("a different agent answered; this installation has not completed")
 		}
 		if ctx.Err() != nil {
 			return p, ctx.Err()
 		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-wctx.Done():
+			timer.Stop()
+			if ctx.Err() != nil {
+				return proto.PingResult{}, ctx.Err()
+			}
+			if installID != "" {
+				return proto.PingResult{}, refuse(codeAgentRequired, "this installation was not confirmed; use vm_observe to inspect the installer or sign-in screen, then retry vm_install_agent", map[string]any{"install_id": installID}, "the agent launched by this installation did not answer within %s: %v", timeout, err)
+			}
+			return proto.PingResult{}, refuse(codeAgentRequired, "look at the screen with vm_observe, then call vm_install_agent again", nil, "the agent did not answer within %s: %v", timeout, err)
+		case <-timer.C:
+		}
 	}
-	return proto.PingResult{}, refuse(codeAgentRequired, "look at the screen with vm_observe, then call vm_install_agent again", nil, "the agent did not answer within 30 s: %v", err)
 }
 
 // pushTarget: a single file pushed to a guest path ending in \ or / goes into that directory under its own name.

@@ -160,8 +160,11 @@ func decode(args json.RawMessage, v any) error {
 	return json.Unmarshal(args, v)
 }
 
+// InstallID is set by the executable before serving, only when an installer launched it.
+var InstallID string
+
 func ping(context.Context, json.RawMessage, []byte) (any, []byte, error) {
-	r := proto.PingResult{Version: proto.Version, Protocol: proto.Protocol}
+	r := proto.PingResult{Version: proto.Version, Protocol: proto.Protocol, InstallID: InstallID}
 	r.Hostname, _ = os.Hostname()
 	if u, err := user.Current(); err == nil {
 		r.User = u.Username
