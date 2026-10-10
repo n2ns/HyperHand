@@ -216,3 +216,52 @@ func TestParseCheckpoints(t *testing.T) {
 		t.Error("garbage accepted")
 	}
 }
+
+// TestParseCheckpointsEdges covers ConvertTo-Json's shapes for the checkpoints field (an empty array as [] or null, a
+// missing field, one object) and ids as PowerShell prints them (upper-case GUIDs, null parent as "").
+func TestParseCheckpointsEdges(t *testing.T) {
+	root := Checkpoint{ID: "C85CA8FB-DFC1-4AA3-8F36-532949376CD2", Name: "run-20261010-1017-9699-keep-baseline", CreatedAt: "2026-10-10T10:17:00+07:00", Kind: "standard", State: "running"}
+	cases := map[string]CheckpointList{
+		`{"checkpoint_type":"Disabled","current_parent_id":"","checkpoints":[]}`: {CheckpointType: "Disabled", Checkpoints: []Checkpoint{}},
+		`{"checkpoint_type":"ProductionOnly","current_parent_id":""}`:            {CheckpointType: "ProductionOnly", Checkpoints: []Checkpoint{}},
+		`{"checkpoint_type":"Standard","current_parent_id":"C85CA8FB-DFC1-4AA3-8F36-532949376CD2","checkpoints":{"id":"C85CA8FB-DFC1-4AA3-8F36-532949376CD2","name":"run-20261010-1017-9699-keep-baseline","parent_id":"","created_at":"2026-10-10T10:17:00+07:00","kind":"standard","state":"running"}}`:   {CheckpointType: "Standard", CurrentParentID: root.ID, Checkpoints: []Checkpoint{root}},
+		`{"checkpoint_type":"Standard","current_parent_id":"C85CA8FB-DFC1-4AA3-8F36-532949376CD2","checkpoints":[{"id":"C85CA8FB-DFC1-4AA3-8F36-532949376CD2","name":"run-20261010-1017-9699-keep-baseline","parent_id":"","created_at":"2026-10-10T10:17:00+07:00","kind":"standard","state":"running"}]}`: {CheckpointType: "Standard", CurrentParentID: root.ID, Checkpoints: []Checkpoint{root}},
+	}
+	for in, want := range cases {
+		got, err := parseCheckpoints([]byte(in))
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("parseCheckpoints(%q) = %+v, %v; want %+v", in, got, err, want)
+		}
+		if got.Checkpoints == nil {
+			t.Errorf("parseCheckpoints(%q) returned a nil slice (would encode as JSON null)", in)
+		}
+	}
+	for _, bad := range []string{``, `[]`, `{"checkpoint_type":"Standard","checkpoints":[1]}`, `{"checkpoint_type":"Standard","checkpoints":"x"}`} {
+		if _, err := parseCheckpoints([]byte(bad)); err == nil {
+			t.Errorf("parseCheckpoints(%q) accepted", bad)
+		}
+	}
+}
+
+func TestIsSnapshotInstance(t *testing.T) {
+	const inst = `Microsoft:223B3A66-684A-40B9-A273-F88806C0A2FB\C85CA8FB-DFC1-4AA3-8F36-532949376CD2`
+	for _, id := range []string{"C85CA8FB-DFC1-4AA3-8F36-532949376CD2", "c85ca8fb-dfc1-4aa3-8f36-532949376cd2"} {
+		if !isSnapshotInstance(inst, id) {
+			t.Errorf("isSnapshotInstance(%q, %q) = false", inst, id)
+		}
+	}
+	for _, id := range []string{
+		"223B3A66-684A-40B9-A273-F88806C0A2FB", // the VM id, not the snapshot
+		"532949376CD2",                         // a bare tail: the match needs the whole GUID after the backslash
+		"8F36-532949376CD2",
+		"",
+	} {
+		if isSnapshotInstance(inst, id) {
+			t.Errorf("isSnapshotInstance(%q, %q) = true", inst, id)
+		}
+	}
+	// The VM's own (realized) settings have no snapshot part.
+	if isSnapshotInstance("Microsoft:223B3A66-684A-40B9-A273-F88806C0A2FB", "223B3A66-684A-40B9-A273-F88806C0A2FB") {
+		t.Error("matched the VM's realized settings")
+	}
+}
