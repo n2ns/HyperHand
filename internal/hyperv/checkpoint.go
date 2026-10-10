@@ -9,7 +9,6 @@ import (
 	"time"
 
 	ole "github.com/go-ole/go-ole"
-	"github.com/go-ole/go-ole/oleutil"
 )
 
 // Checkpoint is one VM checkpoint (Hyper-V snapshot). ID is the snapshot GUID (the second part of the
@@ -176,40 +175,15 @@ func DeleteCheckpoint(vm, id string, subtree bool) error {
 	})
 }
 
-// RenameCheckpoint sets the checkpoint's name through Msvm_VirtualSystemManagementService.ModifySystemSettings, whose
-// SystemSettings is the snapshot's Msvm_VirtualSystemSettingData (identified by InstanceID) as an embedded instance with
-// ElementName changed. The embedded instance text is SWbemObject.GetText_(2), WMI DTD 2.0.
-// https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/modifysystemsettings-msvm-virtualsystemmanagementservice
-// https://learn.microsoft.com/en-us/windows/win32/api/wbemdisp/ne-wbemdisp-wbemobjecttextformatenum
+// RenameCheckpoint renames the checkpoint with ID id through Rename-VMSnapshot, the same PowerShell path as
+// RestoreCheckpoint. A missing id fails with "checkpoint not found".
+// https://learn.microsoft.com/en-us/powershell/module/hyper-v/rename-vmsnapshot
 func RenameCheckpoint(vm, id, name string) error {
 	if name == "" {
 		return errors.New("checkpoint name required")
 	}
-	return withWMI(func(s *session) error {
-		o, err := s.find(vm)
-		if err != nil {
-			return err
-		}
-		target, err := snapshotSettings(s, o, id)
-		if err != nil {
-			return err
-		}
-		if _, err := oleutil.PutProperty(target, "ElementName", name); err != nil {
-			return fmt.Errorf("set ElementName: %w", err)
-		}
-		text, err := oleutil.CallMethod(target, "GetText_", int32(2))
-		if err != nil {
-			return fmt.Errorf("GetText_: %w", err)
-		}
-		defer text.Clear()
-		svc, err := s.one("SELECT * FROM Msvm_VirtualSystemManagementService")
-		if err != nil {
-			return err
-		}
-		out, err := s.call(svc, "ModifySystemSettings", "SystemSettings", text.ToString())
-		if err != nil {
-			return err
-		}
-		return s.awaitJob(out, "ModifySystemSettings", time.Minute)
-	})
+	_, err := vmScript(vm, `$c=Get-VMSnapshot -VM $vm | Where-Object { [string]$_.Id -eq `+psq(id)+` } | Select-Object -First 1
+if (-not $c) { throw ('checkpoint not found: ' + `+psq(id)+`) }
+Rename-VMSnapshot -VMSnapshot $c -NewName `+psq(name)+` -Confirm:$false`)
+	return err
 }
