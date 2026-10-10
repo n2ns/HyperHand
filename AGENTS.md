@@ -1,0 +1,28 @@
+# HyperHand Project Guide
+
+## Project and callers
+
+- HyperHand is an MCP server that lets AI agents see and operate Windows virtual machines on Hyper-V.
+- The callers and the readers of every result are AI agents, not people. Design tool descriptions, return text and error messages for AI usability: as few calls per task as possible, machine-readable results that carry the facts the next call needs (actual handles, coordinates and so on), errors that state the cause and the next action. Make these trade-offs yourself; do not ask the user about them as if they were human UI preferences.
+- Architecture, the tool list and exact behavior are in `README.md`, `docs/user-guide.md` and `docs/features.md`.
+
+## Test VMs are disposable
+
+- The Hyper-V VMs this project is developed and tested against (such as Win10) can be thrown away and rebuilt at any time.
+- Do not worry about, warn about or ask about security inside the VMs: automatic logon, plain-text passwords, disabling UAC prompts, lowering security policy, passing passwords through `vm_exec` and the like. Whatever gets the automated tests running, do it the simplest way.
+- This applies to the guest VMs only. Accounts, permissions and security settings on the host (the physical machine) are still handled with care: do not change the user's own account or its group memberships. The installer's changes to the dedicated service account are part of the product and are not affected.
+
+## Build and verify
+
+Run from the repository root:
+
+```powershell
+go build -ldflags "-H windowsgui" -o build\hyperhand.exe .\cmd\hyperhand
+go build -ldflags "-H windowsgui" -o build\hyperhand-agent.exe .\cmd\hyperhand-agent
+go test -race ./...
+scripts\restart-tray.ps1   # reinstalls the host components from build\ and restarts them, one UAC prompt
+```
+
+- The running service and tray use the installed copies under `%ProgramFiles%\HyperHand`; the files in `build\` are not the running version. Update the guest agent with `vm_update_agent`.
+- Never kill processes by name (`taskkill /IM`, `Stop-Process -Name`); the installer owns service and tray replacement.
+- Record behavior changes under `[Unreleased]` in `CHANGELOG.md` (Keep a Changelog format). Releasing: see the Releasing section of `docs/user-guide.md`.
