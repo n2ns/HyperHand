@@ -89,14 +89,34 @@ func TestDisabledTarget(t *testing.T) {
 	if _, _, err := inputWindow(ctx, f.call, "", main); err == nil || !strings.Contains(err.Error(), "act on handle 50 first") {
 		t.Errorf("input, other process: %v", err)
 	}
+	// As observed live: the disabled main window also disables its command line, which list_windows then reports as
+	// modal (its owner is disabled). That is not a dialog; the other process's window is still the one to act on.
+	ws[1].Enabled, ws[1].Modal = false, true
+	if _, _, err := clickTarget(ws, ws[2], 1, 1); err == nil || !strings.Contains(err.Error(), "act on handle 50 first") {
+		t.Errorf("click, disabled command line: %v", err)
+	}
 	// Its own modal dialog in the foreground: named, and input is refused rather than sent to the dialog.
 	ws = append(ws, proto.WindowInfo{Handle: 30, PID: 100, Title: "Customer Involvement Program", Process: "acad.exe", Owner: 20, Modal: true, Enabled: true})
 	for i := range ws {
 		ws[i].Foreground = ws[i].Handle == 30
 	}
-	if _, _, err := clickTarget(ws, ws[2], 1, 1); err == nil || !strings.Contains(err.Error(), "disabled by its modal dialog") || !strings.Contains(err.Error(), "handle 30") {
+	if _, _, err := clickTarget(ws, ws[2], 1, 1); err == nil || !strings.Contains(err.Error(), "probably a modal dialog; act on handle 30 first") {
 		t.Errorf("click, own dialog: %v", err)
 	}
+	// As observed live: with the Options dialog open, the history popup is enabled and flagged modal (its owner, the
+	// command line, is disabled). Only the foreground dialog is named.
+	ws[0].Modal = true
+	if _, _, err := clickTarget(ws, ws[2], 1, 1); err == nil || strings.Contains(err.Error(), "handle 22") {
+		t.Errorf("click, own dialog with flagged popup: %v", err)
+	}
+	// Nested dialogs: the inner one in the foreground is named, not the disabled outer one.
+	ws[len(ws)-1].Enabled, ws[len(ws)-1].Foreground = false, false
+	ws = append(ws, proto.WindowInfo{Handle: 31, PID: 100, Title: "Inner", Process: "acad.exe", Owner: 30, Modal: true, Enabled: true, Foreground: true})
+	if _, _, err := clickTarget(ws, ws[2], 1, 1); err == nil || !strings.Contains(err.Error(), "act on handle 31 first") {
+		t.Errorf("click, nested dialogs: %v", err)
+	}
+	ws = ws[:len(ws)-1]
+	ws[len(ws)-1].Enabled, ws[len(ws)-1].Foreground = true, true
 	f.results[proto.OpListWindows] = proto.WindowsResult{Windows: ws}
 	if _, _, err := inputWindow(ctx, f.call, "", main); err == nil || !strings.Contains(err.Error(), "handle 30") {
 		t.Errorf("input, own dialog: %v", err)

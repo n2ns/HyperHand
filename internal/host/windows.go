@@ -264,20 +264,16 @@ func clickTarget(ws []proto.WindowInfo, w proto.WindowInfo, x, y int) (int, int,
 }
 
 // checkUsable refuses unless w is enabled and w or one of its own windows (inGroup) is the foreground window. Each
-// refusal names the window to act on next: w's own modal dialog, the outside window probably blocking it, or w itself
-// to focus.
+// refusal names the window to act on next: w's own window in the foreground (its modal dialog), the outside window
+// probably blocking it, or w itself to focus.
 func checkUsable(ws []proto.WindowInfo, w proto.WindowInfo) error {
 	fg, ok := foreground(ws)
 	inFront := ok && inGroup(ws, w, fg.Handle)
 	if !w.Enabled {
-		var dialogs []string
-		for _, o := range ws {
-			if o.Modal && o.Handle != w.Handle && inGroup(ws, w, o.Handle) {
-				dialogs = append(dialogs, describe(o))
-			}
-		}
-		if len(dialogs) > 0 {
-			return fmt.Errorf("window %s is disabled by its modal dialog %s; act on the dialog's handle first", describe(w), strings.Join(dialogs, ", "))
+		// Name the foreground window rather than windows flagged Modal: Modal only says the owner is disabled, which
+		// is also true of AutoCAD's command history popup, and an outer dialog is disabled by an inner one.
+		if inFront && fg.Handle != w.Handle {
+			return fmt.Errorf("window %s is disabled while its own window %s is in the foreground, probably a modal dialog; act on handle %d first", describe(w), describe(fg), fg.Handle)
 		}
 		if ok && !inFront {
 			return fmt.Errorf("window %s is disabled while %s, which is not one of its own windows, is in the foreground and probably blocks it; act on handle %d first", describe(w), describe(fg), fg.Handle)

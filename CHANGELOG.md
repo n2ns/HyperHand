@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Window selectors of `vm_click`, `vm_type` and `vm_key` also accept the selected window's own windows: top-level windows of the same process that it owns, directly or through other owned windows (up to 8 links). A click may reach, and input go to, such a window when it is in the foreground, so an AutoCAD main-window selector reaches its untitled command line and command history popup. The selected window must still be enabled, and windows of other processes are still refused.
+- Selector clicks and targeted input report the window reached as `handle`, `pid`, `class`, `process` and `title` lines.
+- Refusals name the window to act on next: a disabled window's own foreground window (usually its modal dialog), another process's foreground window that probably blocks it, or the window to focus.
+- Agent op `window_at` also returns the class, PID and process of the window at the point, so covering windows that `vm_windows` does not list (shell overlays) are described; with an older agent the error gives the handle only.
+
 ## [0.2.0] - 2026-10-07
 
 ### Added

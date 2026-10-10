@@ -138,10 +138,12 @@ Mouse input goes through the VM's synthetic mouse (`Msvm_SyntheticMouse`) with a
   - `double` = `true` clicks twice.
   - `window` (case-insensitive title substring), `handle` (from `vm_windows`) or `pid` makes (`x`, `y`) relative to the top-left corner of the unique matching window's visible frame. `exact: true` matches the full `window` title case-insensitively. The shared selection rules in 7.2 apply, using `window` instead of `title`. Without a selector, coordinates remain absolute screen pixels. The agent lists the windows first (see 7.3), and the click is refused, with nothing clicked, if:
     - no window matches, or more than one matches (the error lists their handles);
-    - the window is not the foreground window (the error names the foreground window);
-    - the window is disabled, as an owner window is while its modal dialog runs;
+    - neither the window nor one of its own windows is the foreground window (the error names the foreground window);
+    - the window is disabled, as an owner window is while its modal dialog runs (the error names the window to act on: its own window in the foreground, usually the dialog, or the foreground window of another process that probably blocks it);
     - the point is outside the window;
-    - the point is off screen, or another window (for example an always-on-top one) covers it: the agent checks which top-level window is at that screen point.
+    - the point is off screen, or a window other than the selected window and its own windows (for example an always-on-top one, or a shell overlay that `vm_windows` does not list) covers it: the agent checks which top-level window is at that screen point and describes it by class and process.
+  - **Own windows** of the selected window are top-level windows of the same process that it owns, directly or through other such windows, up to 8 owner links, as listed by `vm_windows`. In AutoCAD 2015 the untitled command line is owned by the main window and its command history popup by the command line, so a main-window selector reaches both. Windows of other processes are never own windows.
+  - With a selector the result is `ok` followed by `handle`, `pid`, `class`, `process` and `title` lines for the window the click reached, so the next call can use that handle. Without a selector the result is `ok`.
   - The check and the click are two steps, so a window that appears in between can still receive the click.
 - `vm_drag` moves to (`x1`, `y1`), waits 100 ms, presses the left button, moves to (`x2`, `y2`) in 8 equal steps 50 ms apart, waits 100 ms and releases the button. The button is released even if a move fails.
 - `vm_scroll` moves to (`x`, `y`), waits 100 ms and scrolls `delta` wheel notches (120 units each). A positive `delta` scrolls up, a negative one down.
@@ -151,7 +153,7 @@ Mouse input goes through the VM's synthetic mouse (`Msvm_SyntheticMouse`) with a
 `vm_key` presses a key or a `+`-separated combination through the VM's synthetic keyboard (`Msvm_Keyboard`).
 
 - Pass either `keys` or `sequence`, an ordered array of up to 256 combinations, such as `["ctrl+a", "backspace"]`. All combinations are validated before input starts.
-- Optional `window`, `handle`, `pid` and `exact` use the shared selector rules. The unique target must already be enabled, restored and foreground; it is never focused automatically. Its handle and PID are retained and checked before each combination. Targeted input needs the agent; untargeted input retains the console keyboard path.
+- Optional `window`, `handle`, `pid` and `exact` use the shared selector rules. The selected window must be enabled and it or one of its own windows (4.2) must be foreground; the keys go to the foreground one, which must be enabled and restored. Nothing is focused automatically. The selected handle and PID are retained and checked before each combination, so a modal dialog that disables the selected window or a foreground window outside its own windows stops the sequence. With a selector the result is `ok` followed by the `handle`, `pid`, `class`, `process` and `title` of the window that received the last combination. Targeted input needs the agent; untargeted input retains the console keyboard path.
 - Cancellation or a failed combination stops the remaining sequence. Earlier input is not undone and partial sequences must not be retried automatically.
 - Names are case-insensitive and surrounding spaces are ignored.
 - Supported names:
@@ -171,7 +173,7 @@ Mouse input goes through the VM's synthetic mouse (`Msvm_SyntheticMouse`) with a
   - ASCII text is typed through the synthetic keyboard (`TypeText`). An IME in Chinese mode may swallow it.
   - Text containing any non-ASCII character fails with `non-ASCII text needs the agent: <agent error>`.
 - The clipboard step and the paste of one `vm_type` call are kept together; concurrent `vm_type` calls do not interleave.
-- Optional `window`, `handle`, `pid` and `exact` select the unique target with the shared rules. It must already be enabled, restored and foreground; no mode activates a window automatically. Targeted paste rechecks the selected handle and PID before `ctrl+v` and does not fall back to blind keyboard input on an agent error.
+- Optional `window`, `handle`, `pid` and `exact` select the unique target with the shared rules. The selected window must be enabled and it or one of its own windows (4.2) must be foreground; the text goes to the foreground one, which must be enabled and restored. No mode activates a window automatically. Targeted paste rechecks the selection before `ctrl+v` and does not fall back to blind keyboard input on an agent error. The result gives the receiving window as `handle`, `pid`, `class`, `process` and `title` lines after `input events: <n>` (keys) or `ok` (paste); untargeted paste returns `ok`.
 - `keys` requires an updated agent and leaves the clipboard unchanged. Without a selector it captures the current foreground window; the agent checks the handle, PID, foreground and desktop state before each character. The input must be valid UTF-8 and at most 16384 UTF-8 bytes.
 - Ordinary text uses UTF-16 `KEYEVENTF_UNICODE` / `VK_PACKET`, including surrogate pairs. CRLF becomes one Enter; lone CR or LF becomes Enter; Tab uses the Tab key. Enter and Tab can submit a command or move focus. This mode is Unicode text injection, not physical scan-code simulation.
 - Held modifiers or a held Enter/Tab key needed by the next character cause rejection. Partial `SendInput` failures stop the operation; a matching key-up is attempted if its preceding key-down was inserted. The error reports partial input; do not retry automatically. Cancellation and a changed target stop later characters, but already injected input is not undone.
@@ -474,7 +476,7 @@ uint32 header length | uint64 payload length | header JSON | payload bytes
 | `clipboard_get` | none | `{text}` |
 | `clipboard_set` | `{text}` | none |
 | `focus_window` | `{title, handle}` | `{text, handle}`, the focused window's title and handle |
-| `window_at` | `{x, y}` | `{handle}`, the top-level window a click at that screen point reaches; 0 off screen |
+| `window_at` | `{x, y}` | `{handle, class, pid, process}`, the top-level window a click at that screen point reaches; handle 0 off screen. Older agents return only `handle` |
 | `list_windows` | none | `{windows: [{handle, title, class, pid, process, rect, enabled, foreground, minimized, owner, modal}]}` |
 | `wait` | `{kind, name, path, timeout_ms}` | `{satisfied}` |
 | `session_state` | none | `{locked, console, secure_desktop, logonui, consent}` for the agent's session (see 3.7) |
