@@ -7,6 +7,8 @@ import (
 	"image/draw"
 	"image/png"
 	"math"
+
+	"hyperhand/internal/proto"
 )
 
 type screenshotRegion struct {
@@ -19,6 +21,17 @@ type screenshotRegion struct {
 type screenshotOptions struct {
 	Region  *screenshotRegion
 	MaxSize int
+}
+
+// clampRegion intersects a window rect (screen pixels) with a w x h screenshot. ok is false when nothing of the rect
+// is on the image (a minimized window sits at -32000,-32000), and the region is then empty.
+func clampRegion(r proto.Rect, w, h int) (region screenshotRegion, ok bool) {
+	x0, y0 := max(int(r.Left), 0), max(int(r.Top), 0)
+	x1, y1 := min(int(r.Right), w), min(int(r.Bottom), h)
+	if x1 <= x0 || y1 <= y0 {
+		return screenshotRegion{}, false
+	}
+	return screenshotRegion{X: x0, Y: y0, Width: x1 - x0, Height: y1 - y0}, true
 }
 
 // screenshotGeometry uses original screenshot pixels for the crop and output/crop ratios for scale.
