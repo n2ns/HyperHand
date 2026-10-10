@@ -366,13 +366,17 @@ func DeleteCheckpoint(vm, name string) error {
 		if err != nil {
 			return err
 		}
+		// A snapshot's settings are associated with the VM through several association classes (SnapshotOfVirtualSystem,
+		// MostCurrentSnapshotInBranch, ...), so the same object can appear more than once: identify it by InstanceID.
 		var target *ole.IDispatch
+		targetID := ""
 		for _, sd := range settings {
 			if strings.HasPrefix(fmt.Sprint(s.get(sd, "VirtualSystemType")), "Microsoft:Hyper-V:Snapshot:") && fmt.Sprint(s.get(sd, "ElementName")) == name {
-				if target != nil {
+				id := fmt.Sprint(s.get(sd, "InstanceID"))
+				if target != nil && id != targetID {
 					return fmt.Errorf("several checkpoints are named %q", name)
 				}
-				target = sd
+				target, targetID = sd, id
 			}
 		}
 		if target == nil {
