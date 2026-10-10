@@ -82,6 +82,15 @@ func TestCheckpointOperationsAccepted(t *testing.T) {
 			t.Errorf("%s accepted an empty name", op)
 		}
 	}
+	// checkpoint_delete carries subtree; the field survives the header round trip.
+	var b bytes.Buffer
+	if err := writeFrame(&b, request{Op: "checkpoint_delete", VM: "Win10", ID: id, Subtree: true}, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	var r request
+	if _, err := readHeader(&b, &r, maxCopy); err != nil || !r.Subtree || r.ID != id || validateRequest(r, 0) != nil {
+		t.Errorf("checkpoint_delete round trip: %+v, %v", r, err)
+	}
 	for _, g := range []string{id, "C85CA8FB-DFC1-4AA3-8F36-532949376CD2"} {
 		if !isGUID(g) {
 			t.Errorf("isGUID(%q) = false", g)
