@@ -125,14 +125,95 @@ func windowInfo(h, fg windows.HWND, names map[uint32]string) proto.WindowInfo {
 	}
 }
 
-func listWindows(context.Context, json.RawMessage, []byte) (any, []byte, error) {
+func listWindows(ctx context.Context, _ json.RawMessage, _ []byte) (any, []byte, error) {
+	// The focused element comes from a helper process; start it first so it overlaps the window enumeration.
+	focused := make(chan *proto.FocusedControl, 1)
+	go func() { focused <- focusedControl(ctx) }()
 	fg := windows.GetForegroundWindow()
 	names := map[uint32]string{}
-	r := proto.WindowsResult{Windows: []proto.WindowInfo{}}
+	levels := map[uint32]string{}
+	r := proto.WindowsResult{Windows: []proto.WindowInfo{}, Foreground: uint64(fg), AgentIntegrity: tokenIntegrity(windows.GetCurrentProcessToken())}
 	for _, h := range topWindows() {
-		r.Windows = append(r.Windows, windowInfo(h, fg, names))
+		w := windowInfo(h, fg, names)
+		level, ok := levels[w.PID]
+		if !ok {
+			level = processIntegrity(w.PID)
+			levels[w.PID] = level
+		}
+		w.Integrity = level
+		r.Windows = append(r.Windows, w)
 	}
+	groupRoots(r.Windows)
+	if s, _, err := sessionState(ctx, nil, nil); err == nil {
+		state := s.(proto.SessionStateResult)
+		r.Session = &state
+	}
+	r.Focused = <-focused
 	return r, nil, nil
+}
+
+// groupRoots sets each window's GroupRoot: the handle reached by following Owner links through listed windows of the
+// same process, at most 8 links; the window itself when it has no such owner.
+func groupRoots(ws []proto.WindowInfo) {
+	byHandle := make(map[uint64]int, len(ws))
+	for i, w := range ws {
+		byHandle[w.Handle] = i
+	}
+	for i := range ws {
+		root := i
+		for n := 0; n < 8; n++ {
+			o, ok := byHandle[ws[root].Owner]
+			if !ok || ws[o].PID != ws[i].PID {
+				break
+			}
+			root = o
+		}
+		ws[i].GroupRoot = ws[root].Handle
+	}
+}
+
+// processIntegrity is the integrity level of a process's token, "" when it cannot be read (e.g. a protected process).
+func processIntegrity(pid uint32) string {
+	p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return ""
+	}
+	defer windows.CloseHandle(p)
+	var tok windows.Token
+	if err := windows.OpenProcessToken(p, windows.TOKEN_QUERY, &tok); err != nil {
+		return ""
+	}
+	defer tok.Close()
+	return tokenIntegrity(tok)
+}
+
+// tokenIntegrity reads TokenIntegrityLevel and names the mandatory label SID's last RID.
+func tokenIntegrity(tok windows.Token) string {
+	var buf [256]byte
+	var n uint32
+	if err := windows.GetTokenInformation(tok, windows.TokenIntegrityLevel, &buf[0], uint32(len(buf)), &n); err != nil {
+		return ""
+	}
+	label := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buf[0]))
+	sid := label.Label.Sid
+	if sid == nil || sid.SubAuthorityCount() == 0 {
+		return ""
+	}
+	return integrityName(sid.SubAuthority(uint32(sid.SubAuthorityCount()) - 1))
+}
+
+// integrityName maps a mandatory label RID (SECURITY_MANDATORY_*_RID) to a level name.
+func integrityName(rid uint32) string {
+	switch {
+	case rid < 0x2000:
+		return "low"
+	case rid < 0x3000:
+		return "medium"
+	case rid < 0x4000:
+		return "high"
+	default:
+		return "system"
+	}
 }
 
 // windowAt returns the top-level window under a screen point, which is the window a click there reaches.

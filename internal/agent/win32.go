@@ -34,6 +34,7 @@ var (
 	pAttachThreadInput   = user32.NewProc("AttachThreadInput")
 	pBringWindowToTop    = user32.NewProc("BringWindowToTop")
 	pSendInput           = user32.NewProc("SendInput")
+	pSetCursorPos        = user32.NewProc("SetCursorPos")
 	pGlobalAlloc         = kernel32.NewProc("GlobalAlloc")
 	pGlobalFree          = kernel32.NewProc("GlobalFree")
 	pGlobalLock          = kernel32.NewProc("GlobalLock")
@@ -41,11 +42,13 @@ var (
 )
 
 const (
-	cfUnicodeText   = 13
-	gmemMoveable    = 0x0002
-	swRestore       = 9
-	inputMouse      = 0
-	mouseeventfMove = 0x0001
+	cfUnicodeText     = 13
+	gmemMoveable      = 0x0002
+	swRestore         = 9
+	inputMouse        = 0
+	mouseeventfMove   = 0x0001
+	mouseeventfHWheel = 0x1000
+	wheelDelta        = 120
 )
 
 func openClipboard() error {
@@ -184,6 +187,23 @@ func focusWindow(_ context.Context, args json.RawMessage, _ []byte) (any, []byte
 		return nil, nil, fmt.Errorf("could not bring %q to the foreground", title)
 	}
 	return proto.FocusResult{Text: title, Handle: uint64(found)}, nil, nil
+}
+
+// hscroll turns the horizontal wheel at a screen point through SendInput; the Hyper-V synthetic mouse has no
+// horizontal wheel, so the host cannot do this itself.
+func hscroll(_ context.Context, args json.RawMessage, _ []byte) (any, []byte, error) {
+	var a proto.HScrollArgs
+	if err := decode(args, &a); err != nil {
+		return nil, nil, err
+	}
+	if r, _, err := pSetCursorPos.Call(uintptr(uint32(int32(a.X))), uintptr(uint32(int32(a.Y)))); r == 0 {
+		return nil, nil, fmt.Errorf("SetCursorPos: %w", err)
+	}
+	in := mouseInput{typ: inputMouse, mouseData: uint32(int32(a.Delta * wheelDelta)), flags: mouseeventfHWheel}
+	if n, _, err := pSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in)); n != 1 {
+		return nil, nil, fmt.Errorf("SendInput inserted no event (UIPI may block input): %v", err)
+	}
+	return nil, nil, nil
 }
 
 // mouseInput is a Win32 INPUT holding a MOUSEINPUT (40 bytes on 64-bit Windows).

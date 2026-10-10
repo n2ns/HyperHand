@@ -81,6 +81,103 @@ func TestListWindows(t *testing.T) {
 	if d.Handle != uint64(dialog) || !d.Enabled || !d.Modal || d.Owner != uint64(owner) {
 		t.Errorf("dialog: %+v", d)
 	}
+	if o.GroupRoot != uint64(owner) || d.GroupRoot != uint64(owner) {
+		t.Errorf("group roots: owner %d dialog %d, want %d", o.GroupRoot, d.GroupRoot, owner)
+	}
+	own := tokenIntegrity(windows.GetCurrentProcessToken())
+	if own == "" || o.Integrity != own || d.Integrity != own {
+		t.Errorf("integrity: agent %q owner %q dialog %q", own, o.Integrity, d.Integrity)
+	}
+}
+
+// The summary fields of list_windows: foreground, session and the agent's level; the focused control is nil or
+// consistent (what has focus on the test machine is not under our control).
+func TestListWindowsSummary(t *testing.T) {
+	res, _, err := listWindows(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := res.(proto.WindowsResult)
+	if r.Foreground != uint64(windows.GetForegroundWindow()) && r.Foreground == 0 {
+		t.Errorf("foreground %d", r.Foreground)
+	}
+	if r.Session == nil || !r.Session.Console {
+		t.Errorf("session: %+v", r.Session)
+	}
+	if r.AgentIntegrity != "medium" && r.AgentIntegrity != "high" {
+		t.Errorf("agent integrity %q", r.AgentIntegrity)
+	}
+	if f := r.Focused; f != nil && (f.Window == 0 || f.ControlType == "") {
+		t.Errorf("focused: %+v", f)
+	}
+	for _, w := range r.Windows {
+		if w.GroupRoot == 0 {
+			t.Errorf("no group root: %+v", w)
+		}
+	}
+}
+
+func TestGroupRoots(t *testing.T) {
+	ws := []proto.WindowInfo{
+		{Handle: 1, PID: 10},            // root
+		{Handle: 2, PID: 10, Owner: 1},  // owned by 1
+		{Handle: 3, PID: 10, Owner: 2},  // owned through 2
+		{Handle: 4, PID: 11, Owner: 1},  // other process: its own root
+		{Handle: 5, PID: 10, Owner: 99}, // owner not listed
+		{Handle: 6, PID: 12, Owner: 7},  // cycle
+		{Handle: 7, PID: 12, Owner: 6},
+	}
+	groupRoots(ws)
+	want := []uint64{1, 1, 1, 4, 5, 6, 7} // a cycle stops after 8 links, back on the window itself
+	for i, w := range ws {
+		if w.GroupRoot != want[i] {
+			t.Errorf("handle %d: group root %d, want %d", w.Handle, w.GroupRoot, want[i])
+		}
+	}
+	// A chain longer than 8 links stops after 8.
+	var chain []proto.WindowInfo
+	for i := uint64(1); i <= 12; i++ {
+		chain = append(chain, proto.WindowInfo{Handle: i, PID: 1, Owner: i - 1})
+	}
+	groupRoots(chain)
+	if chain[11].GroupRoot != 4 || chain[8].GroupRoot != 1 {
+		t.Errorf("long chain: %d %d", chain[11].GroupRoot, chain[8].GroupRoot)
+	}
+}
+
+func TestIntegrityName(t *testing.T) {
+	for rid, want := range map[uint32]string{0: "low", 0x1000: "low", 0x2000: "medium", 0x2100: "medium", 0x3000: "high", 0x4000: "system", 0x5000: "system"} {
+		if got := integrityName(rid); got != want {
+			t.Errorf("0x%x: %q, want %q", rid, got, want)
+		}
+	}
+	if processIntegrity(0xFFFFFFFF) != "" {
+		t.Error("integrity of a missing process")
+	}
+	if own := tokenIntegrity(windows.GetCurrentProcessToken()); own != "medium" && own != "high" {
+		t.Errorf("own integrity %q", own)
+	}
+}
+
+var pGetCursorPos = user32.NewProc("GetCursorPos")
+
+// hscroll moves the cursor to the point and injects a horizontal wheel event; a small window of ours receives it.
+func TestHScroll(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var saved struct{ X, Y int32 }
+	pGetCursorPos.Call(uintptr(unsafe.Pointer(&saved)))
+	defer pSetCursorPos.Call(uintptr(uint32(saved.X)), uintptr(uint32(saved.Y)))
+	const wsExTopmost, wsExNoActivate, wsExToolWindow = 0x8, 0x08000000, 0x80
+	testWindow(t, "hyperhand-test-hscroll", 0, wsExTopmost|wsExNoActivate|wsExToolWindow, 40, 300, 30, 30)
+	if _, _, err := hscroll(context.Background(), mustJSON(proto.HScrollArgs{X: 55, Y: 315, Delta: -2}), nil); err != nil {
+		t.Fatal(err)
+	}
+	var now struct{ X, Y int32 }
+	pGetCursorPos.Call(uintptr(unsafe.Pointer(&now)))
+	if now.X != 55 || now.Y != 315 {
+		t.Errorf("cursor at (%d, %d)", now.X, now.Y)
+	}
 }
 
 func TestFocusWindowBadHandle(t *testing.T) {

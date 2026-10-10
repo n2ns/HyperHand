@@ -19,21 +19,24 @@ import (
 type Handler func(ctx context.Context, args json.RawMessage, payload []byte) (result any, out []byte, err error)
 
 var handlers = map[string]Handler{
-	proto.OpPing:         ping,
-	proto.OpExec:         execOp,
-	proto.OpReadFile:     readFile,
-	proto.OpListDir:      listDir,
-	proto.OpHashFiles:    hashFiles,
-	proto.OpClipboardGet: clipboardGet,
-	proto.OpClipboardSet: clipboardSet,
-	proto.OpTypeKeys:     typeKeys,
-	proto.OpListControls: listControls,
-	proto.OpFocusWindow:  focusWindow,
-	proto.OpListWindows:  listWindows,
-	proto.OpWindowAt:     windowAt,
-	proto.OpWait:         waitOp,
-	proto.OpSessionState: sessionState,
-	proto.OpUpdateAgent:  updateAgent,
+	proto.OpPing:          ping,
+	proto.OpExec:          execOp,
+	proto.OpReadFile:      readFile,
+	proto.OpListDir:       listDir,
+	proto.OpHashFiles:     hashFiles,
+	proto.OpClipboardGet:  clipboardGet,
+	proto.OpClipboardSet:  clipboardSet,
+	proto.OpTypeKeys:      typeKeys,
+	proto.OpListControls:  listControls,
+	proto.OpControlAction: controlAction,
+	proto.OpLaunch:        launch,
+	proto.OpHScroll:       hscroll,
+	proto.OpFocusWindow:   focusWindow,
+	proto.OpListWindows:   listWindows,
+	proto.OpWindowAt:      windowAt,
+	proto.OpWait:          waitOp,
+	proto.OpSessionState:  sessionState,
+	proto.OpUpdateAgent:   updateAgent,
 }
 
 // AfterUpdate is called after a successful update_agent response has been sent
@@ -157,7 +160,7 @@ func decode(args json.RawMessage, v any) error {
 }
 
 func ping(context.Context, json.RawMessage, []byte) (any, []byte, error) {
-	r := proto.PingResult{Version: proto.Version}
+	r := proto.PingResult{Version: proto.Version, Protocol: proto.Protocol}
 	r.Hostname, _ = os.Hostname()
 	if u, err := user.Current(); err == nil {
 		r.User = u.Username
