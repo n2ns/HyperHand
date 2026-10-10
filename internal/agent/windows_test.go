@@ -55,6 +55,14 @@ func offscreenWindow(t *testing.T, title string, owner windows.HWND, x int32) wi
 func TestListWindows(t *testing.T) {
 	runtime.LockOSThread() // the windows belong to this thread
 	defer runtime.UnlockOSThread()
+	// Match the agent executable's DPI awareness: DWM returns physical bounds,
+	// but an unaware test thread otherwise creates these windows in scaled units.
+	setDPI := user32.NewProc("SetThreadDpiAwarenessContext")
+	oldDPI, _, err := setDPI.Call(^uintptr(1)) // DPI_AWARENESS_CONTEXT_SYSTEM_AWARE (-2)
+	if oldDPI == 0 {
+		t.Fatal(err)
+	}
+	defer setDPI.Call(oldDPI)
 	tag := fmt.Sprintf("hyperhand-test-%d", os.Getpid())
 	owner := offscreenWindow(t, tag+"-owner", 0, -30000)
 	dialog := offscreenWindow(t, tag+"-dialog", owner, -29000)

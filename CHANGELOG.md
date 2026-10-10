@@ -63,6 +63,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Integrity check: input to a window whose process runs at a higher integrity level than the agent is refused with `integrity_mismatch` instead of being dropped silently by Windows.
 - Guest ops `control_action` (with `Locate` and a `rect` in its result), `launch` and `hscroll`.
 
+### Fixed
+
+- Window integrity inspection uses an aligned token-information buffer and preserves SID pointer provenance, avoiding a crash under Go's race/checkptr instrumentation.
+
 ## [0.2.0] - 2026-10-07
 
 ### Added

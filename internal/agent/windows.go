@@ -199,17 +199,28 @@ func processIntegrity(pid uint32) string {
 
 // tokenIntegrity reads TokenIntegrityLevel and names the mandatory label SID's last RID.
 func tokenIntegrity(tok windows.Token) string {
-	var buf [256]byte
+	// GetTokenInformation stores a pointer-bearing label followed by its SID.
+	// A byte array has no pointer alignment guarantee (notably on the stack).
+	var buf struct {
+		label windows.Tokenmandatorylabel
+		sid   [256]byte
+	}
 	var n uint32
-	if err := windows.GetTokenInformation(tok, windows.TokenIntegrityLevel, &buf[0], uint32(len(buf)), &n); err != nil {
+	if err := windows.GetTokenInformation(tok, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&buf)), uint32(unsafe.Sizeof(buf)), &n); err != nil {
 		return ""
 	}
-	label := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buf[0]))
-	sid := label.Label.Sid
-	if sid == nil || sid.SubAuthorityCount() == 0 {
+	sid := buf.label.Label.Sid
+	if sid == nil {
 		return ""
 	}
-	return integrityName(sid.SubAuthority(uint32(sid.SubAuthorityCount()) - 1))
+	// Read the SID layout directly. GetSidSubAuthority's uintptr return loses
+	// the Go allocation provenance and fails checkptr for a SID in this buffer.
+	count := *(*byte)(unsafe.Add(unsafe.Pointer(sid), 1))
+	if count == 0 || count > 15 {
+		return ""
+	}
+	rid := *(*uint32)(unsafe.Add(unsafe.Pointer(sid), 8+4*(uintptr(count)-1)))
+	return integrityName(rid)
 }
 
 // integrityName maps a mandatory label RID (SECURITY_MANDATORY_*_RID) to a level name.
