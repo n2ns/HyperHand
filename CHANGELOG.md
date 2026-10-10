@@ -44,6 +44,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Control observations expose executable `actions` and readable semantic `state` (toggle, expansion, selection, read-only and offscreen); unknown properties stay absent and `controls_diff` includes capability/state changes. Unsupported actions report action names rather than UIA pattern names.
 - Task ownership: optional `task_id` on every tool, independent observations, waits and checkpoint runs, and exclusive VM writes until task-scoped `vm_end_turn` cleanup. Persistent MCP sessions get a default task; short-lived connections and agents sharing a session can pass distinct IDs.
 - Stronger observation freshness: shared VM revisions invalidate old coordinates after input and other state-changing calls; lifecycle changes invalidate control references too. Coordinate actions also check local screenshot changes, and window checks include process/class identity. Stable UIA runtime IDs can still be re-located after ordinary input.
 

@@ -19,22 +19,33 @@ type ControlsArgs struct {
 // ScrollItem (see ControlActions). Value and HasValue carry ValuePattern's current value (never for password
 // controls). Focused marks the element with keyboard focus. The root has Parent -1 and Depth 0.
 type ControlInfo struct {
-	Index        int      `json:"index"`
-	Parent       int      `json:"parent"`
-	Depth        int      `json:"depth"`
-	Name         string   `json:"name"`
-	ControlType  int32    `json:"control_type"`
-	AutomationID string   `json:"automation_id"`
-	ClassName    string   `json:"class_name"`
-	PID          uint32   `json:"pid"`
-	Enabled      bool     `json:"enabled"`
-	Offscreen    bool     `json:"offscreen"`
-	Rect         Rect     `json:"rect"`
-	RuntimeID    string   `json:"runtime_id,omitempty"`
-	Patterns     []string `json:"patterns,omitempty"`
-	Value        string   `json:"value,omitempty"`
-	HasValue     bool     `json:"has_value,omitempty"`
-	Focused      bool     `json:"focused,omitempty"`
+	Index        int           `json:"index"`
+	Parent       int           `json:"parent"`
+	Depth        int           `json:"depth"`
+	Name         string        `json:"name"`
+	ControlType  int32         `json:"control_type"`
+	AutomationID string        `json:"automation_id"`
+	ClassName    string        `json:"class_name"`
+	PID          uint32        `json:"pid"`
+	Enabled      bool          `json:"enabled"`
+	Offscreen    bool          `json:"offscreen"`
+	Rect         Rect          `json:"rect"`
+	RuntimeID    string        `json:"runtime_id,omitempty"`
+	Patterns     []string      `json:"patterns,omitempty"`
+	Actions      []string      `json:"actions,omitempty"`
+	State        *ControlState `json:"state,omitempty"`
+	Value        string        `json:"value,omitempty"`
+	HasValue     bool          `json:"has_value,omitempty"`
+	Focused      bool          `json:"focused,omitempty"`
+}
+
+// ControlState contains readable UIA state. Nil fields mean unavailable, not false.
+type ControlState struct {
+	Toggle         *string `json:"toggle,omitempty"`
+	ExpandCollapse *string `json:"expand_collapse,omitempty"`
+	Selected       *bool   `json:"selected,omitempty"`
+	ReadOnly       *bool   `json:"read_only,omitempty"`
+	Offscreen      *bool   `json:"offscreen,omitempty"`
 }
 
 // ControlsResult: Focused is the index of the focused node, -1 when none is in the tree. SelectedText is the text

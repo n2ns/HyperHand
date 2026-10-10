@@ -24,6 +24,7 @@ const (
 	uiaNextSibling         = 6
 	uiaGetRuntimeID        = 4
 	uiaGetPropertyValue    = 10
+	uiaGetPropertyValueEx  = 11
 	uiaGetCurrentPattern   = 16
 	uiaProcessID           = 20
 	uiaControlType         = 21
@@ -49,7 +50,12 @@ const (
 const (
 	propHasKeyboardFocus   = 30008
 	propNativeWindowHandle = 30020
+	propIsOffscreen        = 30022
 	propValueValue         = 30045
+	propValueReadOnly      = 30046
+	propExpandState        = 30070
+	propSelectionSelected  = 30079
+	propToggleState        = 30086
 	patternText            = 10014
 	uiaTextLimit           = 512
 )
@@ -438,6 +444,14 @@ func (e *nativeControl) property(id int32) (ole.VARIANT, error) {
 	return v, err
 }
 
+// stateProperty suppresses UIA default values for properties the provider does
+// not implement; those are returned as a reserved VT_UNKNOWN value instead.
+func (e *nativeControl) stateProperty(id int32) (ole.VARIANT, error) {
+	var v ole.VARIANT
+	err := uiaCall(e.element, uiaGetPropertyValueEx, uintptr(id), 1, uintptr(unsafe.Pointer(&v)))
+	return v, err
+}
+
 // propertyBool reads a VT_BOOL property; an unsupported property reads false.
 func (e *nativeControl) propertyBool(id int32) (bool, error) {
 	v, err := e.property(id)
@@ -446,6 +460,54 @@ func (e *nativeControl) propertyBool(id int32) (bool, error) {
 	}
 	defer v.Clear()
 	return v.VT == ole.VT_BOOL && int16(v.Val) != 0, nil
+}
+
+// state reads only properties of supported patterns. A failed or unsupported read
+// remains nil so callers do not mistake an unknown state for false or zero.
+func (e *nativeControl) state(available []bool) *proto.ControlState {
+	s := &proto.ControlState{}
+	for _, p := range []struct {
+		action string
+		id     int32
+		target **bool
+	}{
+		{"", propIsOffscreen, &s.Offscreen},
+		{"SetValue", propValueReadOnly, &s.ReadOnly},
+		{"Select", propSelectionSelected, &s.Selected},
+	} {
+		if p.action != "" && !available[patternFor(p.action)] {
+			continue
+		}
+		v, err := e.stateProperty(p.id)
+		if err == nil && v.VT == ole.VT_BOOL {
+			b := int16(v.Val) != 0
+			*p.target = &b
+		}
+		v.Clear()
+	}
+	for _, p := range []struct {
+		action string
+		id     int32
+		names  []string
+		target **string
+	}{
+		{"Toggle", propToggleState, []string{"off", "on", "indeterminate"}, &s.Toggle},
+		{"Expand", propExpandState, []string{"collapsed", "expanded", "partially_expanded", "leaf"}, &s.ExpandCollapse},
+	} {
+		if !available[patternFor(p.action)] {
+			continue
+		}
+		v, err := e.stateProperty(p.id)
+		if err == nil && v.VT == ole.VT_I4 && v.Val >= 0 && v.Val < int64(len(p.names)) {
+			name := p.names[v.Val]
+			*p.target = &name
+		}
+		v.Clear()
+	}
+	if s.Toggle == nil && s.ExpandCollapse == nil && s.Selected == nil && s.ReadOnly == nil && s.Offscreen == nil {
+		return nil
+	}
+	return s
 }
 
 // propertyText reads a VT_BSTR property with the text cap; an unsupported property reads "".
@@ -630,6 +692,8 @@ func (e *nativeControl) info() (proto.ControlInfo, bool, bool, error) {
 		return n, false, false, err
 	}
 	n.Patterns = patternNames(available)
+	n.Actions = actionNames(available)
+	n.State = e.state(available)
 	if available[valuePatternIndex] && password == 0 {
 		value, shortened, err := e.propertyText(propValueValue)
 		if err != nil {

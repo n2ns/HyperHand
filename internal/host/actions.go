@@ -527,7 +527,7 @@ func (a *action) controlAction(o *observation, w proto.WindowInfo, node proto.Co
 	case strings.HasPrefix(msg, "element not found"):
 		return r, refuse(codeStaleElement, "call vm_observe with controls: true and use an index from its tree", nil, "control [%d] %s %q of observation %s no longer exists: %v", node.Index, proto.ControlTypeName(node.ControlType), node.Name, o.ID, err)
 	case strings.HasPrefix(msg, "unsupported pattern"):
-		return r, refuse(codeUnsupportedPattern, "use vm_invoke with one of supported, or vm_click with this index", map[string]any{"supported": node.Patterns}, "control [%d] %s %q does not support %s", node.Index, proto.ControlTypeName(node.ControlType), node.Name, action)
+		return r, refuse(codeUnsupportedPattern, "use vm_set_value for SetValue, vm_invoke for another supported action, or vm_click with this index", map[string]any{"supported": supportedControlActions(msg, node)}, "control [%d] %s %q does not support %s", node.Index, proto.ControlTypeName(node.ControlType), node.Name, action)
 	}
 	return r, agentRequired(err)
 }

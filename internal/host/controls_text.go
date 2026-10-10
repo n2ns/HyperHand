@@ -1,7 +1,10 @@
 package host
 
 import (
+	"encoding/json"
 	"fmt"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -13,7 +16,7 @@ import (
 //	[12] Edit "" id=cmdline (0,980 1920x60) focused value="LINE"
 //
 // Index, control type name, quoted name, id=<automation_id> (only when set), (x,y wxh) of the rect, then the state
-// words disabled, offscreen and focused, and value="..." when the control reports a value.
+// words disabled, offscreen and focused, value="...", executable actions and readable semantic state.
 func renderControl(n proto.ControlInfo) string {
 	var b strings.Builder
 	b.WriteString(strings.Repeat("  ", max(0, n.Depth)))
@@ -39,7 +42,48 @@ func renderControl(n proto.ControlInfo) string {
 	if n.HasValue {
 		fmt.Fprintf(&b, " value=%q", n.Value)
 	}
+	if actions := controlActions(n); len(actions) > 0 {
+		fmt.Fprintf(&b, " actions=[%s]", strings.Join(actions, ","))
+	}
+	if n.State != nil {
+		state, _ := json.Marshal(n.State)
+		fmt.Fprintf(&b, " state=%s", state)
+	}
 	return b.String()
+}
+
+// controlActions also supports agents that only reported pattern names.
+func controlActions(n proto.ControlInfo) []string {
+	if n.Actions != nil {
+		return n.Actions
+	}
+	actions := make([]string, 0, len(n.Patterns))
+	for _, pattern := range n.Patterns {
+		switch pattern {
+		case "Value":
+			actions = append(actions, "SetValue")
+		case "ScrollItem":
+			actions = append(actions, "ScrollIntoView")
+		case "Invoke", "Toggle", "Expand", "Collapse", "Select":
+			actions = append(actions, pattern)
+		}
+	}
+	return actions
+}
+
+// supportedControlActions prefers the agent's fresh capabilities over the observation's cached ones.
+func supportedControlActions(message string, n proto.ControlInfo) []string {
+	_, supported, ok := strings.Cut(message, "; supported:")
+	if !ok {
+		return controlActions(n)
+	}
+	actions := []string{}
+	for _, name := range strings.Split(supported, ",") {
+		if name = strings.TrimSpace(name); slices.Contains(proto.ControlActions, name) && name != "Locate" {
+			actions = append(actions, name)
+		}
+	}
+	return actions
 }
 
 // renderControls renders the tree as indexed text, one node per line, each line newline-terminated.
@@ -77,7 +121,8 @@ func controlKeys(nodes []proto.ControlInfo) []string {
 // its index: the caller must learn the new index before acting on the element in the new observation.
 func controlChanged(a, b proto.ControlInfo) bool {
 	return a.Index != b.Index || a.Name != b.Name || a.Rect != b.Rect || a.Enabled != b.Enabled || a.Offscreen != b.Offscreen ||
-		a.HasValue != b.HasValue || a.Value != b.Value || a.Focused != b.Focused
+		a.HasValue != b.HasValue || a.Value != b.Value || a.Focused != b.Focused ||
+		!slices.Equal(controlActions(a), controlActions(b)) || !reflect.DeepEqual(a.State, b.State)
 }
 
 // diffControls compares an earlier tree with the current one: Added and Changed are rendered lines of the current

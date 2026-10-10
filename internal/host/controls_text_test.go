@@ -2,10 +2,86 @@ package host
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"hyperhand/internal/proto"
 )
+
+func TestControlSemanticActionsAndState(t *testing.T) {
+	off, selected, readOnly := "off", false, true
+	n := proto.ControlInfo{ControlType: 50002, Enabled: true, Actions: []string{"Toggle"},
+		State: &proto.ControlState{Toggle: &off, Selected: &selected, ReadOnly: &readOnly}}
+	want := `[0] CheckBox "" (0,0 0x0) actions=[Toggle] state={"toggle":"off","selected":false,"read_only":true}`
+	if got := renderControl(n); got != want {
+		t.Fatalf("rendered %q, want %q", got, want)
+	}
+	if strings.Contains(renderControl(n), `"offscreen"`) {
+		t.Fatal("unavailable state rendered as known")
+	}
+	legacy := proto.ControlInfo{Enabled: true, Patterns: []string{"Invoke", "Value", "ScrollItem", "Unknown"}}
+	if got := controlActions(legacy); !reflect.DeepEqual(got, []string{"Invoke", "SetValue", "ScrollIntoView"}) {
+		t.Fatalf("legacy actions = %v", got)
+	}
+	legacy.Actions = []string{}
+	if got := controlActions(legacy); len(got) != 0 {
+		t.Fatalf("explicit empty actions should override old patterns: %v", got)
+	}
+}
+
+func TestControlSemanticDiff(t *testing.T) {
+	base := proto.ControlInfo{Enabled: true, RuntimeID: "42.1", Actions: []string{"Toggle"}}
+	for _, tt := range []struct {
+		name string
+		old  *proto.ControlState
+		cur  *proto.ControlState
+		want bool
+	}{
+		{"unknown to false", nil, &proto.ControlState{Selected: new(false)}, true},
+		{"false to unknown", &proto.ControlState{Selected: new(false)}, nil, true},
+		{"selection", &proto.ControlState{Selected: new(false)}, &proto.ControlState{Selected: new(true)}, true},
+		{"toggle", &proto.ControlState{Toggle: new("off")}, &proto.ControlState{Toggle: new("on")}, true},
+		{"expand", &proto.ControlState{ExpandCollapse: new("collapsed")}, &proto.ControlState{ExpandCollapse: new("expanded")}, true},
+		{"read only", &proto.ControlState{ReadOnly: new(false)}, &proto.ControlState{ReadOnly: new(true)}, true},
+		{"offscreen", &proto.ControlState{Offscreen: new(false)}, &proto.ControlState{Offscreen: new(true)}, true},
+		{"equal state values", &proto.ControlState{Toggle: new("off"), Selected: new(false)}, &proto.ControlState{Toggle: new("off"), Selected: new(false)}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			old, cur := base, base
+			old.State, cur.State = tt.old, tt.cur
+			if got := len(diffControls([]proto.ControlInfo{old}, []proto.ControlInfo{cur}).Changed) != 0; got != tt.want {
+				t.Fatalf("changed = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	cur := base
+	cur.Actions = []string{"Toggle", "Invoke"}
+	if !controlChanged(base, cur) {
+		t.Fatal("new semantic action was omitted from diff")
+	}
+	cur.Actions = nil
+	cur.Patterns = []string{"Toggle"}
+	if controlChanged(base, cur) {
+		t.Fatal("equivalent legacy capabilities should not change the rendered diff")
+	}
+}
+
+func TestSupportedControlActions(t *testing.T) {
+	n := proto.ControlInfo{Patterns: []string{"Value", "ScrollItem"}}
+	for _, tt := range []struct {
+		message string
+		want    []string
+	}{
+		{"unsupported pattern", []string{"SetValue", "ScrollIntoView"}},
+		{"unsupported pattern: Toggle; supported: Invoke, SetValue", []string{"Invoke", "SetValue"}},
+		{"unsupported pattern: Toggle; supported: ", []string{}},
+		{"unsupported pattern: Toggle; supported: none", []string{}},
+	} {
+		if got := supportedControlActions(tt.message, n); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q: supported = %v, want %v", tt.message, got, tt.want)
+		}
+	}
+}
 
 func TestRenderControl(t *testing.T) {
 	for _, tt := range []struct {

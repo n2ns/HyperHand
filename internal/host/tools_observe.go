@@ -27,6 +27,7 @@ const observeDesc = "Observe the whole screen (no handle) or one window (handle 
 	"{observation_id, vm, captured_at, window, screenshot {width, height, origin_x, origin_y, scale}, focused {index, name, control_type, class_name, rect}, selected_text, controls, controls_truncated, controls_diff, stale_risk, agent}. " +
 	"With a handle the screenshot is cropped to the window's visible part and the control tree is rooted at it. " +
 	"controls: true adds the UI Automation tree as indexed text, one node per line indented by depth: '[index] ControlType \"name\" id=automation_id (x,y wxh) disabled|offscreen|focused value=\"...\"'; " +
+	"actions=[...] lists supported semantic actions: use vm_set_value for SetValue and vm_invoke for the others. state={...} reports readable toggle, expand_collapse, selected, read_only and offscreen states; omitted fields are unknown, not false. " +
 	"without a handle the tree is the foreground window's and window names it. Pass observation_id to actions (vm_click, vm_type, vm_set_value, vm_invoke, ...) with image pixel coordinates or a control index; " +
 	"the host maps pixels back to the screen and re-finds controls, so you never convert coordinates. Observations belong to the issuing task_id and cannot be shared between tasks. " +
 	"After a mutating operation, use its after observation or observe again before using coordinates; stable control runtime IDs can still be re-located after ordinary mutations. " +
