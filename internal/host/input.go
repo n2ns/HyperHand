@@ -1,25 +1,22 @@
 package host
 
 import (
-	"context"
 	"fmt"
 
 	"hyperhand/internal/hyperv"
 	"hyperhand/internal/proto"
 )
 
-// inputWindow resolves the selected window (root) and the window that receives input (target): root itself when it is
-// in the foreground, or else the foreground window when it is one of root's own windows (inGroup), such as AutoCAD's
-// command line under its main window. Without a selector both are the foreground window.
-func inputWindow(ctx context.Context, call agentCall, vm string, sel windowSelector) (root, target proto.WindowInfo, err error) {
-	ws, err := listWindows(ctx, call, vm)
-	if err != nil {
-		return root, target, err
-	}
+// inputWindow resolves the selected window (root) and the window that receives input (target) in ws: root itself
+// when it is in the foreground, or else the foreground window when it is one of root's own windows (inGroup), such as
+// AutoCAD's command line under its main window. Without a selector both are the foreground window.
+func inputWindow(ws []proto.WindowInfo, sel windowSelector) (root, target proto.WindowInfo, err error) {
 	if sel == (windowSelector{}) {
-		if fg, ok := foreground(ws); ok {
-			sel.Handle = fg.Handle
+		fg, ok := foreground(ws)
+		if !ok {
+			return root, target, refuse(codeNoWindow, "pass handle (from vm_windows or vm_observe)", nil, "no window is in the foreground")
 		}
+		sel.Handle = fg.Handle
 	}
 	root, err = resolveWindow(ws, sel)
 	if err != nil {
@@ -34,26 +31,27 @@ func inputWindow(ctx context.Context, call agentCall, vm string, sel windowSelec
 		target, _ = foreground(ws)
 	}
 	if !target.Enabled || target.Minimized {
-		return root, target, fmt.Errorf("input target %s must be enabled and restored; call vm_focus_window with handle %d first", describe(target), target.Handle)
+		return root, target, refuse(codeTargetDisabled, fmt.Sprintf("act on handle %d first", target.Handle), map[string]any{"act_on": target.Handle}, "input target %s is disabled or minimized", describe(target))
 	}
 	return root, target, nil
 }
 
-func keySequence(in keyIn) ([]string, error) {
-	if (in.Keys == "") == (len(in.Sequence) == 0) {
-		return nil, fmt.Errorf("pass exactly one of keys or sequence")
+// keySequence validates vm_key's keys or sequence and returns the combinations to press, in order.
+func keySequence(keys string, sequence []string) ([]string, error) {
+	if (keys == "") == (len(sequence) == 0) {
+		return nil, refuse(codeInvalidArgument, "pass exactly one of keys or sequence", nil, "keys and sequence are both %s", map[bool]string{true: "set", false: "empty"}[keys != ""])
 	}
-	keys := in.Sequence
-	if in.Keys != "" {
-		keys = []string{in.Keys}
+	combos := sequence
+	if keys != "" {
+		combos = []string{keys}
 	}
-	if len(keys) > 256 {
-		return nil, fmt.Errorf("sequence exceeds 256 combinations")
+	if len(combos) > 256 {
+		return nil, refuse(codeInvalidArgument, "split the sequence into calls of at most 256 combinations", nil, "sequence has %d combinations", len(combos))
 	}
-	for _, key := range keys {
-		if err := hyperv.ValidateKeys(key); err != nil {
-			return nil, err
+	for i, c := range combos {
+		if err := hyperv.ValidateKeys(c); err != nil {
+			return nil, refuse(codeInvalidArgument, "fix the key name; see the vm_key description for the key names", nil, "combination %d (%q): %v", i+1, c, err)
 		}
 	}
-	return keys, nil
+	return combos, nil
 }

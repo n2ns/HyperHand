@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -43,16 +42,15 @@ func connectInputMCP(t *testing.T, ctx context.Context, b Backend) *mcp.ClientSe
 	return c
 }
 
-func TestInputMCPKeysPinsTargetAndPreservesClipboard(t *testing.T) {
-	for _, mode := range []string{"success", "old-agent", "background"} {
+// vm_type pins the default VM once, types through the agent only, and with a background target either activates it
+// (default) or refuses (activate: false).
+func TestInputMCPTypePinsTargetAndActivates(t *testing.T) {
+	for _, mode := range []string{"success", "old-agent", "background", "background-strict"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			inputText := "汉字😀"
-			if mode == "old-agent" {
-				inputText = "plain ASCII must not fall back"
-			}
-			var defaults, sent, forbidden atomic.Int32
+			var defaults, sent, focused, forbidden atomic.Int32
 			b := &inputMCPBackend{windowMCPBackend: &windowMCPBackend{
 				find: func(name string) (hyperv.VM, error) {
 					id := "A"
@@ -67,7 +65,18 @@ func TestInputMCPKeysPinsTargetAndPreservesClipboard(t *testing.T) {
 					}
 					switch req.Op {
 					case proto.OpListWindows:
-						return proto.WindowsResult{Windows: []proto.WindowInfo{{Handle: 17, PID: 42, Title: "Editor", Enabled: true, Foreground: mode != "background"}}}, nil
+						fg := mode == "success" || mode == "old-agent" || focused.Load() > 0
+						return proto.WindowsResult{Windows: []proto.WindowInfo{{Handle: 17, PID: 42, Title: "Editor", Enabled: true, Foreground: fg}}, Session: &proto.SessionStateResult{Console: true}}, nil
+					case proto.OpFocusWindow:
+						var a proto.TitleArgs
+						if err := json.Unmarshal(req.Args, &a); err != nil {
+							return nil, err
+						}
+						if a != (proto.TitleArgs{Handle: 17}) {
+							return nil, fmt.Errorf("wrong focus target: %+v", a)
+						}
+						focused.Add(1)
+						return proto.FocusResult{Handle: 17}, nil
 					case proto.OpTypeKeys:
 						sent.Add(1)
 						var a proto.TypeKeysArgs
@@ -88,22 +97,31 @@ func TestInputMCPKeysPinsTargetAndPreservesClipboard(t *testing.T) {
 				},
 			}, press: func(string, string) error { forbidden.Add(1); return nil }, typeText: func(string, string) error { forbidden.Add(1); return nil }}
 			cs := connectInputMCP(t, ctx, b)
-			r, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "vm_type", Arguments: map[string]any{"text": inputText, "mode": "keys", "handle": 17, "pid": 42}})
+			args := map[string]any{"text": inputText, "handle": 17, "pid": 42}
+			if mode == "background-strict" {
+				args["activate"] = false
+			}
+			r, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "vm_type", Arguments: args})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if r.IsError != (mode != "success") {
-				t.Fatalf("result: %s", resultText(r))
+			m := resultJSON(t, r)
+			wantErr := map[string]string{"old-agent": codeAgentOutdated, "background-strict": codeActivateFailed}[mode]
+			if r.IsError != (wantErr != "") || m["error"] != any(nil) && m["error"] != wantErr {
+				t.Fatalf("result: %v", m)
 			}
-			if mode == "old-agent" && !strings.Contains(resultText(r), "unknown op") {
-				t.Fatalf("lost agent error: %s", resultText(r))
+			if !r.IsError && (m["applied_chars"] != float64(3) || m["total_chars"] != float64(3) || m["window"].(map[string]any)["handle"] != float64(17)) {
+				t.Fatalf("result: %v", m)
 			}
-			wantSent := int32(1)
-			if mode == "background" {
+			wantSent, wantFocused := int32(1), int32(0)
+			if mode == "background-strict" {
 				wantSent = 0
 			}
-			if defaults.Load() != 1 || sent.Load() != wantSent || forbidden.Load() != 0 {
-				t.Fatalf("default resolutions=%d sends=%d forbidden=%d", defaults.Load(), sent.Load(), forbidden.Load())
+			if mode == "background" {
+				wantFocused = 1
+			}
+			if defaults.Load() != 1 || sent.Load() != wantSent || focused.Load() != wantFocused || forbidden.Load() != 0 {
+				t.Fatalf("default resolutions=%d sends=%d focused=%d forbidden=%d", defaults.Load(), sent.Load(), focused.Load(), forbidden.Load())
 			}
 		})
 	}
@@ -121,10 +139,14 @@ func TestInputMCPSequenceValidatesBeforeSending(t *testing.T) {
 		{"sequence": []string{"ctrl+a", "not-a-key"}},
 		{"keys": "enter", "sequence": []string{"ctrl+a"}},
 		{"sequence": []string{}},
+		{"keys": "enter", "observe_after": "video"},
 	} {
 		r, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "vm_key", Arguments: args})
 		if err == nil && !r.IsError {
 			t.Fatalf("accepted invalid input: %+v", args)
+		}
+		if err == nil && resultJSON(t, r)["error"] != codeInvalidArgument {
+			t.Fatalf("%+v: %s", args, resultText(r))
 		}
 	}
 	if operations.Load() != 0 {
@@ -153,9 +175,9 @@ func TestInputMCPSequenceOrderAndChangedTarget(t *testing.T) {
 					}
 					pid := uint32(42)
 					if polls.Add(1) > 1 && changed {
-						pid = 99
+						pid = 99 // the handle now belongs to another process: the pinned window is gone
 					}
-					return proto.WindowsResult{Windows: []proto.WindowInfo{{Handle: 17, PID: pid, Title: "Editor", Enabled: true, Foreground: true}}}, nil
+					return proto.WindowsResult{Windows: []proto.WindowInfo{{Handle: 17, PID: pid, Title: "Editor", Enabled: true, Foreground: true}}, Session: &proto.SessionStateResult{Console: true}}, nil
 				},
 			}, press: func(vm, key string) error {
 				if vm != "A" {
@@ -167,7 +189,7 @@ func TestInputMCPSequenceOrderAndChangedTarget(t *testing.T) {
 				return nil
 			}}
 			cs := connectInputMCP(t, ctx, b)
-			r, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "vm_key", Arguments: map[string]any{"window": "Editor", "sequence": []string{"ctrl+a", "tab", "enter"}}})
+			r, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "vm_key", Arguments: map[string]any{"handle": 17, "pid": 42, "sequence": []string{"ctrl+a", "tab", "enter"}}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -177,8 +199,8 @@ func TestInputMCPSequenceOrderAndChangedTarget(t *testing.T) {
 			want := []string{"ctrl+a", "tab", "enter"}
 			if changed {
 				want = want[:1]
-				if !strings.Contains(resultText(r), "after 1 combinations") {
-					t.Fatalf("missing partial progress: %s", resultText(r))
+				if m := resultJSON(t, r); m["error"] != codePartialInput || m["applied"] != float64(1) || m["total"] != float64(3) {
+					t.Fatalf("missing partial progress: %v", m)
 				}
 			}
 			mu.Lock()

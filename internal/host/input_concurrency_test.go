@@ -3,7 +3,6 @@ package host
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,8 +13,10 @@ import (
 	"hyperhand/internal/proto"
 )
 
+// A tool that sends input or touches the clipboard waits for a running key operation to release the input lock, and
+// its own checks run only afterwards, against the state the key operation left behind.
 func TestInputMCPConcurrentMutationsWaitForKeys(t *testing.T) {
-	for _, tool := range []string{"vm_clipboard_set", "vm_click"} {
+	for _, tool := range []string{"vm_clipboard_set", "vm_type"} {
 		t.Run(tool, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -23,7 +24,7 @@ func TestInputMCPConcurrentMutationsWaitForKeys(t *testing.T) {
 			unblock := sync.OnceFunc(func() { close(release) })
 			defer unblock()
 			var holding, changed atomic.Bool
-			var interleaved, checks, clicks atomic.Int32
+			var interleaved, checks, typed atomic.Int32
 			observe := func() {
 				if holding.Load() {
 					interleaved.Add(1)
@@ -36,20 +37,16 @@ func TestInputMCPConcurrentMutationsWaitForKeys(t *testing.T) {
 					switch req.Op {
 					case proto.OpListWindows:
 						checks.Add(1)
-						return proto.WindowsResult{Windows: []proto.WindowInfo{{Handle: 17, PID: 42, Title: "Editor", Enabled: true, Foreground: !changed.Load(), Rect: proto.Rect{Right: 100, Bottom: 100}}}}, nil
-					case proto.OpFocusWindow:
-						return proto.FocusResult{Handle: 17, Text: "Editor"}, nil
+						return proto.WindowsResult{Windows: []proto.WindowInfo{{Handle: 17, PID: 42, Title: "Editor", Enabled: true, Foreground: !changed.Load(), Rect: proto.Rect{Right: 100, Bottom: 100}}}, Session: &proto.SessionStateResult{Console: true}}, nil
 					case proto.OpClipboardSet:
 						return nil, nil
-					case proto.OpWindowAt:
-						return proto.HandleResult{Handle: 17}, nil
-					case proto.OpSessionState:
-						return proto.SessionStateResult{Console: true}, nil
+					case proto.OpTypeKeys:
+						typed.Add(1)
+						return proto.TypeKeysResult{Events: 2}, nil
 					default:
 						return nil, fmt.Errorf("unexpected op %s", req.Op)
 					}
 				},
-				click: func(string, int, int, int, int, []string) error { observe(); clicks.Add(1); return nil },
 			}, press: func(string, string) error {
 				holding.Store(true)
 				close(entered)
@@ -73,12 +70,13 @@ func TestInputMCPConcurrentMutationsWaitForKeys(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal(ctx.Err())
 			}
+			checksBefore := checks.Load() // the key operation's own session check
 			args := map[string]any{"vm": "A"}
 			switch tool {
 			case "vm_clipboard_set":
 				args["text"] = "new clipboard"
-			case "vm_click":
-				args["handle"], args["x"], args["y"] = 17, 1, 2
+			case "vm_type":
+				args["handle"], args["text"], args["activate"] = 17, "x", false
 			}
 			type outcome struct {
 				result *mcp.CallToolResult
@@ -89,14 +87,14 @@ func TestInputMCPConcurrentMutationsWaitForKeys(t *testing.T) {
 				r, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: args})
 				pending <- outcome{r, err}
 			}()
-			// A blocked request must not execute guest mutations or even the click's precondition query.
+			// A blocked request must not execute guest mutations or even its precondition query.
 			select {
 			case out := <-pending:
 				t.Fatalf("%s finished while keys held the lock: %+v %v", tool, out.result, out.err)
 			case <-time.After(100 * time.Millisecond):
 			}
-			if interleaved.Load() != 0 || checks.Load() != 0 || clicks.Load() != 0 {
-				t.Fatalf("operation entered key critical section: guest=%d checks=%d clicks=%d", interleaved.Load(), checks.Load(), clicks.Load())
+			if interleaved.Load() != 0 || checks.Load() != checksBefore || typed.Load() != 0 {
+				t.Fatalf("operation entered key critical section: guest=%d checks=%d typed=%d", interleaved.Load(), checks.Load()-checksBefore, typed.Load())
 			}
 			unblock()
 			if err := <-keysDone; err != nil {
@@ -106,9 +104,9 @@ func TestInputMCPConcurrentMutationsWaitForKeys(t *testing.T) {
 			if out.err != nil {
 				t.Fatal(out.err)
 			}
-			if tool == "vm_click" {
-				if !out.result.IsError || !strings.Contains(resultText(out.result), "foreground") || clicks.Load() != 0 {
-					t.Fatalf("stale click was not refused: %s clicks=%d", resultText(out.result), clicks.Load())
+			if tool == "vm_type" {
+				if m := resultJSON(t, out.result); !out.result.IsError || m["error"] != codeActivateFailed || typed.Load() != 0 {
+					t.Fatalf("stale input was not refused: %v typed=%d", m, typed.Load())
 				}
 			} else if out.result.IsError {
 				t.Fatalf("%s after unlock: %s", tool, resultText(out.result))

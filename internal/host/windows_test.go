@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -22,75 +20,69 @@ func testWindows() []proto.WindowInfo {
 	}
 }
 
+// code returns err's toolError code ("" for nil).
+func code(err error) string {
+	if err == nil {
+		return ""
+	}
+	return asToolError(err).Code
+}
+
+// field returns a field of err's toolError.
+func field(err error, name string) any {
+	if err == nil {
+		return nil
+	}
+	return asToolError(err).Fields[name]
+}
+
 func TestResolveWindow(t *testing.T) {
 	ws := testWindows()
 	for _, tt := range []struct {
-		name    string
-		sel     windowSelector
-		want    uint64
-		missing bool
+		name string
+		sel  windowSelector
+		want uint64
+		code string
 	}{
-		{"substring", windowSelector{Title: "options"}, 10, false},
-		{"handle ignores title and exact", windowSelector{Title: "ignored", Handle: 30, Exact: true}, 30, false},
-		{"PID only", windowSelector{PID: 200}, 30, false},
-		{"PID intersects title", windowSelector{PID: 100, Title: "AUTOCAD"}, 20, false},
-		{"exact case insensitive", windowSelector{Title: "OPTIONS", Exact: true}, 10, false},
-		{"missing handle", windowSelector{Handle: 99}, 0, true},
-		{"missing title", windowSelector{Title: "notepad"}, 0, true},
-		{"exact rejects substring", windowSelector{Title: "option", Exact: true}, 0, true},
-		{"PID excludes handle", windowSelector{Handle: 30, PID: 100}, 0, true},
-		{"PID excludes title", windowSelector{Title: "Options", PID: 200}, 0, true},
+		{"handle", windowSelector{Handle: 30}, 30, ""},
+		{"handle and PID", windowSelector{Handle: 10, PID: 100}, 10, ""},
+		{"PID only", windowSelector{PID: 200}, 30, ""},
+		{"missing handle", windowSelector{Handle: 99}, 0, codeNoWindow},
+		{"PID excludes handle", windowSelector{Handle: 30, PID: 100}, 0, codeNoWindow},
+		{"missing PID", windowSelector{PID: 999}, 0, codeNoWindow},
+		{"ambiguous PID", windowSelector{PID: 100}, 0, codeAmbiguousTarget},
+		{"empty", windowSelector{}, 0, codeInvalidArgument},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			w, err := resolveWindow(ws, tt.sel)
-			if tt.missing {
-				if !errors.Is(err, errWindowNotFound) {
-					t.Fatalf("want not found, got %+v %v", w, err)
-				}
-			} else if err != nil || w.Handle != tt.want {
-				t.Fatalf("want handle %d, got %+v %v", tt.want, w, err)
+			if code(err) != tt.code || w.Handle != tt.want {
+				t.Fatalf("want handle %d code %q, got %+v %v", tt.want, tt.code, w, err)
 			}
 		})
 	}
-	for _, sel := range []windowSelector{{}, {Exact: true}, {PID: 200, Exact: true}} {
-		if _, err := resolveWindow(ws, sel); err == nil || errors.Is(err, errWindowNotFound) {
-			t.Errorf("invalid selector %+v: %v", sel, err)
-		}
-	}
-	for _, sel := range []windowSelector{{Title: "AUTOCAD"}, {PID: 100}} {
-		_, err := resolveWindow(ws, sel)
-		if err == nil || errors.Is(err, errWindowNotFound) {
-			t.Fatalf("ambiguous %+v: %v", sel, err)
-		}
-		for _, w := range ws {
-			if (sel.PID != 0 && w.PID == sel.PID) || (sel.Title != "" && strings.Contains(strings.ToUpper(w.Title), sel.Title)) {
-				if !strings.Contains(err.Error(), fmt.Sprintf("handle %d", w.Handle)) {
-					t.Errorf("ambiguous error omits handle %d: %v", w.Handle, err)
-				}
-			}
-		}
+	// An ambiguous PID lists the candidate handles for the next call.
+	_, err := resolveWindow(ws, windowSelector{PID: 100})
+	if hs, _ := field(err, "handles").([]uint64); !slices.Equal(hs, []uint64{10, 20}) {
+		t.Errorf("ambiguous handles: %v (%v)", hs, err)
 	}
 }
 
-func TestClickTarget(t *testing.T) {
+func TestCheckUsable(t *testing.T) {
 	ws := testWindows()
-	if x, y, err := clickTarget(ws, ws[0], 10, 20); err != nil || x != 110 || y != 70 {
-		t.Errorf("inside: %d %d %v", x, y, err)
+	if err := checkUsable(ws, ws[0]); err != nil {
+		t.Errorf("foreground: %v", err)
 	}
-	for _, p := range [][2]int{{-1, 0}, {0, -1}, {500, 0}, {0, 400}} {
-		if _, _, err := clickTarget(ws, ws[0], p[0], p[1]); err == nil || !strings.Contains(err.Error(), "outside") {
-			t.Errorf("%v: %v", p, err)
-		}
+	// Not foreground: activate_failed names the actual foreground window.
+	err := checkUsable(ws, ws[2])
+	if code(err) != codeActivateFailed || field(err, "foreground").(*windowRef).Handle != 10 {
+		t.Errorf("background: %v %v", err, field(err, "foreground"))
 	}
-	// Not foreground: the error names the actual foreground window.
-	if _, _, err := clickTarget(ws, ws[2], 10, 10); err == nil || !strings.Contains(err.Error(), `"Options" (handle 10`) {
-		t.Errorf("background: %v", err)
-	}
-	// Foreground but disabled by a modal dialog.
+	// Foreground but disabled by its modal dialog: the dialog is the window to act on.
 	w := ws[1]
 	w.Foreground = true
-	if _, _, err := clickTarget(ws, w, 10, 10); err == nil || !strings.Contains(err.Error(), "disabled") {
-		t.Errorf("disabled: %v", err)
+	err = checkUsable(ws, w)
+	if code(err) != codeTargetDisabled || field(err, "act_on") != uint64(10) || asToolError(err).Next != "act on handle 10 first" {
+		t.Errorf("disabled: %v %v", err, asToolError(err).Fields)
 	}
 }
 
@@ -99,168 +91,93 @@ func TestCheckHit(t *testing.T) {
 	if hit, err := checkHit(ws, ws[0], 110, 70, proto.HandleResult{Handle: 10}); err != nil || hit.Handle != 10 {
 		t.Errorf("hit: %+v %v", hit, err)
 	}
-	if _, err := checkHit(ws, ws[0], 110, 70, proto.HandleResult{Handle: 30}); err == nil || !strings.Contains(err.Error(), "covered by window") || !strings.Contains(err.Error(), "handle 30") {
-		t.Errorf("covered: %v", err)
+	_, err := checkHit(ws, ws[0], 110, 70, proto.HandleResult{Handle: 30})
+	if code(err) != codeCovered || field(err, "window").(map[string]any)["handle"] != uint64(30) {
+		t.Errorf("covered: %v %v", err, field(err, "window"))
 	}
-	if _, err := checkHit(ws, ws[0], 110, 70, proto.HandleResult{}); err == nil || !strings.Contains(err.Error(), "off screen") {
+	if _, err := checkHit(ws, ws[0], 110, 70, proto.HandleResult{}); code(err) != codeInvalidArgument {
 		t.Errorf("off screen: %v", err)
 	}
 }
 
-// fakeCall answers ops from canned results (JSON-encoded) or errors and records the ops it was asked.
+// fakeCall answers ops from canned results (JSON-encoded), errors or per-op functions (fn wins) and records the ops it
+// was asked with their typed args.
 type fakeCall struct {
 	results map[string]any
 	errs    map[string]error
+	fn      map[string]func(args any) (any, error)
 	ops     []string
 	args    []any
 }
 
-func (f *fakeCall) call(_ context.Context, _, op string, args any, _ []byte, result any) ([]byte, error) {
+func (f *fakeCall) call(ctx context.Context, _, op string, args any, _ []byte, result any) ([]byte, error) {
 	f.ops, f.args = append(f.ops, op), append(f.args, args)
-	if err := f.errs[op]; err != nil {
+	var r any
+	if h := f.fn[op]; h != nil {
+		var err error
+		if r, err = h(args); err != nil {
+			return nil, err
+		}
+	} else if err := f.errs[op]; err != nil {
 		return nil, err
+	} else {
+		r = f.results[op]
 	}
-	if r, ok := f.results[op]; ok && result != nil {
+	if r != nil && result != nil {
 		b, _ := json.Marshal(r)
 		return nil, json.Unmarshal(b, result)
 	}
 	return nil, nil
 }
 
-func oldAgent() *fakeCall {
-	return &fakeCall{
-		errs:    map[string]error{proto.OpListWindows: errors.New(`unknown op "list_windows"`), proto.OpWindowAt: errors.New(`unknown op "window_at"`)},
-		results: map[string]any{proto.OpFocusWindow: proto.TextResult{Text: "Notepad"}},
+// count returns how often op was asked.
+func (f *fakeCall) count(op string) int {
+	n := 0
+	for _, o := range f.ops {
+		if o == op {
+			n++
+		}
 	}
+	return n
 }
 
+// newAgent answers list_windows with testWindows (window 10 in the foreground) and window_at with at.
 func newAgent(at uint64) *fakeCall {
 	return &fakeCall{results: map[string]any{
-		proto.OpListWindows: proto.WindowsResult{Windows: testWindows()},
+		proto.OpListWindows: proto.WindowsResult{Windows: testWindows(), Foreground: 10, Session: &proto.SessionStateResult{Console: true}},
 		proto.OpWindowAt:    proto.HandleResult{Handle: at},
 		proto.OpFocusWindow: proto.FocusResult{Text: "Options", Handle: 10},
 	}}
 }
 
-func resultText(r *mcp.CallToolResult) string { return r.Content[0].(*mcp.TextContent).Text }
+// offlineAgent fails every op the way an unreachable agent does.
+func offlineAgent() *fakeCall {
+	return &fakeCall{fn: map[string]func(any) (any, error){}, errs: map[string]error{
+		proto.OpListWindows: errors.New("agent: connect to agent: no such VM socket"),
+		proto.OpWindowAt:    errors.New("agent: connect to agent: no such VM socket"),
+		proto.OpTypeKeys:    errors.New("agent: connect to agent: no such VM socket"),
+		proto.OpHScroll:     errors.New("agent: connect to agent: no such VM socket"),
+	}}
+}
 
-func TestToolsOldAgent(t *testing.T) {
-	ctx := context.Background()
-	f := oldAgent()
-	if _, err := listWindows(ctx, f.call, ""); err == nil || !strings.Contains(err.Error(), "vm_update_agent") {
+// resultText returns the JSON text item of a tool result (the last content item: an image may precede it).
+func resultText(r *mcp.CallToolResult) string {
+	return r.Content[len(r.Content)-1].(*mcp.TextContent).Text
+}
+
+// resultJSON decodes the JSON text item of a tool result.
+func resultJSON(t *testing.T, r *mcp.CallToolResult) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(resultText(r)), &m); err != nil {
+		t.Fatalf("result is not JSON: %q", resultText(r))
+	}
+	return m
+}
+
+func TestListWindowsOldAgent(t *testing.T) {
+	f := &fakeCall{errs: map[string]error{proto.OpListWindows: errors.New(`unknown op "list_windows"`)}}
+	if _, err := listWindows(context.Background(), f.call, ""); code(err) != codeAgentOutdated {
 		t.Errorf("list: %v", err)
-	}
-	f = oldAgent()
-	if _, _, _, err := clickPoint(ctx, f.call, clickIn{Window: "Options", X: 1, Y: 1}); err == nil || !strings.Contains(err.Error(), "vm_update_agent") {
-		t.Errorf("click: %v", err)
-	}
-	// A focus by handle must not reach an agent that ignores handle (it would focus by an empty title).
-	f = oldAgent()
-	if _, err := focusWindow(ctx, f.call, titleIn{Handle: 10}); err == nil || slices.Contains(f.ops, proto.OpFocusWindow) {
-		t.Errorf("focus by handle: %v, ops %v", err, f.ops)
-	}
-	f = oldAgent()
-	if _, err := focusWindow(ctx, f.call, titleIn{Title: "note"}); err == nil || !strings.Contains(err.Error(), "vm_update_agent") || slices.Contains(f.ops, proto.OpFocusWindow) {
-		t.Errorf("focus by title: %v, ops %v", err, f.ops)
-	}
-}
-
-func TestClickPoint(t *testing.T) {
-	ctx := context.Background()
-	f := newAgent(10)
-	if x, y, hit, err := clickPoint(ctx, f.call, clickIn{Window: "options", X: 10, Y: 20}); err != nil || x != 110 || y != 70 || hit.Handle != 10 {
-		t.Fatalf("ok: %d %d %+v %v", x, y, hit, err)
-	}
-	if p := f.args[1].(proto.PointArgs); p != (proto.PointArgs{X: 110, Y: 70}) {
-		t.Errorf("window_at asked for %+v", p)
-	}
-	// Plain coordinates never ask the agent.
-	f = newAgent(10)
-	if x, y, hit, err := clickPoint(ctx, f.call, clickIn{X: 5, Y: 6}); err != nil || x != 5 || y != 6 || hit.Handle != 0 || len(f.ops) != 0 {
-		t.Errorf("plain: %d %d %v %v", x, y, err, f.ops)
-	}
-	// Every refusal is an error; window_at is not asked once an earlier check fails.
-	for _, c := range []struct {
-		in   clickIn
-		at   uint64
-		want string
-	}{
-		{clickIn{Window: "autocad"}, 10, "pass handle instead"},
-		{clickIn{Handle: 30}, 10, "not in the foreground"},
-		{clickIn{Handle: 10, X: 900}, 10, "outside"},
-		{clickIn{Handle: 10, X: 1, Y: 1}, 30, "covered by window"},
-		{clickIn{Handle: 10, X: 1, Y: 1}, 0, "off screen"},
-	} {
-		f := newAgent(c.at)
-		_, _, _, err := clickPoint(ctx, f.call, c.in)
-		if err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("%+v: want %q, got %v", c.in, c.want, err)
-		}
-		if c.want != "covered by window" && c.want != "off screen" && slices.Contains(f.ops, proto.OpWindowAt) {
-			t.Errorf("%+v: window_at asked after a failed check", c.in)
-		}
-	}
-}
-
-func TestFocusWindowTool(t *testing.T) {
-	ctx := context.Background()
-	f := newAgent(10)
-	if _, err := focusWindow(ctx, f.call, titleIn{}); err == nil || len(f.ops) != 0 {
-		t.Errorf("empty: %v %v", err, f.ops)
-	}
-	f = newAgent(10)
-	r, err := focusWindow(ctx, f.call, titleIn{Handle: 10})
-	if err != nil || resultText(r) != "focused: Options\nhandle: 10" {
-		t.Fatalf("handle: %v %v", r, err)
-	}
-	if !slices.Equal(f.ops, []string{proto.OpListWindows, proto.OpFocusWindow}) || f.args[1].(proto.TitleArgs).Handle != 10 {
-		t.Errorf("ops %v args %+v", f.ops, f.args)
-	}
-}
-
-func TestFocusWindowSelection(t *testing.T) {
-	for _, in := range []titleIn{{Title: "OPTIONS", Exact: true, PID: 100}, {Handle: 10, PID: 100, Title: "ignored", Exact: true}} {
-		f := newAgent(10)
-		if _, err := focusWindow(context.Background(), f.call, in); err != nil {
-			t.Fatal(err)
-		}
-		if !slices.Equal(f.ops, []string{proto.OpListWindows, proto.OpFocusWindow}) {
-			t.Fatalf("ops: %v", f.ops)
-		}
-		if got := f.args[1].(proto.TitleArgs); got != (proto.TitleArgs{Handle: 10}) {
-			t.Errorf("focus must use resolved handle only: %+v", got)
-		}
-	}
-	for _, in := range []titleIn{{Title: "autocad"}, {PID: 100}, {Handle: 10, PID: 200}, {Title: "Option", Exact: true}} {
-		f := newAgent(10)
-		if _, err := focusWindow(context.Background(), f.call, in); err == nil {
-			t.Errorf("want refusal: %+v", in)
-		}
-		if slices.Contains(f.ops, proto.OpFocusWindow) {
-			t.Errorf("focus called after selection refusal: %+v", in)
-		}
-	}
-}
-
-func TestClickPointSelection(t *testing.T) {
-	for _, in := range []clickIn{{Window: "OPTIONS", PID: 100, Exact: true, X: 1, Y: 2}, {Handle: 10, PID: 100, Window: "ignored", Exact: true, X: 1, Y: 2}} {
-		f := newAgent(10)
-		if x, y, _, err := clickPoint(context.Background(), f.call, in); err != nil || x != 101 || y != 52 {
-			t.Errorf("%+v: %d %d %v", in, x, y, err)
-		}
-	}
-	for _, in := range []clickIn{{PID: 100}, {Handle: 10, PID: 200}, {Window: "Option", Exact: true}, {Exact: true}} {
-		f := newAgent(10)
-		if _, _, _, err := clickPoint(context.Background(), f.call, in); err == nil {
-			t.Errorf("want refusal: %+v", in)
-		}
-		if slices.Contains(f.ops, proto.OpWindowAt) {
-			t.Errorf("hit testing called after selection refusal: %+v", in)
-		}
-	}
-	// A PID-only selector must select a window, never fall back to absolute coordinates.
-	f := newAgent(30)
-	if _, _, _, err := clickPoint(context.Background(), f.call, clickIn{PID: 200}); err == nil || !strings.Contains(err.Error(), "foreground") {
-		t.Errorf("PID-only background: %v", err)
 	}
 }
