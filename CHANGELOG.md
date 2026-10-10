@@ -67,6 +67,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Window integrity inspection uses an aligned token-information buffer and preserves SID pointer provenance, avoiding a crash under Go's race/checkptr instrumentation.
 - `vm_install_agent` confirms the per-installation ID returned by the newly launched agent, so an older running process (including the same version) cannot report success early. Readiness polling stops promptly on cancellation.
+- UI Automation provider failures, including read-only or disabled controls, remain operation failures instead of reporting the responding agent as offline or falling back to raw keyboard input.
 
 ## [0.2.0] - 2026-10-07
 

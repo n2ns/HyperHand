@@ -172,10 +172,13 @@ func (a *action) windows() (*proto.WindowsResult, error) {
 	return ws, nil
 }
 
-// agentRequired turns a transport failure into agent_required; agent-side refusals (agent_outdated) pass through.
+// agentRequired turns a transport failure into agent_required; errors returned
+// by a responding agent (including UI Automation provider failures) pass through.
 func agentRequired(err error) error {
 	te := asToolError(err)
-	if te.Code != codeFailed {
+	// listWindowsResult may already have rendered the underlying error as a
+	// toolError; inspect its reason as well as a still-wrapped transport error.
+	if te.Code != codeFailed || (!agentUnreachable(err) && !agentUnreachable(errors.New(te.Reason))) {
 		return te
 	}
 	return refuse(codeAgentRequired, "call vm_status; if the agent is not running, vm_install_agent, or act without observation_id and handle (raw screen input)", nil, "the guest agent did not answer: %v", err)

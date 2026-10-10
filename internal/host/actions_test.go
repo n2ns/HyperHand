@@ -438,7 +438,10 @@ func TestSetValue(t *testing.T) {
 	}{
 		{"element not found: runtime id 42.7", codeStaleElement},
 		{"unsupported pattern: SetValue; supported: Invoke, Expand", codeUnsupportedPattern},
-		{"COM error 0x80070005", codeAgentRequired},
+		{"COM error 0x80070005", codeFailed},
+		{"SetValue failed: UI Automation method 3: HRESULT 0x80131509", codeFailed},
+		{"connect to agent: connection refused", codeAgentRequired},
+		{"agent: unexpected EOF", codeAgentRequired},
 	} {
 		td := newTestDeps(t, controlAgent(proto.ControlActionResult{}, errors.New(tt.err)))
 		id := td.put(options(), 1, controlNodes())
@@ -471,6 +474,30 @@ func TestSetValue(t *testing.T) {
 	id = td.put(nil, 1, controlNodes())
 	if r, m := td.call(t, "vm_set_value", map[string]any{"observation_id": id, "index": 1, "value": "abc"}); !r.IsError || m["error"] != codeInvalidArgument {
 		t.Errorf("whole screen: %v", m)
+	}
+}
+
+func TestProviderErrorsDoNotImplyAgentOffline(t *testing.T) {
+	const providerError = "Invoke failed: UI Automation method 3: HRESULT 0x80040200"
+	td := newTestDeps(t, controlAgent(proto.ControlActionResult{}, errors.New(providerError)))
+	id := td.put(options(), 1, controlNodes())
+	r, result := td.call(t, "vm_invoke", map[string]any{"observation_id": id, "index": 1, "action": "Invoke"})
+	if !r.IsError || result["error"] != codeFailed || result["reason"] != providerError || strings.Contains(result["next"].(string), "vm_install_agent") {
+		t.Fatalf("provider response misclassified as offline: %v", result)
+	}
+	r, result = td.call(t, "vm_key", map[string]any{"handle": 10, "keys": "ctrl", "observe_after": "none"})
+	if r.IsError || result["ok"] != true {
+		t.Fatalf("responding agent unusable after provider refusal: %v", result)
+	}
+
+	// A responding agent whose UIA query failed must not silently fall back to
+	// untargeted Hyper-V keyboard input as though it were unreachable.
+	f := newAgent(10)
+	f.errs = map[string]error{proto.OpListWindows: errors.New("focused control: UI Automation method 8 failed")}
+	td = newTestDeps(t, f)
+	r, result = td.call(t, "vm_type", map[string]any{"text": "do not inject", "observe_after": "none"})
+	if !r.IsError || result["error"] != codeFailed || td.b.events() != "" {
+		t.Fatalf("provider failure used raw input fallback: %v; events %q", result, td.b.events())
 	}
 }
 
