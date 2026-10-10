@@ -115,8 +115,8 @@ func (c *Client) callIO(ctx context.Context, op string, args any, src io.Reader,
 			c.verified = false
 		}
 		// Every new connection is checked once: an agent speaking an older protocol is refused with agent_outdated
-		// for every op but ping, so that vm_status and vm_update_agent can still report and replace it.
-		if c.CheckProtocol && !c.verified && op != proto.OpPing {
+		// for every op but ping and update_agent, so that vm_status can still report it and vm_update_agent replace it.
+		if c.CheckProtocol && !c.verified && op != proto.OpPing && op != proto.OpUpdateAgent {
 			var p proto.PingResult
 			var resp proto.Response
 			if _, _, err = c.roundtrip(ctx, &proto.Request{Op: proto.OpPing}, nil, 0, io.Discard, &resp); err == nil {
