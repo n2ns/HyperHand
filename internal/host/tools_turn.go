@@ -20,14 +20,14 @@ type endTurnOut struct {
 
 // take removes and returns the pending waits and the temporary checkpoints (of vm, or of every VM when vm is "") so
 // that vm_end_turn can cancel and delete them outside the lock.
-func (t *turnState) take(vm string) (waits []context.CancelFunc, checkpoints map[string][]string) {
+func (t *turnState) take(vm string) (waits []context.CancelFunc, checkpoints map[string][]tempCheckpoint) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for id, cancel := range t.waits {
 		waits = append(waits, cancel)
 		delete(t.waits, id)
 	}
-	checkpoints = map[string][]string{}
+	checkpoints = map[string][]tempCheckpoint{}
 	for name, cps := range t.checkpoints {
 		if vm == "" || name == vm {
 			checkpoints[name] = cps
@@ -45,14 +45,14 @@ func registerTurn(d *deps) {
 			cancel()
 		}
 		out := endTurnOut{CancelledWaits: len(waits), DeletedCheckpoints: []string{}, Errors: []string{}}
-		for vm, names := range checkpoints {
-			for _, name := range names {
-				if err := d.raw.DeleteCheckpoint(vm, name); err != nil {
-					out.Errors = append(out.Errors, fmt.Sprintf("%s/%s: %v", vm, name, err))
-					d.turn.addTempCheckpoint(vm, name) // keep it for the next vm_end_turn
+		for vm, cps := range checkpoints {
+			for _, c := range cps {
+				if err := d.raw.DeleteCheckpoint(vm, c.ID, false); err != nil {
+					out.Errors = append(out.Errors, fmt.Sprintf("%s/%s: %v", vm, c.Name, err))
+					d.turn.addTempCheckpoint(vm, c) // keep it for the next vm_end_turn
 					continue
 				}
-				out.DeletedCheckpoints = append(out.DeletedCheckpoints, name)
+				out.DeletedCheckpoints = append(out.DeletedCheckpoints, c.Name)
 			}
 		}
 		return jsonResult(out)

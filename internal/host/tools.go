@@ -46,11 +46,17 @@ type turnState struct {
 	mu          sync.Mutex
 	waits       map[int]context.CancelFunc
 	nextWait    int
-	checkpoints map[string][]string // VM name -> names of temporary checkpoints created in this run
+	checkpoints map[string][]tempCheckpoint // VM name -> temporary checkpoints created in this run
+}
+
+// tempCheckpoint is a temporary checkpoint vm_end_turn deletes: its Hyper-V ID and the name it was created with.
+type tempCheckpoint struct {
+	ID   string
+	Name string
 }
 
 func newTurnState() *turnState {
-	return &turnState{waits: map[int]context.CancelFunc{}, checkpoints: map[string][]string{}}
+	return &turnState{waits: map[int]context.CancelFunc{}, checkpoints: map[string][]tempCheckpoint{}}
 }
 
 // addWait registers a wait's cancel function; the returned function unregisters it.
@@ -64,10 +70,23 @@ func (t *turnState) addWait(cancel context.CancelFunc) func() {
 }
 
 // addTempCheckpoint remembers a temporary checkpoint created for vm.
-func (t *turnState) addTempCheckpoint(vm, name string) {
+func (t *turnState) addTempCheckpoint(vm string, c tempCheckpoint) {
 	t.mu.Lock()
-	t.checkpoints[vm] = append(t.checkpoints[vm], name)
+	t.checkpoints[vm] = append(t.checkpoints[vm], c)
 	t.mu.Unlock()
+}
+
+// removeTempCheckpoint forgets the temporary checkpoint with ID id (e.g. after vm_checkpoint_keep renamed it).
+func (t *turnState) removeTempCheckpoint(vm, id string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	cps := t.checkpoints[vm]
+	for i, c := range cps {
+		if c.ID == id {
+			t.checkpoints[vm] = append(cps[:i:i], cps[i+1:]...)
+			return
+		}
+	}
 }
 
 // NewServer builds the MCP server with all HyperHand tools.

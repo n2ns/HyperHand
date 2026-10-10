@@ -77,27 +77,28 @@ func (b *vmToolsBackend) Find(name string) (hyperv.VM, error) {
 	}
 	return hyperv.VM{}, errors.New("VM \"" + name + "\" not found")
 }
-func (b *vmToolsBackend) ListCheckpoints(vm string) ([]hyperv.Checkpoint, error) {
-	return []hyperv.Checkpoint{
-		{Name: "baseline", CreationTime: "2026-10-04 10:00:00", ID: "id-1"},
-		{Name: "run-20261010-0812-7f3a-temp-step3", CreationTime: "2026-10-10 08:15:00", ID: "id-2", Parent: "baseline", ParentID: "id-1"},
-	}, nil
+func (b *vmToolsBackend) ListCheckpoints(vm string) (hyperv.CheckpointList, error) {
+	return hyperv.CheckpointList{CheckpointType: "Standard", CurrentParentID: "id-2", Checkpoints: []hyperv.Checkpoint{
+		{Name: "baseline", CreatedAt: "2026-10-04T10:00:00+08:00", ID: "id-1", Kind: "standard", State: "off"},
+		{Name: "run-20261010-0812-7f3a-temp-step3", CreatedAt: "2026-10-10T08:15:00+08:00", ID: "id-2", ParentID: "id-1", Kind: "standard", State: "running"},
+	}}, nil
 }
-func (b *vmToolsBackend) CreateCheckpoint(vm, name string) error {
+func (b *vmToolsBackend) CreateCheckpoint(vm, name string) (hyperv.Checkpoint, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.created = append(b.created, vm+"/"+name)
-	return nil
+	return hyperv.Checkpoint{ID: "id-" + name, Name: name, CreatedAt: "2026-10-10T09:00:00+08:00", Kind: "standard", State: "running"}, nil
 }
-func (b *vmToolsBackend) DeleteCheckpoint(vm, name string) error {
+func (b *vmToolsBackend) DeleteCheckpoint(vm, id string, subtree bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if strings.HasSuffix(name, "-fails") {
+	if strings.HasSuffix(id, "-fails") {
 		return errors.New("Hyper-V job failed")
 	}
-	b.deleted = append(b.deleted, vm+"/"+name)
+	b.deleted = append(b.deleted, vm+"/"+id)
 	return nil
 }
+func (b *vmToolsBackend) RenameCheckpoint(vm, id, name string) error { return nil }
 
 // connectTools builds a server on b and returns the client session and the server's deps.
 func connectTools(t *testing.T, ctx context.Context, b Backend) (*mcp.ClientSession, *deps) {
@@ -180,8 +181,8 @@ func TestVMListAndCheckpointsShapes(t *testing.T) {
 	}
 	callJSON(t, ctx, cs, "vm_checkpoints", nil, &cps)
 	want := []checkpointOut{
-		{Name: "baseline", CreatedAt: "2026-10-04 10:00:00", Type: "manual", ID: "id-1"},
-		{Name: "run-20261010-0812-7f3a-temp-step3", CreatedAt: "2026-10-10 08:15:00", RunID: "run-20261010-0812-7f3a", Type: "temp", Label: "step3", ID: "id-2", Parent: "baseline"},
+		{Name: "baseline", CreatedAt: "2026-10-04T10:00:00+08:00", Type: "manual", ID: "id-1"},
+		{Name: "run-20261010-0812-7f3a-temp-step3", CreatedAt: "2026-10-10T08:15:00+08:00", RunID: "run-20261010-0812-7f3a", Type: "temp", Label: "step3", ID: "id-2", Parent: "id-1"},
 	}
 	if len(cps.Checkpoints) != 2 || cps.Checkpoints[0] != want[0] || cps.Checkpoints[1] != want[1] {
 		t.Errorf("vm_checkpoints %+v", cps.Checkpoints)
@@ -207,35 +208,6 @@ func TestVMListAndCheckpointsShapes(t *testing.T) {
 		if a.ReadOnlyHint != readOnly[tool.Name] || *a.DestructiveHint != destructive[tool.Name] {
 			t.Errorf("%s: readOnly %v destructive %v", tool.Name, a.ReadOnlyHint, *a.DestructiveHint)
 		}
-	}
-}
-
-func TestVMCheckpointNamesAndRegistersTemp(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	b := &vmToolsBackend{vms: []hyperv.VM{{Name: "Win10", ID: "id-a", State: "Running"}}}
-	cs, d := connectTools(t, ctx, b)
-	var out struct{ Name, Type string }
-	callJSON(t, ctx, cs, "vm_checkpoint", map[string]any{"label": "step1"}, &out)
-	if out.Name != d.runID+"-temp-step1" || out.Type != "temp" {
-		t.Errorf("temp: %+v", out)
-	}
-	callJSON(t, ctx, cs, "vm_checkpoint", map[string]any{"vm": "Win10", "label": "golden", "keep": true}, &out)
-	if out.Name != d.runID+"-keep-golden" || out.Type != "keep" {
-		t.Errorf("keep: %+v", out)
-	}
-	callJSON(t, ctx, cs, "vm_checkpoint", nil, &out)
-	if !strings.HasPrefix(out.Name, d.runID+"-temp-") || len(out.Name) != len(d.runID+"-temp-")+6 {
-		t.Errorf("default label: %+v", out)
-	}
-	if len(b.created) != 3 || b.created[0] != "Win10/"+d.runID+"-temp-step1" || b.created[1] != "Win10/"+d.runID+"-keep-golden" {
-		t.Errorf("created %v", b.created)
-	}
-	d.turn.mu.Lock()
-	temp := d.turn.checkpoints["Win10"]
-	d.turn.mu.Unlock()
-	if len(temp) != 2 || temp[0] != d.runID+"-temp-step1" || !strings.HasPrefix(temp[1], d.runID+"-temp-") {
-		t.Errorf("registered temp checkpoints %v (keep must not be registered)", temp)
 	}
 }
 

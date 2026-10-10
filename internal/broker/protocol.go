@@ -39,6 +39,8 @@ type request struct {
 	Delta     int      `json:"delta,omitempty"`
 	Count     int      `json:"count,omitempty"`
 	Modifiers []string `json:"modifiers,omitempty"`
+	ID        string   `json:"id,omitempty"`      // checkpoint GUID for checkpoint_restore, checkpoint_delete, checkpoint_rename
+	Subtree   bool     `json:"subtree,omitempty"` // checkpoint_delete: the checkpoint and all its descendants
 }
 
 type response struct {
@@ -50,7 +52,7 @@ type response struct {
 
 func operationTimeout(op string) time.Duration {
 	switch op {
-	case "copy", "checkpoint_create", "checkpoint_restore", "checkpoint_delete":
+	case "copy", "checkpoint_create", "checkpoint_restore", "checkpoint_delete", "checkpoint_rename":
 		return 15 * time.Minute
 	case "start", "stop":
 		return time.Minute
@@ -122,7 +124,7 @@ func validateRequest(r request, size int64) error {
 		return errors.New("unexpected broker payload")
 	}
 	switch r.Op {
-	case "list", "find", "start", "stop", "shutdown", "checkpoints", "checkpoint_create", "checkpoint_restore", "checkpoint_delete", "screenshot", "keys", "text", "dial":
+	case "list", "find", "start", "stop", "shutdown", "checkpoints", "checkpoint_create", "checkpoint_restore", "checkpoint_delete", "checkpoint_rename", "screenshot", "keys", "text", "dial":
 	case "click":
 		if r.Button < 1 || r.Button > 3 {
 			return errors.New("invalid mouse button")
@@ -145,8 +147,11 @@ func validateRequest(r request, size int64) error {
 	default:
 		return fmt.Errorf("unsupported broker operation %q", r.Op)
 	}
-	if (r.Op == "checkpoint_create" || r.Op == "checkpoint_restore" || r.Op == "checkpoint_delete") && r.Name == "" {
+	if (r.Op == "checkpoint_create" || r.Op == "checkpoint_rename") && r.Name == "" {
 		return errors.New("checkpoint name required")
+	}
+	if (r.Op == "checkpoint_restore" || r.Op == "checkpoint_delete" || r.Op == "checkpoint_rename") && !isGUID(r.ID) {
+		return errors.New("checkpoint id must be a GUID")
 	}
 	if r.Op == "click" || r.Op == "drag" || r.Op == "scroll" {
 		if r.X < 0 || r.Y < 0 || r.X > 65535 || r.Y > 65535 || r.X2 < 0 || r.Y2 < 0 || r.X2 > 65535 || r.Y2 > 65535 {
@@ -157,4 +162,24 @@ func validateRequest(r request, size int64) error {
 		return errors.New("invalid scroll delta")
 	}
 	return nil
+}
+
+// isGUID reports whether s is a GUID in the 8-4-4-4-12 hexadecimal form (as Get-VMSnapshot prints Id).
+func isGUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+				return false
+			}
+		}
+	}
+	return true
 }

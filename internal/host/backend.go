@@ -15,10 +15,11 @@ type Backend interface {
 	Start(string) error
 	Stop(string) error
 	Shutdown(string) error
-	ListCheckpoints(string) ([]hyperv.Checkpoint, error)
-	CreateCheckpoint(string, string) error
-	RestoreCheckpoint(string, string) error
-	DeleteCheckpoint(vm, name string) error // removes one checkpoint (not its children); implemented by vm_end_turn's work
+	ListCheckpoints(vm string) (hyperv.CheckpointList, error)
+	CreateCheckpoint(vm, name string) (hyperv.Checkpoint, error)
+	RestoreCheckpoint(vm, id string) error
+	DeleteCheckpoint(vm, id string, subtree bool) error // one checkpoint (children re-parented) or its whole subtree
+	RenameCheckpoint(vm, id, name string) error
 	Screenshot(string) ([]byte, int, int, error)
 	Click(vm string, x, y, button, count int, modifiers []string) error
 	Drag(vm string, x1, y1, x2, y2 int, modifiers []string) error

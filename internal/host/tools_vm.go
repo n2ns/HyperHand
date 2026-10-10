@@ -48,7 +48,8 @@ type checkpointIn struct {
 }
 type restoreIn struct {
 	VM    string `json:"vm,omitempty" jsonschema:"VM name; default: the only running VM"`
-	Name  string `json:"name" jsonschema:"checkpoint name, exactly as vm_checkpoints lists it"`
+	ID    string `json:"id,omitempty" jsonschema:"checkpoint id from vm_checkpoints (preferred)"`
+	Name  string `json:"name,omitempty" jsonschema:"checkpoint name, accepted when exactly one checkpoint has it"`
 	Start *bool  `json:"start,omitempty" jsonschema:"start the VM after restoring if it is not running; default true"`
 }
 type waitIn struct {
@@ -314,14 +315,14 @@ func registerVM(d *deps) {
 		return jsonResult(vmState{VM: v.Name, State: "off"})
 	})
 	addToolIn(d, toolSpec{name: "vm_checkpoints", desc: "List the VM's checkpoints, oldest first: name, created_at, id, parent (the parent checkpoint's name), and for checkpoints HyperHand created the run_id, type (temp: vm_end_turn deletes it; keep) and label; other checkpoints have type manual.", readOnly: true, idempotent: true}, func(ctx context.Context, in vmIn) (*mcp.CallToolResult, error) {
-		cps, err := backend.ListCheckpoints(in.VM)
+		l, err := backend.ListCheckpoints(in.VM)
 		if err != nil {
 			return nil, vmErr(err)
 		}
-		out := make([]checkpointOut, 0, len(cps))
-		for _, c := range cps {
+		out := make([]checkpointOut, 0, len(l.Checkpoints))
+		for _, c := range l.Checkpoints {
 			runID, typ, label := parseCheckpointName(c.Name)
-			out = append(out, checkpointOut{Name: c.Name, CreatedAt: c.CreationTime, RunID: runID, Type: typ, Label: label, ID: c.ID, Parent: c.Parent})
+			out = append(out, checkpointOut{Name: c.Name, CreatedAt: c.CreatedAt, RunID: runID, Type: typ, Label: label, ID: c.ID, Parent: c.ParentID})
 		}
 		return jsonResult(map[string]any{"checkpoints": out})
 	})
@@ -335,28 +336,35 @@ func registerVM(d *deps) {
 			label = time.Now().Format("150405")
 		}
 		name := checkpointName(d.runID, label, in.Keep)
-		if err := backend.CreateCheckpoint(v.Name, name); err != nil {
+		c, err := backend.CreateCheckpoint(v.Name, name)
+		if err != nil {
 			return nil, err
 		}
 		typ := checkpointTemp
 		if in.Keep {
 			typ = checkpointKeep
 		} else {
-			d.turn.addTempCheckpoint(v.Name, name)
+			d.turn.addTempCheckpoint(v.Name, tempCheckpoint{ID: c.ID, Name: name})
 		}
-		return jsonResult(map[string]any{"name": name, "type": typ, "created_at": time.Now().UTC().Format(time.RFC3339)})
+		return jsonResult(map[string]any{"id": c.ID, "name": name, "type": typ, "created_at": c.CreatedAt})
 	})
 	addToolIn(d, toolSpec{name: "vm_restore", desc: "Restore a checkpoint (exact name from vm_checkpoints), then start the VM if it is not running (unless start is false). The guest's current state is replaced by the checkpoint's.", destructive: true}, func(ctx context.Context, in restoreIn) (*mcp.CallToolResult, error) {
-		if in.Name == "" {
-			return nil, refuse(codeInvalidArgument, "call vm_checkpoints and pass a name", nil, "name is required")
+		if in.ID == "" && in.Name == "" {
+			return nil, refuse(codeInvalidArgument, "call vm_checkpoints and pass an id", nil, "id (or name) is required")
 		}
 		v, err := backend.Find(in.VM) // resolve "" now: after the restore the VM may be off
 		if err != nil {
 			return nil, vmErr(err)
 		}
-		if err := backend.RestoreCheckpoint(v.Name, in.Name); err != nil {
+		id := in.ID
+		if id == "" {
+			if id, err = checkpointIDByName(backend, v.Name, in.Name); err != nil {
+				return nil, err
+			}
+		}
+		if err := backend.RestoreCheckpoint(v.Name, id); err != nil {
 			if strings.Contains(err.Error(), "checkpoint not found") {
-				return nil, refuse(codeInvalidArgument, "call vm_checkpoints and pass a listed name", nil, "%v", err)
+				return nil, refuse(codeNoCheckpoint, "call vm_checkpoints and pass a listed id", nil, "%v", err)
 			}
 			return nil, err
 		}
@@ -717,4 +725,25 @@ func pullFile(ctx context.Context, c *Client, guestPath, hostPath string) (int64
 		return 0, err
 	}
 	return n, nil
+}
+
+// checkpointIDByName resolves a checkpoint name to its id; a name several checkpoints share is ambiguous_target.
+func checkpointIDByName(b Backend, vm, name string) (string, error) {
+	l, err := b.ListCheckpoints(vm)
+	if err != nil {
+		return "", err
+	}
+	var ids []string
+	for _, c := range l.Checkpoints {
+		if c.Name == name {
+			ids = append(ids, c.ID)
+		}
+	}
+	switch len(ids) {
+	case 0:
+		return "", refuse(codeNoCheckpoint, "call vm_checkpoints and pass a listed id", nil, "no checkpoint is named %q", name)
+	case 1:
+		return ids[0], nil
+	}
+	return "", refuse(codeAmbiguousTarget, "pass id instead of name", map[string]any{"ids": ids}, "%d checkpoints are named %q", len(ids), name)
 }

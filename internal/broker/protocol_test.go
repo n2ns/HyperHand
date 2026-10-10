@@ -62,12 +62,34 @@ func TestOperationBoundary(t *testing.T) {
 }
 
 func TestCheckpointOperationsAccepted(t *testing.T) {
-	for _, op := range []string{"checkpoint_create", "checkpoint_restore", "checkpoint_delete"} {
-		if err := validateRequest(request{Op: op, VM: "Win10", Name: "run-20261010-0812-7f3a-temp-step1"}, 0); err != nil {
+	const id = "c85ca8fb-dfc1-4aa3-8f36-532949376cd2"
+	for _, op := range []string{"checkpoint_create", "checkpoint_restore", "checkpoint_delete", "checkpoint_rename"} {
+		if err := validateRequest(request{Op: op, VM: "Win10", Name: "run-20261010-0812-7f3a-temp-step1", ID: id}, 0); err != nil {
 			t.Errorf("%s: %v", op, err)
 		}
 		if operationTimeout(op) != 15*time.Minute {
 			t.Errorf("%s timeout %v", op, operationTimeout(op))
+		}
+	}
+	// Operations on an existing checkpoint take its GUID, never a name alone; create and rename need a name.
+	for _, op := range []string{"checkpoint_restore", "checkpoint_delete", "checkpoint_rename"} {
+		if err := validateRequest(request{Op: op, VM: "Win10", Name: "x", ID: "not-a-guid"}, 0); err == nil {
+			t.Errorf("%s accepted a non-GUID id", op)
+		}
+	}
+	for _, op := range []string{"checkpoint_create", "checkpoint_rename"} {
+		if err := validateRequest(request{Op: op, VM: "Win10", ID: id}, 0); err == nil {
+			t.Errorf("%s accepted an empty name", op)
+		}
+	}
+	for _, g := range []string{id, "C85CA8FB-DFC1-4AA3-8F36-532949376CD2"} {
+		if !isGUID(g) {
+			t.Errorf("isGUID(%q) = false", g)
+		}
+	}
+	for _, g := range []string{"", "c85ca8fb-dfc1-4aa3-8f36-532949376cd", "c85ca8fbxdfc1-4aa3-8f36-532949376cd2", "{c85ca8fb-dfc1-4aa3-8f36-532949376cd2}"} {
+		if isGUID(g) {
+			t.Errorf("isGUID(%q) = true", g)
 		}
 	}
 }

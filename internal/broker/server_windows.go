@@ -271,11 +271,13 @@ func (s *server) handle(c net.Conn) {
 	case "checkpoints":
 		value, err = hyperv.ListCheckpoints(r.VM)
 	case "checkpoint_create":
-		err = hyperv.CreateCheckpoint(r.VM, r.Name)
+		value, err = hyperv.CreateCheckpoint(r.VM, r.Name)
 	case "checkpoint_restore":
-		err = hyperv.RestoreCheckpoint(r.VM, r.Name)
+		err = hyperv.RestoreCheckpoint(r.VM, r.ID)
 	case "checkpoint_delete":
-		err = hyperv.DeleteCheckpoint(r.VM, r.Name)
+		err = hyperv.DeleteCheckpoint(r.VM, r.ID, r.Subtree)
+	case "checkpoint_rename":
+		err = hyperv.RenameCheckpoint(r.VM, r.ID, r.Name)
 	case "screenshot":
 		payload, out.Width, out.Height, err = screenshotReady(s.ctx, r.VM)
 	case "click":

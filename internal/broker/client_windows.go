@@ -120,19 +120,24 @@ func (Client) Stop(vm string) error  { return call(request{Op: "stop", VM: vm}) 
 func (Client) Shutdown(vm string) error {
 	return call(request{Op: "shutdown", VM: vm})
 }
-func (Client) ListCheckpoints(vm string) ([]hyperv.Checkpoint, error) {
-	var v []hyperv.Checkpoint
+func (Client) ListCheckpoints(vm string) (hyperv.CheckpointList, error) {
+	var v hyperv.CheckpointList
 	err := decode(request{Op: "checkpoints", VM: vm}, &v)
 	return v, err
 }
-func (Client) CreateCheckpoint(vm, name string) error {
-	return call(request{Op: "checkpoint_create", VM: vm, Name: name})
+func (Client) CreateCheckpoint(vm, name string) (hyperv.Checkpoint, error) {
+	var v hyperv.Checkpoint
+	err := decode(request{Op: "checkpoint_create", VM: vm, Name: name}, &v)
+	return v, err
 }
-func (Client) DeleteCheckpoint(vm, name string) error {
-	return call(request{Op: "checkpoint_delete", VM: vm, Name: name})
+func (Client) DeleteCheckpoint(vm, id string, subtree bool) error {
+	return call(request{Op: "checkpoint_delete", VM: vm, ID: id, Subtree: subtree})
 }
-func (Client) RestoreCheckpoint(vm, name string) error {
-	return call(request{Op: "checkpoint_restore", VM: vm, Name: name})
+func (Client) RestoreCheckpoint(vm, id string) error {
+	return call(request{Op: "checkpoint_restore", VM: vm, ID: id})
+}
+func (Client) RenameCheckpoint(vm, id, name string) error {
+	return call(request{Op: "checkpoint_rename", VM: vm, ID: id, Name: name})
 }
 func (Client) Screenshot(vm string) ([]byte, int, int, error) {
 	out, b, err := rpc(request{Op: "screenshot", VM: vm}, nil, 0)

@@ -6,7 +6,6 @@ package hyperv
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -318,94 +317,6 @@ func CopyToGuest(vm, hostPath, guestPath string) error {
 if ($gs -and -not $gs.Enabled) { Enable-VMIntegrationService -VMIntegrationService $gs; Start-Sleep -Seconds 3 }
 Copy-VMFile -VM $vm -SourcePath `+psq(hostPath)+` -DestinationPath `+psq(guestPath)+` -CreateFullPath -FileSource Host -Force`)
 	return err
-}
-
-// Checkpoint is one VM checkpoint. ID is the snapshot GUID (the second part of the Msvm_VirtualSystemSettingData
-// InstanceID "Microsoft:<vm id>\<snapshot id>"); Parent and ParentID name the parent checkpoint, empty for a root.
-type Checkpoint struct {
-	Name         string `json:"Name"`
-	CreationTime string `json:"CreationTime"`
-	ID           string `json:"Id"`
-	Parent       string `json:"ParentSnapshotName"`
-	ParentID     string `json:"ParentSnapshotId"`
-}
-
-func ListCheckpoints(vm string) ([]Checkpoint, error) {
-	out, err := vmScript(vm, `$c=@(Get-VMSnapshot -VM $vm | Sort-Object CreationTime | Select-Object Name,@{n='CreationTime';e={$_.CreationTime.ToString('yyyy-MM-dd HH:mm:ss')}},@{n='Id';e={[string]$_.Id}},@{n='ParentSnapshotName';e={[string]$_.ParentSnapshotName}},@{n='ParentSnapshotId';e={[string]$_.ParentSnapshotId}})
-if ($c.Count) { ConvertTo-Json -InputObject $c -Compress }`)
-	if err != nil {
-		return nil, err
-	}
-	return parseCheckpoints(out)
-}
-
-func CreateCheckpoint(vm, name string) error {
-	_, err := vmScript(vm, `Checkpoint-VM -VM $vm -SnapshotName `+psq(name))
-	return err
-}
-
-// RestoreCheckpoint applies a checkpoint (exact, case-sensitive name; no wildcards).
-// Hyper-V determines the restored power state; a running standard checkpoint can resume directly.
-func RestoreCheckpoint(vm, name string) error {
-	_, err := vmScript(vm, `$c=Get-VMSnapshot -VM $vm | Where-Object { $_.Name -ceq `+psq(name)+` } | Select-Object -First 1
-if (-not $c) { throw ('checkpoint not found: ' + `+psq(name)+`) }
-$c | Restore-VMSnapshot -Confirm:$false`)
-	return err
-}
-
-// DeleteCheckpoint removes the checkpoint with the exact, case-sensitive name (not its children, which are
-// re-parented) through Msvm_VirtualSystemSnapshotService.DestroySnapshot and waits for the job.
-// https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/destroysnapshot-msvm-virtualsystemsnapshotservice
-func DeleteCheckpoint(vm, name string) error {
-	return withWMI(func(s *session) error {
-		o, err := s.find(vm)
-		if err != nil {
-			return err
-		}
-		settings, err := s.assoc(o, "Msvm_VirtualSystemSettingData")
-		if err != nil {
-			return err
-		}
-		// A snapshot's settings are associated with the VM through several association classes (SnapshotOfVirtualSystem,
-		// MostCurrentSnapshotInBranch, ...), so the same object can appear more than once: identify it by InstanceID.
-		var target *ole.IDispatch
-		targetID := ""
-		for _, sd := range settings {
-			if strings.HasPrefix(fmt.Sprint(s.get(sd, "VirtualSystemType")), "Microsoft:Hyper-V:Snapshot:") && fmt.Sprint(s.get(sd, "ElementName")) == name {
-				id := fmt.Sprint(s.get(sd, "InstanceID"))
-				if target != nil && id != targetID {
-					return fmt.Errorf("several checkpoints are named %q", name)
-				}
-				target, targetID = sd, id
-			}
-		}
-		if target == nil {
-			return fmt.Errorf("checkpoint not found: %s", name)
-		}
-		svc, err := s.one("SELECT * FROM Msvm_VirtualSystemSnapshotService")
-		if err != nil {
-			return err
-		}
-		out, err := s.call(svc, "DestroySnapshot", "AffectedSnapshot", s.path(target))
-		if err != nil {
-			return err
-		}
-		return s.awaitJob(out, "DestroySnapshot", 15*time.Minute)
-	})
-}
-
-// parseCheckpoints reads ConvertTo-Json output: an array, a single object, or nothing.
-func parseCheckpoints(out []byte) ([]Checkpoint, error) {
-	out = bytes.TrimSpace(bytes.TrimPrefix(out, []byte("\xef\xbb\xbf")))
-	if len(out) == 0 {
-		return nil, nil
-	}
-	var cps []Checkpoint
-	if out[0] == '{' {
-		cps = make([]Checkpoint, 1)
-		return cps, json.Unmarshal(out, &cps[0])
-	}
-	return cps, json.Unmarshal(out, &cps)
 }
 
 func psq(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }

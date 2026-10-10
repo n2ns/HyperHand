@@ -28,8 +28,8 @@ func (b *lifecycleBackend) Start(name string) error {
 	b.state = "Running"
 	return nil
 }
-func (b *lifecycleBackend) RestoreCheckpoint(vm, name string) error {
-	b.calls = append(b.calls, "restore:"+vm+":"+name)
+func (b *lifecycleBackend) RestoreCheckpoint(vm, id string) error {
+	b.calls = append(b.calls, "restore:"+vm+":"+id)
 	b.state = "Off"
 	return b.restoreErr
 }
@@ -41,9 +41,9 @@ func TestRestoreThroughBackend(t *testing.T) {
 		fail bool
 		want []string
 	}{
-		{"default starts", map[string]any{"name": "baseline"}, false, []string{"find:", "restore:test:baseline", "find:test", "start:test"}},
-		{"stay off", map[string]any{"vm": "test", "name": "baseline", "start": false}, false, []string{"find:test", "restore:test:baseline", "find:test"}},
-		{"failure does not start", map[string]any{"name": "baseline"}, true, []string{"find:", "restore:test:baseline"}},
+		{"default starts", map[string]any{"id": "baseline"}, false, []string{"find:", "restore:test:baseline", "find:test", "start:test"}},
+		{"stay off", map[string]any{"vm": "test", "id": "baseline", "start": false}, false, []string{"find:test", "restore:test:baseline", "find:test"}},
+		{"failure does not start", map[string]any{"id": "baseline"}, true, []string{"find:", "restore:test:baseline"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := &lifecycleBackend{state: "Running"}

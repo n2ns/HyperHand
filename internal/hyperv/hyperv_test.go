@@ -199,18 +199,20 @@ func TestVariantBytes(t *testing.T) {
 }
 
 func TestParseCheckpoints(t *testing.T) {
-	one := Checkpoint{Name: "干净", CreationTime: "2026-10-04 10:00:00", ID: "11111111-2222-3333-4444-555555555555"}
-	child := Checkpoint{Name: "b", CreationTime: "x", ID: "66666666-7777-8888-9999-000000000000", Parent: "干净", ParentID: one.ID}
-	cases := map[string][]Checkpoint{
-		"": nil,
-		"\xef\xbb\xbf{\"Name\":\"干净\",\"CreationTime\":\"2026-10-04 10:00:00\",\"Id\":\"11111111-2222-3333-4444-555555555555\",\"ParentSnapshotName\":\"\",\"ParentSnapshotId\":\"\"}\r\n": {one},
-		`[{"Name":"干净","CreationTime":"2026-10-04 10:00:00","Id":"11111111-2222-3333-4444-555555555555","ParentSnapshotName":"","ParentSnapshotId":""},` +
-			`{"Name":"b","CreationTime":"x","Id":"66666666-7777-8888-9999-000000000000","ParentSnapshotName":"干净","ParentSnapshotId":"11111111-2222-3333-4444-555555555555"}]`: {one, child},
+	one := Checkpoint{ID: "11111111-2222-3333-4444-555555555555", Name: "干净", CreatedAt: "2026-10-04T10:00:00+08:00", Kind: "standard", State: "off"}
+	child := Checkpoint{ID: "66666666-7777-8888-9999-000000000000", Name: "b", ParentID: one.ID, CreatedAt: "2026-10-10T09:05:06+08:00", Kind: "production", State: "running"}
+	cases := map[string]CheckpointList{
+		`{"checkpoint_type":"Standard","current_parent_id":"","checkpoints":null}`: {CheckpointType: "Standard", Checkpoints: []Checkpoint{}},
+		"\xef\xbb\xbf" + `{"checkpoint_type":"Production","current_parent_id":"11111111-2222-3333-4444-555555555555","checkpoints":{"id":"11111111-2222-3333-4444-555555555555","name":"干净","parent_id":"","created_at":"2026-10-04T10:00:00+08:00","kind":"standard","state":"off"}}` + "\r\n":                                                                                                                                                                  {CheckpointType: "Production", CurrentParentID: one.ID, Checkpoints: []Checkpoint{one}},
+		`{"checkpoint_type":"Standard","current_parent_id":"66666666-7777-8888-9999-000000000000","checkpoints":[{"id":"11111111-2222-3333-4444-555555555555","name":"干净","parent_id":"","created_at":"2026-10-04T10:00:00+08:00","kind":"standard","state":"off"},{"id":"66666666-7777-8888-9999-000000000000","name":"b","parent_id":"11111111-2222-3333-4444-555555555555","created_at":"2026-10-10T09:05:06+08:00","kind":"production","state":"running"}]}`: {CheckpointType: "Standard", CurrentParentID: child.ID, Checkpoints: []Checkpoint{one, child}},
 	}
 	for in, want := range cases {
 		got, err := parseCheckpoints([]byte(in))
 		if err != nil || !reflect.DeepEqual(got, want) {
-			t.Errorf("parseCheckpoints(%q) = %v, %v; want %v", in, got, err, want)
+			t.Errorf("parseCheckpoints(%q) = %+v, %v; want %+v", in, got, err, want)
 		}
+	}
+	if _, err := parseCheckpoints([]byte("not json")); err == nil {
+		t.Error("garbage accepted")
 	}
 }

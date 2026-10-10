@@ -29,6 +29,7 @@ const (
 	codeAgentOutdated       = "agent_outdated"      // the agent's protocol is older than proto.Protocol
 	codeAmbiguousTarget     = "ambiguous_target"    // a selector matched several windows
 	codeNoWindow            = "no_window"           // no window matched, or none appeared
+	codeNoCheckpoint        = "no_checkpoint"       // no checkpoint has the given id or name
 )
 
 // toolError is a structured refusal: Code is one of the code constants, Reason says what happened, Next names the
